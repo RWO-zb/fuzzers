@@ -170,10 +170,15 @@ def main():
     siamese_model.cuda()
     siamese_model.load_state_dict(torch.load(r'./tapnet/data/weights/tapnet.pkl'))
     siamese_model.eval()
-    bench_noCrash0 = Hyperparameter.bench_noCrash0
-
-    bench_noCrash0 = [bench_noCrash0]
-    bench_noCrash0 = torch.FloatTensor(np.array(bench_noCrash0)).cuda()
+    bench_noCrash = Hyperparameter.bench_noCrash
+    if len(bench_noCrash) == 0:
+    # 如果为空，创建一个合适的占位符张量
+        bench_noCrash = torch.zeros((1, Hyperparameter.Step, Hyperparameter.Dimension)).cuda()
+    else:
+         bench_noCrash = torch.FloatTensor(np.array(bench_noCrash)).cuda()
+         if len(bench_noCrash.shape) == 2:
+            bench_noCrash = bench_noCrash.unsqueeze(0)  # 添加batch维度
+   
 
     print('nodel:')
     print(siamese_model)
@@ -279,9 +284,7 @@ def main():
             episode_reward += reward[0]
 
             output_obs.append(obs[0])
-
-            if (len(output_obs) == Hyperparameter.Step):
-
+            if (len(output_obs) == Hyperparameter.Step): 
                 ret = predict_siamese.predict_once(siamese_model, bench_noCrash, output_obs)
                 if ret == 1:
                     print('end')

@@ -60,11 +60,24 @@ def load_tapnet_mode():
                    )
     return model
 
-def predict_once(model, bench_noCrash, seq):
+def predict_once(model, bench_noCrash0, seq):
+    # 确保 seq 有正确的形状
+    if len(seq) < Hyperparameter.Step:
+        # 如果序列长度不够，进行填充
+        padding = [[0] * Hyperparameter.Dimension] * (Hyperparameter.Step - len(seq))
+        seq = seq + padding
+    elif len(seq) > Hyperparameter.Step:
+        # 如果序列太长，进行截断
+        seq = seq[:Hyperparameter.Step]
+    
     siameseP2 = [seq]
     siameseP2 = torch.FloatTensor(np.array(siameseP2)).cuda()
-
-    output1 = model(bench_noCrash, siameseP2)
+    
+    # 确保输入张量有正确的形状 [batch_size, seq_len, input_size]
+    if len(siameseP2.shape) == 2:
+        siameseP2 = siameseP2.unsqueeze(0)
+    
+    output1 = model(bench_noCrash0, siameseP2)
     output1 = torch.nn.Sigmoid()(output1)
 
     if output1[0][0] > 0.43:
