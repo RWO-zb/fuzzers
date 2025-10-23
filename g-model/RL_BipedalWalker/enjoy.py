@@ -240,13 +240,14 @@ def main():
     time_of_DynEM = 0
     regular_time = 0
     fuzz_failure_list = []
-
+    all_fuzz_cases_log = []
     #######################################################################################
     trajectory_list = []
     termination_list = []
     failure_flag = False
-
-    while current_time - start_fuzz_time < 3600 * args.hour and len(fuzzer.corpus) > 0:
+    seedcount=0
+    while current_time - start_fuzz_time < 3600 * args.hour and len(fuzzer.corpus) > 0 and seedcount<5000:
+        seedcount+=1
         temp1_time = time.time()
         states = fuzzer.get_pose()
         mutate_states = fuzzer.mutation(states)
@@ -271,7 +272,9 @@ def main():
         time_of_DynEM += temp3_time - temp2_time
         local_sensitivity = np.abs(episode_reward - fuzzer.current_reward)
         print('Density: ', cvg, '\tSensitivity: ', local_sensitivity)
+        status = 'success'
         if done or episode_reward < 10:
+            status = 'failure'
             regular_time = (current_time - start_fuzz_time) / 3600
             pbar1.update(1)
             fuzzer.add_crash(mutate_states)
@@ -288,6 +291,12 @@ def main():
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose)
+        all_fuzz_cases_log.append({
+            'case': mutate_states.tolist(),  # 具体的测试案例
+            'status': status,                 # 状态："success" 或 "failure"
+            'reward': float(episode_reward),  # 记录当次回合的奖励
+            'done': bool(done)                # 记录是否提前终止 (True/False)
+        })
         current_time = time.time()
         time_of_fuzzer += current_time - temp2_time
         print('total reward: ', episode_reward, ', coverage: ', cvg, ', passed time: ', current_time - start_fuzz_time, ', corpus size: ', len(fuzzer.corpus), 'time_of_fuzzer: ', time_of_fuzzer, 'time_of_env: ', time_of_env)
@@ -333,7 +342,9 @@ def main():
     os.makedirs('results', exist_ok=True)
     with open('results/fuzz_failure_count.json', 'w') as f:
         json.dump(fuzz_failure_list, f)
-
+    with open('results/all_fuzz_cases_log.json', 'w') as f:
+        # 使用 indent=4 格式化 JSON，使其更易读
+        json.dump(all_fuzz_cases_log, f, indent=4)
 if __name__ == "__main__":
     # f = open('./results/fuzz.txt', 'w', buffering=1)
     # sys.stdout = f
