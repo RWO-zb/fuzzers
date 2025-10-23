@@ -263,9 +263,12 @@ def main():
     crashF_40 = open('results/crashStateSeqV2_40.txt', mode='a')
     noCrashF_40 = open('results/noCrashStateSeqV2_40.txt', mode='a')
     timeStamp = open('results/timeStamp.txt', mode='a')
-
-    while current_time - start_fuzz_time < 3600 * 4 and len(fuzzer.corpus) > 0:
+    seedsLog = open('results/all_run_seeds.txt', mode='a')
+    seedcount = 0
+    while current_time - start_fuzz_time < 3600 * 4 and len(fuzzer.corpus) > 0 and seedcount <= 5000:
     # while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0:
+        is_crash = False
+        seedcount+=1
         output_obs = []
         temp1_time = time.time()
         states = fuzzer.get_pose()
@@ -299,7 +302,7 @@ def main():
         time_of_DynEM += temp3_time - temp2_time
         local_sensitivity = np.abs(episode_reward - fuzzer.current_reward)
         if done or episode_reward < 10:
-
+            is_crash = True
             if len(output_obs) == Hyperparameter.Step:
                 for i in range(len(output_obs)):
                     outputStr = ''
@@ -411,6 +414,25 @@ def main():
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose)
+        #modify
+        try:
+            outputStr = ''
+            for d in mutate_states: 
+                outputStr = outputStr + str(d) + ', '
+            
+            # 根据标志位添加前缀
+            if is_crash:
+                seedsLog.write(f"[CRASH] {outputStr}\n")
+            else:
+                seedsLog.write(f"[SUCCESS] {outputStr}\n")
+                
+        except TypeError:
+            # 同样处理 TypeError
+            if is_crash:
+                seedsLog.write(f"[CRASH] {str(mutate_states)}\n")
+            else:
+                seedsLog.write(f"[SUCCESS] {str(mutate_states)}\n")
+        #modify
         current_time = time.time()
         time_of_fuzzer += current_time - temp2_time
         print('total reward: ', episode_reward, ', coverage: ', cvg, ', passed time: ', current_time - start_fuzz_time, ', corpus size: ', len(fuzzer.corpus), 'time_of_fuzzer: ', time_of_fuzzer, 'time_of_env: ', time_of_env)
