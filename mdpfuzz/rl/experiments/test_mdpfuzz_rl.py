@@ -25,8 +25,9 @@ RL_NAMES = ['Bipedal Walker', 'Lunar Lander', 'Taxi']
 
 if __name__ == '__main__':
     torch.set_num_threads(1)
-    test_budget = 5000
-    init_budget = 1000
+    test_budget_seconds = 43200
+    #test_budget = 5000
+    init_budget = 3000
 
     tmp = sys.argv[1:]
 
@@ -75,7 +76,8 @@ if __name__ == '__main__':
     fuzzer.fuzzing(
         n=init_budget,
         policy=policy,
-        test_budget=test_budget,
+        #test_budget=test_budget,
+        test_budget_in_seconds=test_budget_seconds,
         saving_path=path,
         local_sensitivity=True,
         save_logs_only=True,

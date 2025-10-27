@@ -87,7 +87,7 @@ def get_inputs_from_keys(keys: Iterable[str]) -> np.ndarray:
     return np.array([np.asfarray(k.split(' '), dtype=str).astype(int) for k in keys])
 
 
-def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descriptors: List = None, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, np.ndarray, float]:
+def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descriptors: List = None, sim_steps: int = 1000) -> Tuple[float, bool, np.ndarray, np.ndarray, float]:
     '''Executes the model on the environment and only computes the 12 features used by Leo Cazenille. It also returns the final state.'''
 
     env = gym.make('BipedalWalkerHardcore-v4',rand_seed=env_seed)
@@ -114,19 +114,20 @@ def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descr
     if descriptors is not None:
         descriptors = np.array(descriptors)
         assert all(descriptors < 12) and all(descriptors >= 0)
-        return acc_reward, (reward == -100), features[descriptors], obs, exec_time
+        return acc_reward, (done or (acc_reward < 10)), features[descriptors], obs, exec_time
     else:
-        return acc_reward, (reward == -100), features, obs, exec_time
+        return acc_reward, (done or (acc_reward < 10)), features, obs, exec_time
 
 
-def execute_policy_trajectory(input: np.ndarray, model: BaseAlgorithm, env_seed: int, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, List[np.ndarray], float]:
+def execute_policy_trajectory(input: np.ndarray, model: BaseAlgorithm, env_seed: int, sim_steps: int = 1000) -> Tuple[float, bool, np.ndarray, List[np.ndarray], float]:
     '''Executes the model and returns the trajectory data. Useful for MDPFuzz.'''
     env = gym.make('BipedalWalkerHardcore-v3', rand_seed=env_seed)
     features = np.zeros(12)
     obs_seq = []
     acc_reward = 0.0
-
+    done=False
     obs = env.reset(input)
+    
     state = None
     t0 = time.time()
     for t in range(sim_steps):
@@ -141,7 +142,7 @@ def execute_policy_trajectory(input: np.ndarray, model: BaseAlgorithm, env_seed:
     env.close()
     features /= t
     exec_time = time.time() - t0
-    return acc_reward, (reward == -100), features, np.array(obs_seq), exec_time
+    return acc_reward, (done or (acc_reward < 10)), features, np.array(obs_seq), exec_time
 
 
 def get_edges(env_seed: int, descriptors: np.ndarray, sim_steps: int = 300) -> np.ndarray:
@@ -162,7 +163,7 @@ if __name__ == '__main__':
 
     for _ in tqdm.tqdm(range(100)):
         input: np.ndarray = rng.integers(low=1, high=4, size=15)
-        r, o, b, fs, _ = execute_policy(input, model, env_seed, descriptors, 300)
+        r, o, b, fs, _ = execute_policy(input, model, env_seed, descriptors, 1000)
         oracles.append(o)
         rewards.append(r)
         behaviors.append(b)

@@ -56,7 +56,7 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=3000, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=1000, type=int)
 
     
     args = parser.parse_args()
@@ -217,7 +217,9 @@ def main():
     start_fuzz_time = time.time()
     current_time = time.time()
     pbar1 = tqdm.tqdm(total=seeds_num)
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 1:
+    seedcount = 0
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 1 and seedcount<5000:
+        seedcount+=1
         states = fuzzer.get_pose()
         mutate_states = fuzzer.mutation(states)
         state = None
@@ -250,6 +252,7 @@ def main():
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward,  entropy, intrinsic_reward, final_state, orig_pose)
         # else:
+        print(f'Total seeds tested: { seedcount}, Crashes found: {len(fuzzer.result)}')
         current_time = time.time()
     if args.guide:
         file_name = './results'+result_folder+'/cure_crash.pkl'
