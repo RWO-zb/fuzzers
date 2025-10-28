@@ -52,7 +52,15 @@ class CureFuzz:
         self.current_intrinsic_reward = None
         self.current_original = None
         self.current_index = None
-                
+
+         # --- 新增属性 ---
+        self.next_seed_id = 0       # 用于分配唯一ID的计数器
+        self.seed_ids = []          # 列表：存储每个种子的唯一ID
+        self.parent_ids = []        # 列表：存储每个种子的父种子ID
+        self.selection_counts = []  # 列表：存储每个种子被挑选的次数
+        self.current_parent_id = None # 临时变量：存储当前被选中种子的ID
+        # --- 结束新增 ---
+
         self.rnd = RND(input_size, hidden_size, output_size)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.rnd = self.rnd.to(self.device)
@@ -66,6 +74,21 @@ class CureFuzz:
             prob = math.exp(-self.rewards[i]*0.1)+self.entropy[i]
             new_prob.append(prob)
         choose_index = np.random.choice(range(len(self.corpus)), 1, p=new_prob/np.array(new_prob).sum())[0]
+
+        # --- 新增：更新挑选次数和设置当前父ID ---
+        self.selection_counts[choose_index] += 1
+        self.current_parent_id = self.seed_ids[choose_index]
+        # --- 结束新增 ---
+
+        # --- 新增：捕获要返回的种子信息 ---
+        selected_info = {
+            'seed_id': self.seed_ids[choose_index],
+            'seed_state': self.corpus[choose_index],
+            'parent_id': self.parent_ids[choose_index],
+            'selection_count': self.selection_counts[choose_index]
+        }
+        # --- 结束新增 ---
+
         self.count[choose_index] -= 1
         self.current_index = choose_index
         self.current_pose = self.corpus[choose_index]
@@ -82,8 +105,17 @@ class CureFuzz:
             self.intrinsic_reward.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
+
+            # --- 新增：同步删除新属性 ---
+            self.seed_ids.pop(choose_index)
+            self.parent_ids.pop(choose_index)
+            self.selection_counts.pop(choose_index)
+            # --- 结束新增 ---
+
             self.current_index = None
-        return self.current_pose
+
+            self.current_parent_id = None# 因为种子被移除了
+        return  selected_info
 
 
     def add_crash(self, result_pose):
@@ -97,12 +129,26 @@ class CureFuzz:
             self.intrinsic_reward.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
+
+            # --- 新增：同步删除新属性 ---
+            self.seed_ids.pop(choose_index)
+            self.parent_ids.pop(choose_index)
+            self.selection_counts.pop(choose_index)
+            # --- 结束新增 ---
             self.current_index = None
+
+            self.current_parent_id = None# 因为种子被移除了
     
 
     def further_mutation(self, current_pose, rewards, entropy, intrinsic_reward, final_state, original):
         choose_index = self.current_index
         copy_pose = copy.deepcopy(current_pose)
+
+        # --- 获取新的唯一ID ---
+        new_id = self.next_seed_id
+        self.next_seed_id += 1
+        # --- 结束 ---
+
         if choose_index != None:
             self.corpus[choose_index] = copy_pose
             self.final_state[choose_index] = final_state
@@ -110,6 +156,11 @@ class CureFuzz:
             self.entropy[choose_index] = entropy
             self.intrinsic_reward[choose_index] = intrinsic_reward
             self.count[choose_index] = 5
+            # --- 新增：更新新属性（替换） ---
+            self.seed_ids[choose_index] = new_id         # 替换为新的ID
+            self.parent_ids[choose_index] = self.current_parent_id # 记录父ID
+            self.selection_counts[choose_index] = 0    # 重置挑选次数
+            # --- 结束新增 ---
         else:
             self.corpus.append(copy_pose)
             self.final_state.append(final_state)
@@ -118,6 +169,11 @@ class CureFuzz:
             self.intrinsic_reward.append(intrinsic_reward)
             self.original.append(original)
             self.count.append(5)
+            # --- 新增：添加新属性（追加） ---
+            self.seed_ids.append(new_id)
+            self.parent_ids.append(None) # 初始种子没有父ID
+            self.selection_counts.append(0) # 初始挑选次数为0
+            # --- 结束新增 ---
 
 
     def mutation(self, states):
@@ -140,7 +196,13 @@ class CureFuzz:
             self.intrinsic_reward.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
+            # --- 新增：同步删除新属性 ---
+            self.seed_ids.pop(choose_index)
+            self.parent_ids.pop(choose_index)
+            self.selection_counts.pop(choose_index)
+            # --- 结束新增 ---
             self.current_index = None
+            self.current_parent_id = None# 因为种子被移除了
 
     def flatten_states(self, states):
         states = np.array(states)

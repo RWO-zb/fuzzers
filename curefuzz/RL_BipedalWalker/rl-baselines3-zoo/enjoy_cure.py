@@ -218,9 +218,17 @@ def main():
     current_time = time.time()
     pbar1 = tqdm.tqdm(total=seeds_num)
     seedcount = 0
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 1 and seedcount<5000:
+    # --- 新增：初始化日志列表 ---
+    fuzz_selection_log = []
+    # --- 结束新增 ---
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 1 :
         seedcount+=1
-        states = fuzzer.get_pose()
+
+        # --- 修改：接收包含所有信息的字典 ---
+        selected_info = fuzzer.get_pose()
+        states = selected_info['seed_state'] # 保持 'states' 变量名不变以兼容后续代码
+        # --- 结束修改 ---
+
         mutate_states = fuzzer.mutation(states)
         state = None
         episode_reward = 0.0
@@ -237,10 +245,13 @@ def main():
                 break
         intrinsic_reward = fuzzer.train_rnd(sequences)
         entropy = entropy = np.linalg.norm(np.asarray(obs[0]) - np.asarray(fuzzer.final_state))
+        # --- 新增：记录崩溃状态和日志条目 ---
+        did_crash = False # 默认
         if done or episode_reward < 10:
             pbar1.update(1)
             fuzzer.add_crash(mutate_states)
             print('Found: ', len(fuzzer.result))
+            did_crash = True # <--- 标记为崩溃
         elif args.guide:
             if intrinsic_reward > intrins_theta or episode_reward < fuzzer.current_reward or entropy > entropy_theta:
                 current_pose = copy.deepcopy(mutate_states)
@@ -251,6 +262,17 @@ def main():
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward,  entropy, intrinsic_reward, final_state, orig_pose)
+        # --- 新增：无论结果如何，都记录这次挑选 ---
+        log_entry = {
+            'seed_id': selected_info['seed_id'],
+            'seed_state': selected_info['seed_state'], # 原始种子 state
+            'mutate_state': mutate_states,          # 变异后的 state
+            'parent_id': selected_info['parent_id'],
+            'selection_count': selected_info['selection_count'],
+            'did_crash': did_crash                  # 崩溃状态 (bool)
+        }
+        fuzz_selection_log.append(log_entry)
+        # --- 结束新增 ---
         # else:
         print(f'Total seeds tested: { seedcount}, Crashes found: {len(fuzzer.result)}')
         current_time = time.time()
@@ -260,6 +282,13 @@ def main():
         file_name = './results'+result_folder+'/ablated_crash.pkl'
     with open(file_name, 'wb') as handle:
         pickle.dump(fuzzer.result, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    # --- 新增：保存详细的选择日志 ---
+    # 我们使用 Pickle 而不是 CSV，因为 state 和 mutate_state 是 NumPy 数组，
+    # Pickle 可以完美地保存它们。
+    log_file_name = './results'+result_folder+'/selection_log.pkl'
+    with open(log_file_name, 'wb') as handle:
+        pickle.dump(fuzz_selection_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"Selection log saved to {log_file_name}")
 
 
     if args.verbose > 0 and len(successes) > 0:
