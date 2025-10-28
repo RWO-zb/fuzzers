@@ -20,7 +20,7 @@ pattern = re.compile(r"Total seeds tested: (\d+), Crashes found: (\d+)")
 
 try:
     # 打开并读取文本文件
-    with open('D:\\code\\fuzzers\\curefuzz\\RL_BipedalWalker\\rl-baselines3-zoo\\results10_23_2025_18_46_59\\cure_fuzz.txt', 'r', encoding='utf-8') as f:
+    with open('D:\\code\\fuzzers\\curefuzz\\RL_BipedalWalker\\rl-baselines3-zoo\\results10_27_2025_20_13_16\\cure_fuzz.txt', 'r', encoding='utf-8') as f:
         for line in f:
             match = pattern.search(line)
             if match:

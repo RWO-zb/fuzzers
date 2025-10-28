@@ -64,7 +64,7 @@ if __name__ == '__main__':
 
 
     if rl_index == 0:
-        executor = BipedalWalkerExecutor(1000, 0)
+        executor = BipedalWalkerExecutor(300, 0)
     elif rl_index == 1:
         executor = LunarLanderExecutor(1000, 0)
     else:

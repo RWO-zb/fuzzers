@@ -39,7 +39,8 @@ class BipedalWalkerExecutor(Executor):
 
     def execute_policy(self, input: np.ndarray, policy: Any) -> Tuple[float, bool, np.ndarray, float]:
         '''Executes the model and returns the trajectory data. Useful for MDPFuzz.'''
-        env = gym.make('BipedalWalkerHardcore-v4',rand_seed=self.env_seed)
+        env = gym.make('BipedalWalkerHardcore-v3')
+        env.seed(self.env_seed)
         obs_seq = []
         acc_reward = 0.0
 

@@ -93,8 +93,7 @@ class Fuzzer():
     def mdp(self, state: np.ndarray, policy: Any = None) -> Tuple[float, bool, np.ndarray, float]:
         '''Returns the accumulated reward, whether a crash is detected and the state sequence.'''
         episode_reward, done, obs_seq, exec_time = self.executor.execute_policy(state, policy)
-        is_crash = done or (episode_reward < 10)
-        return episode_reward,is_crash, obs_seq, exec_time
+        return episode_reward, done, obs_seq, exec_time
 
 
     def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, **kwargs) -> Tuple[float, float, bool, List[np.ndarray], float]:

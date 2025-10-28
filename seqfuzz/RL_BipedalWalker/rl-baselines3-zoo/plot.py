@@ -16,7 +16,7 @@ total_seeds_tested = 0
 crashes_found = 0
 
 # Define input and output filenames
-input_filename = 'D:\\code\\fuzzers\\seqfuzz\\RL_BipedalWalker\\all_run_seeds.txt'
+input_filename = 'D:\\code\\fuzzers\\seqfuzz\\RL_BipedalWalker\\rl-baselines3-zoo\\results\\all_run_seeds.txt'
 plot_filename = 'crashes_vs_total_seeds.png'
 
 try:

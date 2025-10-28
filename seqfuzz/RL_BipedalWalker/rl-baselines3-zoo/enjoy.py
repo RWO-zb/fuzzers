@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--env", help="environment ID", type=str, default="BipedalWalkerHardcore-v3")
     parser.add_argument("-f", "--folder", help="Log folder", type=str, default="rl-trained-agents/")
     parser.add_argument("--algo", help="RL Algorithm", default="tqc", type=str, required=False, choices=list(ALGOS.keys()))
-    parser.add_argument("-n", "--n_timesteps", help="number of timesteps", default=1000, type=int)
+    parser.add_argument("-n", "--n_timesteps", help="number of timesteps", default=300, type=int)
     parser.add_argument("--num-threads", help="Number of threads for PyTorch (-1 to use default)", default=-1, type=int)
     parser.add_argument("--n-envs", help="number of environments", default=1, type=int)
     parser.add_argument("--exp-id", help="Experiment ID (default: 0: latest, -1: no exp folder)", default=0, type=int)
@@ -193,7 +193,7 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 3000
+    seeds_num = 1000
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     while i < seeds_num:
