@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--env", help="environment ID", type=str, default="CartPole-v1")
     parser.add_argument("-f", "--folder", help="Log folder", type=str, default="rl-trained-agents")
     parser.add_argument("--algo", help="RL Algorithm", default="ppo", type=str, required=False, choices=list(ALGOS.keys()))
-    parser.add_argument("-n", "--n-timesteps", help="number of timesteps", default=1000, type=int)
+    parser.add_argument("-n", "--n-timesteps", help="number of timesteps", default=300, type=int)
     parser.add_argument("--num-threads", help="Number of threads for PyTorch (-1 to use default)", default=-1, type=int)
     parser.add_argument("--n-envs", help="number of environments", default=1, type=int)
     parser.add_argument("--exp-id", help="Experiment ID (default: 0: latest, -1: no exp folder)", default=0, type=int)
@@ -173,7 +173,7 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 1000
+    seeds_num = 300
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     while i < seeds_num:
@@ -211,7 +211,7 @@ def main():
                     break
             entropy = np.abs(episode_reward_mutate - episode_reward) / np.sum(delta_states)
             cvg = fuzzer.state_coverage(sequences)
-            fuzzer.further_mutation(states, episode_reward, entropy, cvg, states)
+            fuzzer.further_mutation(states, episode_reward, entropy, cvg, states,0)
             print(entropy, episode_reward, episode_reward_mutate, done, cvg)
             print('Density: ', cvg)
             i += 1
@@ -242,17 +242,35 @@ def main():
     fuzz_failure_list = []
     all_fuzz_cases_log = []
     #######################################################################################
+    # -----------------------------------------------------------------
+    log_total_iterations = 0
+    log_all_mutate_states = [] # 存储 (N, 15) 的输入
+    log_all_generations = []   # 存储 (N,) 的代数
+    log_all_is_crash = []      # 存储 (N,) 的崩溃状态 (0 或 1)
+    # -----------------------------------------------------------------
     trajectory_list = []
     termination_list = []
-    failure_flag = False
-    seedcount=0
-    while current_time - start_fuzz_time < 3600 * args.hour and len(fuzzer.corpus) > 0 and seedcount<5000:
-        seedcount+=1
+    while current_time - start_fuzz_time < 3600 * args.hour and len(fuzzer.corpus) > 0 and log_total_iterations<300:
+        # -----------------------------------------------------------------
+        log_total_iterations += 1
+        is_crash_for_log = 0 # 默认 0 (未崩溃)
+        # -----------------------------------------------------------------
         temp1_time = time.time()
         states = fuzzer.get_pose()
+        # -----------------------------------------------------------------
+        # HACK: 获取父代 generation
+        parent_generation = fuzzer.current_generation
+        # -----------------------------------------------------------------
         mutate_states = fuzzer.mutation(states)
         state = None
         episode_reward = 0.0 
+        # -----------------------------------------------------------------
+        # HACK: 定义当前种子的属性
+        normal_case = mutate_states.tolist()
+        current_generation = parent_generation + 1
+        # HACK: 这就是您定义的 "mutate_state" (15D 整数数组)
+        current_mutate_state_input = mutate_states.copy()
+        # -----------------------------------------------------------------
         obs = env.reset(mutate_states)
         sequences = [obs[0]]
         for _ in range(args.n_timesteps):
@@ -272,52 +290,56 @@ def main():
         time_of_DynEM += temp3_time - temp2_time
         local_sensitivity = np.abs(episode_reward - fuzzer.current_reward)
         print('Density: ', cvg, '\tSensitivity: ', local_sensitivity)
-        status = 'success'
         if done or episode_reward < 10:
-            status = 'failure'
+            is_crash_for_log = 1
             regular_time = (current_time - start_fuzz_time) / 3600
             pbar1.update(1)
             fuzzer.add_crash(mutate_states)
             print('Found: ', len(fuzzer.result))
             print([regular_time, len(fuzzer.result), mutate_states.tolist()])
-            fuzz_failure_list.append([regular_time, len(fuzzer.result), mutate_states.tolist()])
+            # HACK: 更新 fuzz_failure_list，确保它记录的是 *总迭代次数*
+            fuzz_failure_list.append([log_total_iterations, len(fuzzer.result), mutate_states.tolist()])
         elif args.em:
             if cvg < cvg_threshold or episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
-                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose)
+                # -----------------------------------------------------------------
+                # HACK: 更改 further_mutation 调用
+                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,
+                                        generation=current_generation)
+                # -----------------------------------------------------------------
         else:
             if episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
-                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose)
-        all_fuzz_cases_log.append({
-            'case': mutate_states.tolist(),  # 具体的测试案例
-            'status': status,                 # 状态："success" 或 "failure"
-            'reward': float(episode_reward),  # 记录当次回合的奖励
-            'done': bool(done)                # 记录是否提前终止 (True/False)
-        })
+                # -----------------------------------------------------------------
+                # HACK: 更改 further_mutation 调用
+                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,
+                                        generation=current_generation)
+                # -----------------------------------------------------------------
+        
         current_time = time.time()
         time_of_fuzzer += current_time - temp2_time
+        # -----------------------------------------------------------------
+        # HACK: 在循环末尾记录本次迭代的数据
+        # (在 L344 附近，print 语句之前添加)
+        # -----------------------------------------------------------------
+        log_all_mutate_states.append(current_mutate_state_input)
+        log_all_generations.append(current_generation)
+        log_all_is_crash.append(is_crash_for_log)
+        # -----------------------------------------------------------------
         print('total reward: ', episode_reward, ', coverage: ', cvg, ', passed time: ', current_time - start_fuzz_time, ', corpus size: ', len(fuzzer.corpus), 'time_of_fuzzer: ', time_of_fuzzer, 'time_of_env: ', time_of_env)
 
         if len(trajectory_list) > 1000:
             break
     
-    trajectory_list = np.array(trajectory_list)
-    termination_list = np.array(termination_list)
-    os.makedirs('results', exist_ok=True)
-    np.save('results/MDPFuzz+trajectory.npy', trajectory_list)
-    np.save('results/MDPFuzz+termination.npy', termination_list)        
-    
-    # if args.em:
-    #     file_name = './results/crash_EM.pkl'
-    # else:
-    #     file_name = './results/crash_noEM.pkl'
-    # with open(file_name, 'wb') as handle:
-    #     pickle.dump(fuzzer.result, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-
+    os.makedirs('results', exist_ok=True)   
+    fuzz_data_to_save = {
+        'total_iterations': log_total_iterations,
+        'all_mutate_states': np.array(log_all_mutate_states), # (N, 15)
+        'all_generations': np.array(log_all_generations),   # (N,)
+        'all_is_crash': np.array(log_all_is_crash)        # (N,)
+    }
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")
 
@@ -338,13 +360,8 @@ def main():
                 env.close()
         else:
             env.close()
-
-    os.makedirs('results', exist_ok=True)
-    with open('results/fuzz_failure_count.json', 'w') as f:
-        json.dump(fuzz_failure_list, f)
-    with open('results/all_fuzz_cases_log.json', 'w') as f:
-        # 使用 indent=4 格式化 JSON，使其更易读
-        json.dump(all_fuzz_cases_log, f, indent=4)
+    with open('results/all_fuzz_cases_log.pickle', 'wb') as f:
+            pickle.dump(fuzz_data_to_save, f, protocol=pickle.HIGHEST_PROTOCOL)
 if __name__ == "__main__":
     # f = open('./results/fuzz.txt', 'w', buffering=1)
     # sys.stdout = f

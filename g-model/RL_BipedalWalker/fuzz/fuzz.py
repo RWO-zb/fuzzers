@@ -13,12 +13,22 @@ class fuzzing:
         self.original = []
         self.count = []
 
+        # -----------------------------------------------------------------
+        # 新增：用于存储种子的代数和变异状态
+        self.generations = []
+        # -----------------------------------------------------------------
+
         self.current_pose = None
         self.current_reward = None
         self.current_entropy = None
         self.current_coverage = None
         self.current_original = None
         self.current_index = None
+
+        # -----------------------------------------------------------------
+        # 新增：用于存储当前选定种子的新属性
+        self.current_generation = None
+        # -----------------------------------------------------------------
 
         self.GMM = None
         self.GMMupdate = None
@@ -38,6 +48,12 @@ class fuzzing:
         self.current_entropy = self.entropy[choose_index]
         self.current_coverage = self.coverage[choose_index]
         self.current_original = self.original[choose_index]
+
+        # -----------------------------------------------------------------
+        # 新增：获取新属性
+        self.current_generation = self.generations[choose_index]
+        # -----------------------------------------------------------------
+
         if self.count[choose_index] <= 0:
             self.corpus.pop(choose_index)
             self.rewards.pop(choose_index)
@@ -59,9 +75,15 @@ class fuzzing:
             self.coverage.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
+
+            # -----------------------------------------------------------------
+            # 新增：同步删除
+            self.generations.pop(choose_index)
+            # -----------------------------------------------------------------
+
             self.current_index = None
 
-    def further_mutation(self, current_pose, rewards, entropy, cvg, original):
+    def further_mutation(self, current_pose, rewards, entropy, cvg, original, generation):
         choose_index = self.current_index
         copy_pose = copy.deepcopy(current_pose)
 
@@ -71,6 +93,10 @@ class fuzzing:
             self.entropy[choose_index] = entropy
             self.coverage[choose_index] = cvg
             self.count[choose_index] = 5
+            # -----------------------------------------------------------------
+            # 新增：更新现有种子的新属性
+            self.generations[choose_index] = generation
+            # -----------------------------------------------------------------
         else:
             self.corpus.append(copy_pose)
             self.rewards.append(rewards)
@@ -78,6 +104,10 @@ class fuzzing:
             self.coverage.append(cvg)
             self.original.append(original)
             self.count.append(5)
+            # -----------------------------------------------------------------
+            # 新增：添加新种子的新属性
+            self.generations.append(generation)
+            # -----------------------------------------------------------------
 
     def mutation(self, states):
         delta_states = np.random.choice(2, 15, p=[0.9, 0.1])
@@ -97,6 +127,10 @@ class fuzzing:
             self.coverage.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
+            # -----------------------------------------------------------------
+            # 新增：同步删除
+            self.generations.pop(choose_index)
+            # -----------------------------------------------------------------
             self.current_index = None
 
     def flatten_states(self, states):
@@ -248,7 +282,7 @@ if __name__ == '__main__':
     fuzzer = fuzzing()
     for i in range(50):
         cur_seq = np.random.rand(17)
-        fuzzer.further_mutation(copy.deepcopy(cur_seq), np.random.uniform(0, 1), np.random.uniform(0, 1), np.random.uniform(0, 1), copy.deepcopy(cur_seq))
+        fuzzer.further_mutation(copy.deepcopy(cur_seq), np.random.uniform(0, 1), np.random.uniform(0, 1), np.random.uniform(0, 1), copy.deepcopy(cur_seq), 0)
     
     states_seq = []
     for i in range(100):

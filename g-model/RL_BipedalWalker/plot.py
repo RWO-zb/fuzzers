@@ -1,197 +1,295 @@
-import os,sys
+# g-model/RL_BipedalWalker/plot.py
+
+import pickle
 import numpy as np
-import json
 import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-import seaborn as sns
-from scipy import stats
-# envs = ['RL_BipedalWalker']
-# methods = ['fuzz', 'generative+novelty_diffusion']
-from umap import UMAP
+import os
+import argparse
+import time
+from collections import Counter
+from sklearn.manifold import TSNE # 依赖于 plot_full_space.py 的风格
 
-titles = {
-    'RL_BipedalWalker' : 'RL_BipedalWalker',
-    'RL_CARLA' : 'RL_CARLA',
-    'IL_CARLA' : 'IL_CARLA',
-    'ACAS_Xu' : 'ACAS_Xu',
-    'CoopNavi' : 'CoopNavi'
-}
+# --- 配置 ---
+IMG_DIR = 'results' 
+LOG_FILE = 'results/all_fuzz_cases_log.pickle'
+# --- 结束配置 ---
 
-times = {
-    'RL_BipedalWalker' : 2,
-    'RL_CARLA' : 2,
-    'IL_CARLA' : 2,
-    'ACAS_Xu' : 1,
-    'CoopNavi' : 1
-}
-
-data_points = {
-    'RL_BipedalWalker' : 5,
-    'RL_CARLA' : 5,
-    'IL_CARLA' : 5,
-    'ACAS_Xu' : 5,
-    'CoopNavi' : 5
-}
-
-markers = {
-    'fuzz' : 'o',
-    'generative+novelty_diffusion' : '*',
-    'generative+density_diffusion' : '^',
-    'generative+sensitivity_diffusion' : 's',
-    'generative+performance_diffusion' : '+',
-    'generative_diffusion' : 'D',
-}
-
-labels = {
-    'fuzz' : 'MDPFuzz',
-    'generative+novelty_diffusion' : 'Novelty (Ours)',
-    'generative+density_diffusion' : 'Desnity',
-    'generative+sensitivity_diffusion' : 'Sensitivity',
-    'generative+performance_diffusion' : 'Reward',
-    'generative_diffusion' : 'No Guidance',
-}
-
-colors = {
-    'fuzz' : 'red',
-    'generative+novelty_diffusion' : 'orange',
-    'generative+density_diffusion' : 'green',
-    'generative+sensitivity_diffusion' : 'blue',
-    'generative+performance_diffusion' : 'pink',
-    'generative_diffusion' : 'grey',
-}
-
-markersizes = {
-    'fuzz' : 5,
-    'generative+novelty_diffusion' : 5,
-    'generative+density_diffusion' : 5,
-    'generative+sensitivity_diffusion' : 5,
-    'generative+performance_diffusion' : 5,
-    'generative_diffusion' : 5
-}
-
-
-
-with open('results/mdpfuzz_information.json' , 'r') as f:
-    m_info = json.load(f)
-
-with open('results/mdpfuzz_novelty_dict.json' , 'r') as f:
-    m_novelty_dict = json.load(f)
-
-m_states = []
-m_failure_flag = []
-m_failure_ids = []
-m_abstract_ids = []
-m_occurrences = []
-m_novelty = []
-m_failure_occurrences = []
-m_failure_novelty = []
-
-for item in m_info:
-    # s = np.asarray(item[0])
-    m_states.append(item[0])
-    m_failure_flag.append(item[1])
-    if item[1]:
-        m_failure_ids.append(item[2])
-    m_abstract_ids.append(item[2])
-        
-m_abstract_ids = list(set(m_abstract_ids))
-m_failure_ids = list(set(m_failure_ids))
-# m_occurrences = list(m_novelty_dict.values())
-# m_max_occ = max(m_occurrences)
-# m_min_occ = min(m_occurrences)
-# m_novelty = (np.array(m_occurrences) - m_min_occ) / (m_max_occ - m_min_occ)
-# for id in m_failure_ids:
-#     m_failure_occurrences.append(m_novelty_dict[id])
-
-# m_failure_novelty = (np.array(m_failure_occurrences) - m_min_occ) / (m_max_occ - m_min_occ)
-# m_novelty = 1 - m_novelty
-# m_failure_novelty = 1 - m_failure_novelty
-
-# print(len(m_novelty_dict.keys()), len(m_failure_ids))
-# print(sum(m_occurrences), sum(m_failure_occurrences))
-
-# print(m_failure_ids)
-# m_states = np.array(m_states)
-# m_states= m_states.astype(np.float)
-# # m_s_states = PCA(n_components=2).fit_transform(m_states)
-# # m_s_states  = TSNE(n_components=2,init='random', perplexity=3).fit_transform(m_states)
-# m_s_states = UMAP(n_components=2, init='random', random_state=0).fit_transform(np.array(m_states ))
-# plt.scatter(m_s_states[:,0], m_s_states[:,1], label = 'Mdpfuzz', color = 'red', s = 20, marker = '*')
+def load_data(file_path):
+    """
+    加载 pickle 文件 (仿照: plot.py, findstep.py)
+    """
+    if not os.path.exists(file_path):
+        print(f"错误: 未找到文件: {file_path}")
+        print("请先运行 enjoy.py 生成该文件。")
+        return None
     
+    print(f"正在从 {file_path} 加载数据...")
+    try:
+        with open(file_path, 'rb') as f:
+            data = pickle.load(f)
+        return data
+    except Exception as e:
+        print(f"加载 pickle 文件时出错: {e}")
+        return None
 
-with open('results/generative+novelty_information.json' , 'r') as f:
-    our_info = json.load(f)
-
-with open('results/generative+novelty_novelty_dict.json' , 'r') as f:
-    novelty_dict = json.load(f)
-
-states = []
-failure_flag = []
-failure_ids = []
-abstract_ids = []
-occurrences = []
-novelty = []
-failure_occurrences = []
-failure_novelty = []
-
-for item in our_info:
-    # s = np.asarray(item[0])
-    states.append(item[0])
-    failure_flag.append(item[1])
-    if item[1]:
-        failure_ids.append(item[2])
-    abstract_ids.append(item[2])
-        
-abstract_ids = list(set(abstract_ids))
-failure_ids = list(set(failure_ids))
-# occurrences = list(novelty_dict.values())
-# max_occ = max(occurrences)
-# min_occ = min(occurrences)
-# novelty = (np.array(occurrences) - min_occ) / (max_occ - min_occ)
-# for id in failure_ids:
-#     failure_occurrences.append(novelty_dict[id])
-
-# failure_novelty = (np.array(failure_occurrences) - min_occ) / (max_occ - min_occ)
-# novelty = 1 - novelty
-# failure_novelty = 1 - failure_novelty
-
-# print(len(novelty_dict.keys()), len(failure_ids))
-# print(sum(occurrences), sum(failure_occurrences))
-
-# print(failure_ids)
-# states = np.array(states)
-# states= states.astype(np.float)
-# # s_states = PCA(n_components=2).fit_transform(states)
-# # s_states = TSNE(n_components=2,init='random', perplexity=3).fit_transform(states)
-# s_states = UMAP(n_components=2, init='random', random_state=0).fit_transform(np.array(states ))
-# plt.scatter(s_states[:,0], s_states[:,1], label = 'Ours', color = 'orange', s = 20, marker = '*')
+def preprocess_data_for_deduplication(data):
+    """
+    核心函数：对所有迭代数据进行去重。
+    我们将遍历所有 N 次迭代，构建一个关于 *独特* 输入状态的字典。
+    """
+    print("正在对所有日志数据进行去重预处理...")
     
+    all_states = data['all_mutate_states'] # (N, 15)
+    all_gens = data['all_generations']     # (N,)
+    all_crashes = data['all_is_crash']     # (N,)
+    
+    # unique_states_map 结构:
+    # key: state_bytes (独特输入)
+    # value: {
+    #    'state_array': 15D numpy 数组
+    #    'first_seen_iteration': 首次发现此输入的迭代索引 (int)
+    #    'first_seen_generation': 首次发现此输入时的代数 (int)
+    #    'did_crash': 此输入是否 *曾经* 导致过崩溃 (int, 0 或 1)
+    # }
+    unique_states_map = {}
 
-# plt.legend(fontsize=10)
-# plt.title('RL_BipedalWalker', fontsize=14)
-# plt.grid()
-# plt.tick_params(left = False, right = False , labelleft = False ,labelbottom = False, bottom = False)
-# plt.show()
+    for i in range(len(all_states)):
+        state_array = all_states[i]
+        state_bytes = state_array.tobytes()
+        did_crash = all_crashes[i]
+        gen = all_gens[i]
+        
+        if state_bytes not in unique_states_map:
+            # 第一次见到这个独特输入
+            unique_states_map[state_bytes] = {
+                'state_array': state_array,
+                'first_seen_iteration': i,
+                'first_seen_generation': gen,
+                'did_crash': did_crash
+            }
+        else:
+            # 已经见过这个输入。我们只关心是否需要更新 'did_crash' 状态
+            # (仿照 plot_full_space.py 的逻辑)
+            unique_states_map[state_bytes]['did_crash'] = max(
+                unique_states_map[state_bytes]['did_crash'], did_crash
+            )
+            
+    print(f"预处理完成。总迭代次数 {len(all_states)}，独特输入状态 {len(unique_states_map)}")
+    return unique_states_map
 
-common = list(set(abstract_ids) & set(m_abstract_ids))
-print(len(states), len(m_states), len(abstract_ids), len(m_abstract_ids), len(common))
+
+def plot_unique_crashes_vs_discovery(unique_states_map):
+    """
+    1. 绘制 *独特* Crash 数量随 *独特* 输入发现数量的曲线图
+       (HACK: 此图现在已完全去重)
+    """
+    print("\n[1/3] 正在绘制 独特崩溃 vs. 独特输入 (仿照 plot.py)...")
+    
+    try:
+        # 按 "首次发现的迭代" 排序，以重建发现历史
+        # (仿照 plot.py 的迭代逻辑)
+        unique_entries = sorted(unique_states_map.values(), key=lambda x: x['first_seen_iteration'])
+        
+        if not unique_entries:
+            print("  警告: 未找到独特的崩溃数据。")
+            return
+
+        # 提取崩溃状态 (0 或 1)
+        crash_status_list = [entry['did_crash'] for entry in unique_entries]
+        
+        # 计算累积的 *独特* 崩溃
+        cumulative_unique_crashes = np.cumsum(crash_status_list)
+        
+        # X 轴：发现的独特输入的数量
+        unique_inputs_discovered = np.arange(1, len(unique_entries) + 1)
+        
+        plt.figure(figsize=(12, 7))
+        # (仿照 plot.py 的绘图风格)
+        plt.plot(unique_inputs_discovered, cumulative_unique_crashes, label='Unique Crashes Found', color='red', linewidth=2)
+        plt.fill_between(unique_inputs_discovered, cumulative_unique_crashes, color='red', alpha=0.1)
+        
+        plt.title('Unique Crashes Found vs. Unique Inputs Discovered (De-duplicated)', fontsize=14)
+        plt.xlabel('Number of Unique Inputs Discovered', fontsize=12)
+        plt.ylabel('Cumulative Number of Unique Crashes', fontsize=12)
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.xlim(0, len(unique_inputs_discovered))
+        plt.ylim(bottom=0)
+    
+        save_path = os.path.join(IMG_DIR, 'crashes_over_time_deduplicated.png')
+        plt.savefig(save_path)
+        plt.close()
+        print(f"  图像已保存到: {save_path}")
+        
+    except Exception as e:
+        print(f"  绘制 独特崩溃 vs. 独特输入 时出错: {e}")
 
 
-common = list(set(failure_ids) & set(m_failure_ids))
-print(len(failure_ids), len(m_failure_ids), len(common))
+def plot_mutate_state_tsne(unique_states_map):
+    """
+    2. 绘制 mutate_state (15D 输入) 的 t-SNE 降维二维分布图
+       (风格和逻辑借鉴自: plot_full_space.py)
+       (HACK: 此函数现在使用预处理的 unique_states_map)
+    """
+    print("\n[2/3] 正在绘制 mutate_state t-SNE 覆盖率 (仿照 plot_full_space.py)...")
+    
+    try:
+        if not unique_states_map:
+            print("  警告: 未找到 'all_mutate_states' 数据。")
+            return
+            
+        # 准备 t-SNE 数据
+        state_array = np.array([entry['state_array'] for entry in unique_states_map.values()])
+        labels = np.array([entry['did_crash'] for entry in unique_states_map.values()])
 
-# sns.set(style="darkgrid") 
-# # Make default density plot
-# sns.kdeplot(occurrences, color='blue',clip=(0.0, max_occ))
-# sns.kdeplot(failure_occurrences, color='red',clip=(0.0, max_occ))
-# plt.title('density of occurrences')
-# plt.show()
+        print(f"  总共找到 {state_array.shape[0]} 个独特的输入状态。")
+
+        print(f"  正在运行 t-SNE (n_components=2) ... 这可能需要一些时间 ...")
+        start_time = time.time()
+        
+        # 修复: n_iter -> max_iter
+        tsne = TSNE(n_components=2, verbose=0, perplexity=30, max_iter=1000, init='pca', learning_rate='auto')
+        
+        tsne_data = tsne.fit_transform(state_array)
+        print(f"  t-SNE 运行完成，耗时: {time.time() - start_time:.2f} 秒。")
+
+        crashing_points = tsne_data[labels == 1]
+        non_crashing_points = tsne_data[labels == 0]
+        
+        print(f"  非崩溃点: {non_crashing_points.shape[0]}")
+        print(f"  崩溃点: {crashing_points.shape[0]}")
+        
+        plt.figure(figsize=(12, 10))
+        
+        plt.scatter(
+            non_crashing_points[:, 0], 
+            non_crashing_points[:, 1], 
+            c='blue', 
+            alpha=0.4,
+            s=10, 
+            label=f'Non-Crashing Inputs ({non_crashing_points.shape[0]})'
+        )
+        
+        if crashing_points.shape[0] > 0:
+            plt.scatter(
+                crashing_points[:, 0], 
+                crashing_points[:, 1], 
+                c='red', 
+                alpha=0.8,
+                s=15, 
+                label=f'Crashing Inputs ({crashing_points.shape[0]})'
+            )
+        
+        plt.title('t-SNE Visualization of Explored Input Space (15D Ground Types -> 2D)', fontsize=14)
+        plt.xlabel('t-SNE Component 1', fontsize=12)
+        plt.ylabel('t-SNE Component 2', fontsize=12)
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.5)
+        
+        save_path = os.path.join(IMG_DIR, 'full_input_space_tsne.png')
+        plt.savefig(save_path)
+        plt.close()
+        print(f"  图像已保存到: {save_path}")
+
+    except Exception as e:
+        print(f"  绘制 mutate_state t-SNE 时出错: {e}")
+        import traceback
+        traceback.print_exc()
 
 
-# sns.set(style="darkgrid") 
-# # Make default density plot
-# sns.kdeplot(novelty, color='blue', clip=(0.0, 1.0))
-# sns.kdeplot(failure_novelty, color='red', clip=(0.0, 1.0))
-# plt.title('density of novelty')
-# plt.show()
+def plot_crash_generation_histogram(unique_states_map):
+    """
+    3. 绘制导致崩溃种子的代数的图
+       (风格和逻辑借鉴自: findstep.py)
+       (HACK: 此函数现在使用预处理的 unique_states_map)
+    """
+    print("\n[3/3] 正在绘制 崩溃代数直方图 (仿照 findstep.py)...")
+    
+    try:
+        # 提取所有 *独特* 崩溃输入的 *首次发现* 代数
+        crashing_generations = [
+            entry['first_seen_generation'] 
+            for entry in unique_states_map.values() 
+            if entry['did_crash'] == 1
+        ]
+        
+        if not crashing_generations:
+            print("  警告: 未找到崩溃种子，无法绘制代数图。")
+            return
+        
+        print(f"  总共找到 {len(crashing_generations)} 个 *独特* 的崩溃输入。")
+
+        # 统计 (仿照 findstep.py)
+        generation_counts = Counter(crashing_generations)
+        
+        crashing_gen_array = np.array(crashing_generations)
+        max_gen = int(crashing_gen_array.max())
+        min_gen = int(crashing_gen_array.min())
+        generations = np.arange(min_gen, max_gen + 2) 
+        counts = [generation_counts.get(gen, 0) for gen in generations] 
+        
+        print("\n  --- 独特崩溃代数统计 (已去重) ---")
+        print(f"  平均崩溃代数: {crashing_gen_array.mean():.2f}")
+        print(f"  中位崩溃代数: {np.median(crashing_gen_array)}")
+        print(f"  最小崩溃代数: {min_gen}")
+        print(f"  最大崩溃代数: {max_gen}")
+
+        plt.figure(figsize=(12, 7))
+        # (仿照 findstep.py)
+        plt.bar(generations, counts, color='red', alpha=0.7, align='center', width=0.8) 
+        
+        plt.title('Histogram of Unique Crash Generations (De-duplicated)', fontsize=14)
+        plt.xlabel('Mutation Generation (Depth from Initial Seed)', fontsize=12)
+        plt.ylabel('Number of Unique Crashes Found', fontsize=12)
+        
+        if max_gen - min_gen < 50:
+             plt.xticks(np.arange(min_gen, max_gen + 1))
+        
+        plt.grid(True, linestyle='--', alpha=0.5, axis='y')
+        
+        save_path = os.path.join(IMG_DIR, 'crash_generation_histogram.png')
+        plt.savefig(save_path)
+        plt.close()
+        print(f"  图像已保存到: {save_path}")
+
+    except Exception as e:
+        print(f"  绘制 崩溃代数 时出错: {e}")
+
+
+def main():
+    # 使用在脚本顶部定义的硬编码 LOG_FILE
+    input_file = LOG_FILE
+    
+    # 加载数据
+    data = load_data(input_file)
+    if data is None:
+        return
+
+    # 检查数据完整性
+    required_keys = ['all_mutate_states', 'all_generations', 'all_is_crash']
+    if not all(key in data for key in required_keys):
+        print("错误: Pickle 文件中缺少必要的键。")
+        print(f"需要: {required_keys}")
+        print(f"已有: {list(data.keys())}")
+        return
+
+    # 创建输出目录
+    os.makedirs(IMG_DIR, exist_ok=True) 
+
+    # -----------------------------------------------------------------
+    # HACK: 在所有绘图之前执行核心去重步骤
+    # -----------------------------------------------------------------
+    unique_states_map = preprocess_data_for_deduplication(data)
+
+    # 运行所有绘图函数
+    # 1. 崩溃 vs 独特输入
+    plot_unique_crashes_vs_discovery(unique_states_map)
+    # 2. t-SNE 覆盖率
+    plot_mutate_state_tsne(unique_states_map)
+    # 3. 崩溃代数
+    plot_crash_generation_histogram(unique_states_map)
+    
+    print(f"\n所有绘图已完成并保存到 '{IMG_DIR}' 文件夹中。")
+
+if __name__ == '__main__':
+    main()
