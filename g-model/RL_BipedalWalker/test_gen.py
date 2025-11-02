@@ -8,7 +8,7 @@ from utils import ALGOS, create_test_env, get_latest_run_id, get_saved_hyperpara
 from utils.exp_manager import ExperimentManager
 from utils.utils import StoreDict
 import json, random, pickle, math
-
+from datetime import datetime
 
 from interfaces import normalize_data, Memory, Density, compute_sensitivity, case_clip, compute_novelty, Grid
 from diffusion import Diffusion
@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--env", help="environment ID", type=str, default="BipedalWalkerHardcore-v3")
     parser.add_argument("-f", "--folder", help="Log folder", type=str, default="rl-trained-agents")
     parser.add_argument("--algo", help="RL Algorithm", default="tqc", type=str, required=False, choices=list(ALGOS.keys()))
-    parser.add_argument("-n", "--n-timesteps", help="number of timesteps", default=1000, type=int)
+    parser.add_argument("-n", "--n-timesteps", help="number of timesteps", default=300, type=int)
     parser.add_argument("--num-threads", help="Number of threads for PyTorch (-1 to use default)", default=-1, type=int)
     parser.add_argument("--n-envs", help="number of environments", default=1, type=int)
     parser.add_argument("--exp-id", help="Experiment ID (default: 0: latest, -1: no exp folder)", default=0, type=int)
@@ -61,6 +61,15 @@ def main():
     parser.add_argument("--step", help="number of normal cases at each training step", default=50, type=int)
     parser.add_argument("--grid", help="state abstraction granularity", default=5, type=int)
     args = parser.parse_args()
+    # --- 开始修改 ---
+    result_folder_name = f"{args.method}_{args.step}_seed_{args.seed}"
+    result_path = os.path.join('results', result_folder_name)
+    os.makedirs(result_path, exist_ok=True)
+    log_file_path = os.path.join(result_path, 'run_log.txt')
+    f = open(log_file_path, 'w', buffering=1)
+    sys.stdout = f
+    sys.stderr = f
+    # --- 结束修改 ---
 
     # Going through custom gym packages to let them register in the global registory
     for env_module in args.gym_packages:
@@ -174,7 +183,7 @@ def main():
 
 
 
-    np.random.seed()
+    #np.random.seed()
     states = np.random.randint(low=1, high=4, size=15)
     obs = env.reset(states)
 
@@ -206,16 +215,105 @@ def main():
     random_failure_list = []
     diffusion_failure_count = []
     random_failure_count = []
-    start_time = time.time()
-    current_time = time.time()
-
     #######################################################################################
     trajectory_list = []
     termination_list = []
     information_list = []
     failure_flag = False
 
-    while current_time - start_time < 3600 * args.hour:
+    # --- 阶段 1：主循环前的 1000 次初始随机采样（预热） ---
+    initial_collection_count = 1000
+    # 使用 tqdm 显示进度条
+    for pre_step in tqdm.tqdm(range(initial_collection_count), desc="Initial Random Sampling"):
+        # seed = np.random.randint(1,1000)
+        # env.seed(seed)
+        state = None
+        normal_case = np.random.randint(low=1, high=4, size=15)
+        
+        obs = env.reset(normal_case)
+        sequences = [obs[0]]
+        episode_reward = 0.0
+        # print('states ', states)
+        for _ in range(args.n_timesteps):
+            action, state = model.predict(obs, state=state, deterministic=deterministic)
+            obs, reward, done, infos = env.step(action)
+            sequences.append(obs[0])
+            episode_reward += reward[0]
+            if done:
+                break
+
+        ########################## 复制 'else' 块中的指标计算逻辑 ############################
+        normal_case_list.append(normal_case)
+        density, norm_density = 0, 0
+        sensitivity, norm_sensitivity = 0, 0
+        performance, norm_performance = 0, 0
+        novelty, norm_novelty = 0, 0
+        cases_list = memory_model.get_cases()
+
+        if 'density' in args.method:
+            density_list = memory_model.get_densities()
+            density = density_model.state_coverage(sequences)
+            norm_density = normalize_data(density, memory_model.min_density, memory_model.max_density)
+        
+        if 'sensitivity' in args.method:
+            sensitivity_list = memory_model.get_sensitivities()
+            sensitivity = compute_sensitivity(normal_case, cases_list, performance_list, episode_reward)
+            norm_sensitivity = normalize_data(sensitivity, memory_model.min_sensitivity, memory_model.max_sensitivity)
+            norm_sensitivity = 1 - norm_sensitivity
+            metric = norm_sensitivity
+        
+        if 'performance' in args.method:
+            performance_list = memory_model.get_performances()
+            performance = episode_reward
+            norm_performance = normalize_data(performance, memory_model.min_performance, memory_model.max_performance)
+        
+        if 'novelty' in  args.method:
+            abstract_id = novelty_grid.state_abstract(np.array([sequences[-1]]))[0]
+            if abstract_id in novelty_dict.keys():
+                novelty_dict[abstract_id] += 1
+            else:
+                novelty_dict[abstract_id] = 1
+            novelty = novelty_dict[abstract_id]
+            norm_novelty = 1 / (math.e ** (novelty - 1))
+
+        metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
+        memory_model.append(normal_case, density, sensitivity, performance, novelty)
+
+    # --- 阶段 2：使用这 1000 个样本进行第一次扩散模型训练 ---
+    if len(normal_case_list) > 0:
+        normal_case_list = np.array(normal_case_list)
+        metric_list      = np.array(metric_list)
+
+        if args.method == 'generative':
+            metrics = None
+        elif args.method == 'generative+density':
+            metrics = metric_list[:, [0]]
+        elif args.method == 'generative+sensitivity':
+            metrics = metric_list[:, [1]]
+        elif args.method == 'generative+performance':
+            metrics = metric_list[:, [2]]
+        elif args.method == 'generative+baseline':
+            metrics = metric_list[:, [0,1,2]]
+        elif args.method == 'generative+novelty':
+            metrics = metric_list[:, [3]]
+        else:
+            print('Please check the method parameters!')
+            return 
+
+        diffusion_model.train(normal_case_list, metrics, args.method)
+        normal_case_list = []
+        metric_list = []
+        
+        memory_model.clear()
+    # --- 阶段 3：重置计时器并准备开始主循环 ---
+    start_time = time.time()
+    current_time = time.time()
+    
+    # --- 新增代码：初始化用于记录所有主循环测试用例的列表 ---
+    all_test_cases_log = []
+    # ---------------------------------------------------
+
+    while current_time - start_time < 3600 * 12:
 
 
         if cur_step > 0 and cur_step % args.step == 0:
@@ -247,14 +345,12 @@ def main():
 
             for _ in range(val_step):
                 failure_flag = False
-                # seed = random.randint(1,1000)
-                # env.seed(seed)
                 state = None
                 test_case = diffusion_model.generate()
                 obs = env.reset(test_case)
                 sequences = [obs[0]]
                 episode_reward = 0.0
-                # print('states ', states)
+
                 for _ in range(args.n_timesteps):
                     action, state = model.predict(obs, state=state, deterministic=deterministic)
                     obs, reward, done, infos = env.step(action)
@@ -262,14 +358,25 @@ def main():
                     episode_reward += reward[0]
                     if done:
                         break
-                if done or episode_reward < 10:
+                
+                # --- 记录生成式测试用例 (if 块) ---
+                is_crash = (done or episode_reward < 10)
+                all_test_cases_log.append({
+                    "input": test_case.tolist(), 
+                    "is_crash": bool(is_crash), # 显式转换为 Python bool
+                    "source": "generative",
+                    "step": cur_step
+                })
+                # ---------------------------------
+
+                if is_crash:
                     save_case = test_case.tolist()
                     if save_case in random_failure_list or save_case in diffusion_failure_list:
                         pass
                     else:
                         failure_flag = True
                         lose += 1
-                        done = False
+                        done = False 
                         regular_time = (current_time - start_time) / 3600
                         diffusion_failure_list.append(save_case)
                         failure_by_diffusion += 1
@@ -286,9 +393,6 @@ def main():
                 else:
                     novelty_dict[abstract_id] = 1
                 novelty = novelty_dict[abstract_id]
-                # norm_novelty = normalize_data(novelty, memory_model.min_novelty, memory_model.max_novelty)
-                # norm_novelty = 1 - norm_novelty
-                # norm_novelty = novelty
                 norm_novelty = 1 / (math.e ** (novelty - 1))
 
                 ############################################# add to training #######################################################3
@@ -302,15 +406,13 @@ def main():
                 print(failure_flag, abstract_id, len(novelty_dict.keys()), len(set(diffusion_failure_clusters)))
                 information_list.append([sequences[-1].tolist(), failure_flag, abstract_id, norm_novelty])
         else:
-            # seed = np.random.randint(1,1000)
-            # env.seed(seed)
             state = None
             normal_case = np.random.randint(low=1, high=4, size=15)
             
             obs = env.reset(normal_case)
             sequences = [obs[0]]
             episode_reward = 0.0
-            # print('states ', states)
+            
             for _ in range(args.n_timesteps):
                 action, state = model.predict(obs, state=state, deterministic=deterministic)
                 obs, reward, done, infos = env.step(action)
@@ -318,6 +420,16 @@ def main():
                 episode_reward += reward[0]
                 if done:
                     break
+            
+            # --- 记录随机测试用例 (else 块) ---
+            is_crash = (done or episode_reward < 10)
+            all_test_cases_log.append({
+                "input": normal_case.tolist(), 
+                "is_crash": bool(is_crash), # 显式转换为 Python bool
+                "source": "random",
+                "step": cur_step
+            })
+            # --------------------------------
 
             ########################## Density, Sensitivity and other guidance ############################
             normal_case_list.append(normal_case)
@@ -351,9 +463,6 @@ def main():
                 else:
                     novelty_dict[abstract_id] = 1
                 novelty = novelty_dict[abstract_id]
-                # norm_novelty = normalize_data(novelty, memory_model.min_novelty, memory_model.max_novelty)
-                # norm_novelty = 1 - norm_novelty
-                # norm_novelty = novelty
                 norm_novelty = 1 / (math.e ** (novelty - 1))
 
             metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
@@ -363,18 +472,32 @@ def main():
 
         cur_step += 1
         current_time = time.time()
-    
-    os.makedirs('results', exist_ok=True)
-    with open('results/' + args.method + '_'+ str(args.step) + '_diffusion_failure_count.json', 'w') as f:
+
+    file_path_diffusion = os.path.join(result_path, 'diffusion_failure_count.json')
+    with open(file_path_diffusion, 'w') as f:
         json.dump(diffusion_failure_count, f)
 
-    with open('results/' + args.method + '_information.json', 'w') as f:
+    file_path_info = os.path.join(result_path, 'information.json')
+    with open(file_path_info, 'w') as f:
         json.dump(information_list, f)
 
-    with open('results/' + args.method + '_novelty_dict.json', 'w') as f:
+    file_path_novelty = os.path.join(result_path, 'novelty_dict.json')
+    with open(file_path_novelty, 'w') as f:
         json.dump(novelty_dict, f)
         
-
+    # --- 更改：使用 Pickle 保存所有测试用例的日志 ---
+    log_filename = os.path.join(result_path, 'all_test_cases_log.pkl')
+    with open(log_filename, 'wb') as f:
+        pickle.dump(all_test_cases_log, f)
+    # ------------------------------------
 
 if __name__ == '__main__':  
+    start_time = datetime.now()
+    start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"--- start time: {start_time_str} ---")
     main()
+    end_time = datetime.now()
+    end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"--- finish time: {end_time_str} ---")
+    duration = end_time - start_time
+    print(f"--- total time: {duration} ---")

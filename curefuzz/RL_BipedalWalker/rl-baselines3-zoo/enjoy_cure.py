@@ -53,33 +53,20 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=3, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=2, type=int)
 
     
     args = parser.parse_args()
     # --- 新增代码：在这里创建基于种子和时间戳的唯一文件夹 ---
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
-    # 文件夹名现在包含了种子，确保了唯一性
     result_folder = f"{now_str}_seed_{args.seed}"
-    # 定义 results 路径
     result_path = './results' + result_folder + '/'
-    
-    # 检查并创建文件夹
     if not os.path.exists(result_path):
         os.mkdir(result_path)
-    
-    # --- 新增代码：将 stdout/stderr 重定向到这个新文件夹 ---
     log_file_path = os.path.join(result_path, 'cure_fuzz.txt')
-    print(f"[{now_str}] 脚本启动，种子: {args.seed}。日志将保存到: {log_file_path}")
-    
-    try:
-        f = open(log_file_path, 'w', buffering=1)
-        sys.stdout = f
-        sys.stderr = f # 同时重定向错误信息，这很重要！
-    except Exception as e:
-        print(f"严重错误：无法打开日志文件 {log_file_path}。错误: {e}")
-        # 如果日志都打不开，就没必要继续了
-        return 
+    f = open(log_file_path, 'w', buffering=1)
+    sys.stdout = f
+    sys.stderr = f 
     # --- 结束新增 ---
     # Going through custom gym packages to let them register in the global registory
     for env_module in args.gym_packages:
@@ -241,7 +228,7 @@ def main():
     # --- 新增：初始化日志列表 ---
     fuzz_selection_log = []
     # --- 结束新增 ---
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 1 :
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
         seedcount+=1
 
         # --- 修改：接收包含 'depth' 的字典 ---
@@ -300,9 +287,6 @@ def main():
         file_name = os.path.join(result_path, 'ablated_crash.pkl')
     with open(file_name, 'wb') as handle:
         pickle.dump(fuzzer.result, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    # --- 新增：保存详细的选择日志 ---
-    # 我们使用 Pickle 而不是 CSV，因为 state 和 mutate_state 是 NumPy 数组，
-    # Pickle 可以完美地保存它们。
     log_file_name = os.path.join(result_path, 'selection_log.pkl')
     with open(log_file_name, 'wb') as handle:
         pickle.dump(fuzz_selection_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -336,10 +320,10 @@ if __name__ == "__main__":
     #sys.stdout = f
     start_time = datetime.now()
     start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"--- 脚本开始运行时间: {start_time_str} ---")
+    print(f"--- start time: {start_time_str} ---")
     main()
     end_time = datetime.now()
     end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"--- 脚本结束运行时间: {end_time_str} ---")
+    print(f"--- end time: {end_time_str} ---")
     duration = end_time - start_time
-    print(f"--- 总计运行时间: {duration} ---")
+    print(f"--- total time: {duration} ---")
