@@ -12,6 +12,7 @@ class fuzzing:
         self.coverage = []
         self.original = []
         self.count = []
+        self.generations = []  # <--- 新增：存储种子的代数
 
         self.current_pose = None
         self.current_reward = None
@@ -19,6 +20,7 @@ class fuzzing:
         self.current_coverage = None
         self.current_original = None
         self.current_index = None
+        self.current_generation = None # <--- 新增：当前种子的代数
 
         self.GMM = None
         self.GMMupdate = None
@@ -38,6 +40,7 @@ class fuzzing:
         self.current_entropy = self.entropy[choose_index]
         self.current_coverage = self.coverage[choose_index]
         self.current_original = self.original[choose_index]
+        self.current_generation = self.generations[choose_index] # <--- 新增：获取当前代数
         if self.count[choose_index] <= 0:
             self.corpus.pop(choose_index)
             self.rewards.pop(choose_index)
@@ -45,6 +48,7 @@ class fuzzing:
             self.coverage.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
+            self.generations.pop(choose_index) # <--- 新增：移除对应代数
             self.current_index = None
 
         return self.current_pose
@@ -59,9 +63,10 @@ class fuzzing:
             self.coverage.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
+            self.generations.pop(choose_index) # <--- 新增：移除对应代数
             self.current_index = None
 
-    def further_mutation(self, current_pose, rewards, entropy, cvg, original):
+    def further_mutation(self, current_pose, rewards, entropy, cvg, original, generation):
         choose_index = self.current_index
         copy_pose = copy.deepcopy(current_pose)
 
@@ -71,6 +76,7 @@ class fuzzing:
             self.entropy[choose_index] = entropy
             self.coverage[choose_index] = cvg
             self.count[choose_index] = 5
+            self.generations[choose_index] = generation # <--- 新增：更新代数
         else:
             self.corpus.append(copy_pose)
             self.rewards.append(rewards)
@@ -78,6 +84,7 @@ class fuzzing:
             self.coverage.append(cvg)
             self.original.append(original)
             self.count.append(5)
+            self.generations.append(generation) # <--- 新增：添加代数
 
     def mutation(self, states):
         delta_states = np.random.choice(2, 15, p=[0.9, 0.1])
@@ -97,6 +104,7 @@ class fuzzing:
             self.coverage.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
+            self.generations.pop(choose_index) # <--- 新增：移除对应代数
             self.current_index = None
 
     def flatten_states(self, states):

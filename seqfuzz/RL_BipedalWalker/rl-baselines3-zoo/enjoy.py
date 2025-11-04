@@ -8,7 +8,7 @@ from utils import ALGOS, create_test_env, get_latest_run_id, get_saved_hyperpara
 from utils.exp_manager import ExperimentManager
 from utils.utils import StoreDict
 from fuzz.fuzz import fuzzing
-
+from datetime import datetime
 import joblib
 from tapnet import predict_siamese, Hyperparameter
 import torch
@@ -55,7 +55,15 @@ def main():
     )
     parser.add_argument("--em", action="store_true", default=True)
     args = parser.parse_args()
-
+    # --- 新增代码：在这里创建基于种子和时间戳的唯一文件夹 ---
+    now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
+    result_folder = f"{now_str}_seed_{args.seed}"
+    result_path = os.path.join('results', result_folder)
+    os.makedirs(result_path, exist_ok=True)
+    log_file_path = os.path.join(result_path, 'fuzz.txt')
+    f = open(log_file_path, 'w', buffering=1)
+    sys.stdout = f
+    sys.stderr = f
     # Going through custom gym packages to let them register in the global registory
     for env_module in args.gym_packages:
         importlib.import_module(env_module)
@@ -193,7 +201,7 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 1000
+    seeds_num = 100
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     while i < seeds_num:
@@ -231,22 +239,23 @@ def main():
                     break
             entropy = np.abs(episode_reward_mutate - episode_reward) / np.sum(delta_states)
             cvg = fuzzer.state_coverage(sequences)
-            fuzzer.further_mutation(states, episode_reward, entropy, cvg, states)
+            fuzzer.further_mutation(states, episode_reward, entropy, cvg, states,0)
             print(entropy, episode_reward, episode_reward_mutate, done, cvg)
             i += 1
             pbar.update(1)
 
     
-    with open('./results/corpus_EM.pkl', 'wb') as handle:
+    with open(os.path.join(result_path, 'corpus_EM.pkl'), 'wb') as handle:
         pickle.dump(fuzzer.corpus, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    with open('./results/rewards_EM.pkl', 'wb') as handle:
+    with open(os.path.join(result_path, 'rewards_EM.pkl'), 'wb') as handle:
         pickle.dump(fuzzer.rewards, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    with open('./results/entropy_EM.pkl', 'wb') as handle:
+    with open(os.path.join(result_path, 'entropy_EM.pkl'), 'wb') as handle:
         pickle.dump(fuzzer.entropy, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    with open('./results/cvg_EM.pkl', 'wb') as handle:
+    with open(os.path.join(result_path, 'cvg_EM.pkl'), 'wb') as handle:
         pickle.dump(fuzzer.coverage, handle, protocol=pickle.HIGHEST_PROTOCOL)
     fuzzer.count = [5] * len(fuzzer.corpus)
     fuzzer.original = copy.deepcopy(fuzzer.corpus)
+    mutation_log = [] # <--- 新增：初始化变异日志列表
 
     # HACK: start fuzzing
     start_fuzz_time = time.time()
@@ -258,14 +267,13 @@ def main():
     time_of_fuzzer = 0
     time_of_DynEM = 0
 
-    successObs = open('results/noCrashStateSeqV2.txt', mode='a')
-    failObs = open('results/crashStateSeqV2.txt', mode='a')
-    crashF_40 = open('results/crashStateSeqV2_40.txt', mode='a')
-    noCrashF_40 = open('results/noCrashStateSeqV2_40.txt', mode='a')
-    timeStamp = open('results/timeStamp.txt', mode='a')
-    seedsLog = open('results/all_run_seeds.txt', mode='a')
+    successObs = open(os.path.join(result_path, 'noCrashStateSeqV2.txt'), mode='a')
+    failObs = open(os.path.join(result_path, 'crashStateSeqV2.txt'), mode='a')
+    crashF_40 = open(os.path.join(result_path, 'crashStateSeqV2_40.txt'), mode='a')
+    noCrashF_40 = open(os.path.join(result_path, 'noCrashStateSeqV2_40.txt'), mode='a')
+    timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
     seedcount = 0
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<5000:
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<100:
     # while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0:
         is_crash = False
         seedcount+=1
@@ -273,6 +281,7 @@ def main():
         temp1_time = time.time()
         states = fuzzer.get_pose()
         mutate_states = fuzzer.mutation(states)
+        current_gen = fuzzer.current_generation + 1 # <--- 新增：计算当前变异的代数
         state = None
         episode_reward = 0.0
         obs = env.reset(mutate_states)
@@ -376,7 +385,7 @@ def main():
             if cvg < cvg_threshold or episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
-                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose)
+                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
         else:
 
             if len(output_obs) == Hyperparameter.Step:
@@ -413,36 +422,29 @@ def main():
             if episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
-                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose)
-        #modify
-        try:
-            outputStr = ''
-            for d in mutate_states: 
-                outputStr = outputStr + str(d) + ', '
-            
-            # 根据标志位添加前缀
-            if is_crash:
-                seedsLog.write(f"[CRASH] {outputStr}\n")
-            else:
-                seedsLog.write(f"[SUCCESS] {outputStr}\n")
-                
-        except TypeError:
-            # 同样处理 TypeError
-            if is_crash:
-                seedsLog.write(f"[CRASH] {str(mutate_states)}\n")
-            else:
-                seedsLog.write(f"[SUCCESS] {str(mutate_states)}\n")
-        #modify
+                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
+        # --- 新增：记录本次变异的日志 ---
+        log_entry = {
+            'state': copy.deepcopy(mutate_states), # 记录变异的 state
+            'generation': current_gen,             # 记录它是第几代
+            'crashed': is_crash                    # 记录是否导致 crash
+        }
+        mutation_log.append(log_entry)
+        # --- 日志记录结束 ---
         current_time = time.time()
         time_of_fuzzer += current_time - temp2_time
         print('total reward: ', episode_reward, ', coverage: ', cvg, ', passed time: ', current_time - start_fuzz_time, ', corpus size: ', len(fuzzer.corpus), 'time_of_fuzzer: ', time_of_fuzzer, 'time_of_env: ', time_of_env)
     
     if args.em:
-        file_name = './results/crash_EM.pkl'
+        file_name = os.path.join(result_path, 'crash_EM.pkl')
     else:
-        file_name = './results/crash_noEM.pkl'
+        file_name = os.path.join(result_path, 'crash_noEM.pkl')
     with open(file_name, 'wb') as handle:
         pickle.dump(fuzzer.result, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    # --- 新增：保存完整的变异日志 ---
+    with open(os.path.join(result_path, 'all_run_seeds_0.pkl'), 'wb') as handle:
+        pickle.dump(mutation_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    # --- 保存结束 ---
 
 
     if args.verbose > 0 and len(successes) > 0:
@@ -468,6 +470,14 @@ def main():
 
 
 if __name__ == "__main__":
-    f = open('./results/fuzz.txt', 'w', buffering=1)
-    sys.stdout = f
+    #f = open('./results/fuzz.txt', 'w', buffering=1)
+    #sys.stdout = f
+    start_time = datetime.now()
+    start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"--- start time: {start_time_str} ---")
     main()
+    end_time = datetime.now()
+    end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"--- end time: {end_time_str} ---")
+    duration = end_time - start_time
+    print(f"--- total time: {duration} ---")

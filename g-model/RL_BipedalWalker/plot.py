@@ -1,295 +1,246 @@
-# g-model/RL_BipedalWalker/plot.py
-
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
 import os
-import argparse
 import time
-from collections import Counter
-from sklearn.manifold import TSNE # 依赖于 plot_full_space.py 的风格
+# import argparse  <-- 已移除
 
-# --- 配置 ---
-IMG_DIR = 'results' 
-LOG_FILE = 'results/all_fuzz_cases_log.pickle'
-# --- 结束配置 ---
+# --- 1. 配置 ---
+
+# !!! 请在这里修改为您要分析的文件的“相对路径” !!!
+# 假设您从 RL_BipedalWalker 文件夹运行此脚本，
+# 那么您的路径应该以 "results/" 开头。
+LOG_FILE_PATH = "all_test_cases_log.pkl"  # <-- 在这里修改文件名
+
+# 这些将是保存的图表文件名generative+novelty_50_all_test_cases_log.pkl
+PLOT_1_FILE = 'test_gen_crash_trend.png'
+PLOT_2_FILE = 'test_gen_input_space_tsne.png'
+
+# --- 2. 核心辅助函数 (已修改以适应 test_gen.py 的日志) ---
 
 def load_data(file_path):
-    """
-    加载 pickle 文件 (仿照: plot.py, findstep.py)
-    """
+    """加载 all_test_cases_log.pkl 文件"""
     if not os.path.exists(file_path):
         print(f"错误: 未找到文件: {file_path}")
-        print("请先运行 enjoy.py 生成该文件。")
+        print(f"请确保 'LOG_FILE_PATH' (在 {__file__} 的第 11 行) 设置了正确的文件路径。")
         return None
     
-    print(f"正在从 {file_path} 加载数据...")
     try:
+        print(f"正在从 {file_path} 加载原始日志数据...")
         with open(file_path, 'rb') as f:
             data = pickle.load(f)
+        print(f"原始日志加载完成，总共 {len(data)} 条记录。")
         return data
     except Exception as e:
         print(f"加载 pickle 文件时出错: {e}")
         return None
 
-def preprocess_data_for_deduplication(data):
+def deduplicate_log(original_log_data):
     """
-    核心函数：对所有迭代数据进行去重。
-    我们将遍历所有 N 次迭代，构建一个关于 *独特* 输入状态的字典。
+    (新函数)
+    根据 'input' 字段对日志进行去重，只保留第一次出现的条目。
+    这对于绘制“独特输入”图表至关重要。
     """
-    print("正在对所有日志数据进行去重预处理...")
+    print("正在根据 'input' 对日志进行去重（保留首次出现）...")
     
-    all_states = data['all_mutate_states'] # (N, 15)
-    all_gens = data['all_generations']     # (N,)
-    all_crashes = data['all_is_crash']     # (N,)
+    seen_inputs = set()
+    deduplicated_log = []
     
-    # unique_states_map 结构:
-    # key: state_bytes (独特输入)
-    # value: {
-    #    'state_array': 15D numpy 数组
-    #    'first_seen_iteration': 首次发现此输入的迭代索引 (int)
-    #    'first_seen_generation': 首次发现此输入时的代数 (int)
-    #    'did_crash': 此输入是否 *曾经* 导致过崩溃 (int, 0 或 1)
-    # }
-    unique_states_map = {}
-
-    for i in range(len(all_states)):
-        state_array = all_states[i]
-        state_bytes = state_array.tobytes()
-        did_crash = all_crashes[i]
-        gen = all_gens[i]
-        
-        if state_bytes not in unique_states_map:
-            # 第一次见到这个独特输入
-            unique_states_map[state_bytes] = {
-                'state_array': state_array,
-                'first_seen_iteration': i,
-                'first_seen_generation': gen,
-                'did_crash': did_crash
-            }
-        else:
-            # 已经见过这个输入。我们只关心是否需要更新 'did_crash' 状态
-            # (仿照 plot_full_space.py 的逻辑)
-            unique_states_map[state_bytes]['did_crash'] = max(
-                unique_states_map[state_bytes]['did_crash'], did_crash
-            )
+    for entry in original_log_data:
+        # 'input' 是一个列表，列表不能被哈希。将其转换为元组(tuple)。
+        try:
+            input_tuple = tuple(entry["input"])
+        except (KeyError, TypeError):
+            print("警告: 发现格式不正确的日志条目，已跳过。")
+            continue
             
-    print(f"预处理完成。总迭代次数 {len(all_states)}，独特输入状态 {len(unique_states_map)}")
-    return unique_states_map
+        # 核心去重逻辑
+        if input_tuple not in seen_inputs:
+            seen_inputs.add(input_tuple)
+            deduplicated_log.append(entry)
+
+    print(f"去重完成。总共找到 {len(deduplicated_log)} 个独特的 'input'。")
+    
+    if not deduplicated_log:
+        print("错误：未能从日志中检测到任何有效的 'input'。")
+        return None
+
+    return deduplicated_log
 
 
-def plot_unique_crashes_vs_discovery(unique_states_map):
+# --- 3. 图表1：崩溃趋势图 (已修改) ---
+
+def plot_crash_trend(deduplicated_log):
     """
-    1. 绘制 *独特* Crash 数量随 *独特* 输入发现数量的曲线图
-       (HACK: 此图现在已完全去重)
+    (已修改)
+    绘制随发现的“独特输入”数量而变化的“独特崩溃”累积数量。
+    使用 'is_crash' 键。
     """
-    print("\n[1/3] 正在绘制 独特崩溃 vs. 独特输入 (仿照 plot.py)...")
+    print(f"\n[图表 1] 正在计算崩溃趋势...")
+    
+    cumulative_crashes_list = []
+    current_crash_count = 0
+    
+    # deduplicated_log 已经按首次出现排序
+    for i, entry in enumerate(deduplicated_log):
+        # 使用 'is_crash' 键 (来自 test_gen.py)
+        if entry.get('is_crash', False):
+            current_crash_count += 1
+        
+        cumulative_crashes_list.append(current_crash_count)
+            
+    if not cumulative_crashes_list:
+        print("[图表 1] 未找到可绘制的崩溃趋势数据。")
+        return
+
+    print(f"正在绘制 {len(cumulative_crashes_list)} 个独特输入...")
+    
+    iterations = range(1, len(cumulative_crashes_list) + 1)
+    
+    plt.figure(figsize=(12, 7))
+    plt.plot(iterations, cumulative_crashes_list, label='Cumulative Unique Crashes', color='red', linewidth=2)
+    plt.fill_between(iterations, cumulative_crashes_list, color='red', alpha=0.1)
+    
+    plt.title('Unique Crashes Found vs. Unique Inputs Discovered')
+    plt.xlabel('Number of Unique Inputs Discovered (by First Appearance)')
+    plt.ylabel('Cumulative Number of Unique Crashing Inputs')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.ylim(bottom=0)
+    plt.xlim(left=0)
     
     try:
-        # 按 "首次发现的迭代" 排序，以重建发现历史
-        # (仿照 plot.py 的迭代逻辑)
-        unique_entries = sorted(unique_states_map.values(), key=lambda x: x['first_seen_iteration'])
-        
-        if not unique_entries:
-            print("  警告: 未找到独特的崩溃数据。")
-            return
-
-        # 提取崩溃状态 (0 或 1)
-        crash_status_list = [entry['did_crash'] for entry in unique_entries]
-        
-        # 计算累积的 *独特* 崩溃
-        cumulative_unique_crashes = np.cumsum(crash_status_list)
-        
-        # X 轴：发现的独特输入的数量
-        unique_inputs_discovered = np.arange(1, len(unique_entries) + 1)
-        
-        plt.figure(figsize=(12, 7))
-        # (仿照 plot.py 的绘图风格)
-        plt.plot(unique_inputs_discovered, cumulative_unique_crashes, label='Unique Crashes Found', color='red', linewidth=2)
-        plt.fill_between(unique_inputs_discovered, cumulative_unique_crashes, color='red', alpha=0.1)
-        
-        plt.title('Unique Crashes Found vs. Unique Inputs Discovered (De-duplicated)', fontsize=14)
-        plt.xlabel('Number of Unique Inputs Discovered', fontsize=12)
-        plt.ylabel('Cumulative Number of Unique Crashes', fontsize=12)
-        plt.legend()
-        plt.grid(True, linestyle='--', alpha=0.5)
-        plt.xlim(0, len(unique_inputs_discovered))
-        plt.ylim(bottom=0)
-    
-        save_path = os.path.join(IMG_DIR, 'crashes_over_time_deduplicated.png')
-        plt.savefig(save_path)
-        plt.close()
-        print(f"  图像已保存到: {save_path}")
-        
+        plt.savefig(PLOT_1_FILE)
+        print(f"[图表 1] 已保存到: {PLOT_1_FILE}")
     except Exception as e:
-        print(f"  绘制 独特崩溃 vs. 独特输入 时出错: {e}")
+        print(f"[图表 1] 保存图表时出错: {e}")
+    plt.close() # 释放内存
 
 
-def plot_mutate_state_tsne(unique_states_map):
+# --- 4. 图表2：t-SNE 空间图 (已修改) ---
+
+def run_tsne(data, n_samples):
     """
-    2. 绘制 mutate_state (15D 输入) 的 t-SNE 降维二维分布图
-       (风格和逻辑借鉴自: plot_full_space.py)
-       (HACK: 此函数现在使用预处理的 unique_states_map)
+    (保持不变)
+    对 (N, 15) 的数据运行 t-SNE 降维到 2 维
     """
-    print("\n[2/3] 正在绘制 mutate_state t-SNE 覆盖率 (仿照 plot_full_space.py)...")
+    if n_samples < 50:
+        print(f"数据点太少 ({n_samples}个)，t-SNE 可能效果不佳。")
+        perplexity_value = max(5, n_samples - 1)
+    else:
+        perplexity_value = min(30, n_samples - 1)
+        
+    print(f"正在对 {n_samples} 个独特的输入（{data.shape[1]}维）运行 t-SNE (Perplexity={perplexity_value})...")
     
-    try:
-        if not unique_states_map:
-            print("  警告: 未找到 'all_mutate_states' 数据。")
-            return
-            
-        # 准备 t-SNE 数据
-        state_array = np.array([entry['state_array'] for entry in unique_states_map.values()])
-        labels = np.array([entry['did_crash'] for entry in unique_states_map.values()])
+    start_time = time.time()
+    tsne = TSNE(
+        n_components=2,
+        verbose=1,
+        perplexity=perplexity_value,
+        max_iter=1000, 
+        random_state=42
+    )
+    tsne_results = tsne.fit_transform(data)
+    
+    end_time = time.time()
+    print(f"t-SNE 运行完成，耗时: {end_time - start_time:.2f} 秒")
+    return tsne_results
 
-        print(f"  总共找到 {state_array.shape[0]} 个独特的输入状态。")
+def plot_full_space(deduplicated_log):
+    """
+    (已修改)
+    绘制 t-SNE 结果的 2D 散点图，用两种颜色区分
+    使用 'input' 和 'is_crash' 键。
+    """
+    print(f"\n[图表 2] 正在准备 t-SNE 数据...")
+    
+    all_data_list = []
+    labels_list = []
+    
+    for entry in deduplicated_log:
+        try:
+            # 'input' 是一个列表，直接使用
+            all_data_list.append(entry["input"])
+            # 'is_crash' 是一个布尔值
+            labels_list.append(1 if entry["is_crash"] else 0) # 1 = Crash, 0 = No Crash
+        except KeyError:
+            continue
+        
+    if not all_data_list:
+        print("[图表 2] 未找到可用于 t-SNE 的数据。")
+        return
 
-        print(f"  正在运行 t-SNE (n_components=2) ... 这可能需要一些时间 ...")
-        start_time = time.time()
-        
-        # 修复: n_iter -> max_iter
-        tsne = TSNE(n_components=2, verbose=0, perplexity=30, max_iter=1000, init='pca', learning_rate='auto')
-        
-        tsne_data = tsne.fit_transform(state_array)
-        print(f"  t-SNE 运行完成，耗时: {time.time() - start_time:.2f} 秒。")
-
-        crashing_points = tsne_data[labels == 1]
-        non_crashing_points = tsne_data[labels == 0]
-        
-        print(f"  非崩溃点: {non_crashing_points.shape[0]}")
-        print(f"  崩溃点: {crashing_points.shape[0]}")
-        
-        plt.figure(figsize=(12, 10))
-        
+    # 将列表的列表转换为 (N, 15) 的 Numpy 数组
+    all_data = np.array(all_data_list)
+    labels = np.array(labels_list)
+    
+    # 运行 t-SNE
+    tsne_results = run_tsne(all_data, all_data.shape[0])
+    
+    # 绘制
+    print(f"正在绘制 {tsne_results.shape[0]} 个数据点...")
+    crashing_points = tsne_results[labels == 1]
+    non_crashing_points = tsne_results[labels == 0]
+    
+    print(f"  非崩溃点: {non_crashing_points.shape[0]}")
+    print(f"  崩溃点: {crashing_points.shape[0]}")
+    
+    plt.figure(figsize=(12, 10))
+    plt.scatter(
+        non_crashing_points[:, 0], non_crashing_points[:, 1], 
+        c='blue', alpha=0.4, s=10, 
+        label=f'Non-Crashing Inputs ({non_crashing_points.shape[0]})'
+    )
+    if crashing_points.shape[0] > 0:
         plt.scatter(
-            non_crashing_points[:, 0], 
-            non_crashing_points[:, 1], 
-            c='blue', 
-            alpha=0.4,
-            s=10, 
-            label=f'Non-Crashing Inputs ({non_crashing_points.shape[0]})'
+            crashing_points[:, 0], crashing_points[:, 1], 
+            c='red', alpha=0.8, s=15, 
+            label=f'Crashing Inputs ({crashing_points.shape[0]})'
         )
-        
-        if crashing_points.shape[0] > 0:
-            plt.scatter(
-                crashing_points[:, 0], 
-                crashing_points[:, 1], 
-                c='red', 
-                alpha=0.8,
-                s=15, 
-                label=f'Crashing Inputs ({crashing_points.shape[0]})'
-            )
-        
-        plt.title('t-SNE Visualization of Explored Input Space (15D Ground Types -> 2D)', fontsize=14)
-        plt.xlabel('t-SNE Component 1', fontsize=12)
-        plt.ylabel('t-SNE Component 2', fontsize=12)
-        plt.legend()
-        plt.grid(True, linestyle='--', alpha=0.5)
-        
-        save_path = os.path.join(IMG_DIR, 'full_input_space_tsne.png')
-        plt.savefig(save_path)
-        plt.close()
-        print(f"  图像已保存到: {save_path}")
-
-    except Exception as e:
-        print(f"  绘制 mutate_state t-SNE 时出错: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-def plot_crash_generation_histogram(unique_states_map):
-    """
-    3. 绘制导致崩溃种子的代数的图
-       (风格和逻辑借鉴自: findstep.py)
-       (HACK: 此函数现在使用预处理的 unique_states_map)
-    """
-    print("\n[3/3] 正在绘制 崩溃代数直方图 (仿照 findstep.py)...")
+    
+    plt.title('t-SNE Visualization of Unique Explored Inputs (by First Appearance)')
+    plt.xlabel('t-SNE Component 1')
+    plt.ylabel('t-SNE Component 2')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.5)
     
     try:
-        # 提取所有 *独特* 崩溃输入的 *首次发现* 代数
-        crashing_generations = [
-            entry['first_seen_generation'] 
-            for entry in unique_states_map.values() 
-            if entry['did_crash'] == 1
-        ]
-        
-        if not crashing_generations:
-            print("  警告: 未找到崩溃种子，无法绘制代数图。")
-            return
-        
-        print(f"  总共找到 {len(crashing_generations)} 个 *独特* 的崩溃输入。")
-
-        # 统计 (仿照 findstep.py)
-        generation_counts = Counter(crashing_generations)
-        
-        crashing_gen_array = np.array(crashing_generations)
-        max_gen = int(crashing_gen_array.max())
-        min_gen = int(crashing_gen_array.min())
-        generations = np.arange(min_gen, max_gen + 2) 
-        counts = [generation_counts.get(gen, 0) for gen in generations] 
-        
-        print("\n  --- 独特崩溃代数统计 (已去重) ---")
-        print(f"  平均崩溃代数: {crashing_gen_array.mean():.2f}")
-        print(f"  中位崩溃代数: {np.median(crashing_gen_array)}")
-        print(f"  最小崩溃代数: {min_gen}")
-        print(f"  最大崩溃代数: {max_gen}")
-
-        plt.figure(figsize=(12, 7))
-        # (仿照 findstep.py)
-        plt.bar(generations, counts, color='red', alpha=0.7, align='center', width=0.8) 
-        
-        plt.title('Histogram of Unique Crash Generations (De-duplicated)', fontsize=14)
-        plt.xlabel('Mutation Generation (Depth from Initial Seed)', fontsize=12)
-        plt.ylabel('Number of Unique Crashes Found', fontsize=12)
-        
-        if max_gen - min_gen < 50:
-             plt.xticks(np.arange(min_gen, max_gen + 1))
-        
-        plt.grid(True, linestyle='--', alpha=0.5, axis='y')
-        
-        save_path = os.path.join(IMG_DIR, 'crash_generation_histogram.png')
-        plt.savefig(save_path)
-        plt.close()
-        print(f"  图像已保存到: {save_path}")
-
+        plt.savefig(PLOT_2_FILE)
+        print(f"[图表 2] 已保存到: {PLOT_2_FILE}")
     except Exception as e:
-        print(f"  绘制 崩溃代数 时出错: {e}")
+        print(f"[图表 2] 保存图表时出错: {e}")
+    plt.close() # 释放内存
 
+
+# --- 5. 主函数 (已修改) ---
 
 def main():
-    # 使用在脚本顶部定义的硬编码 LOG_FILE
-    input_file = LOG_FILE
-    
-    # 加载数据
-    data = load_data(input_file)
-    if data is None:
+    # 命令行解析代码已被移除
+    # parser = argparse.ArgumentParser(description="为 test_gen.py 日志绘制分析图表")
+    # ...
+    # args = parser.parse_args()
+
+    # 1. 加载原始数据
+    # 直接使用在脚本顶部定义的 LOG_FILE_PATH 变量
+    original_log_data = load_data(LOG_FILE_PATH)
+    if not original_log_data:
         return
 
-    # 检查数据完整性
-    required_keys = ['all_mutate_states', 'all_generations', 'all_is_crash']
-    if not all(key in data for key in required_keys):
-        print("错误: Pickle 文件中缺少必要的键。")
-        print(f"需要: {required_keys}")
-        print(f"已有: {list(data.keys())}")
+    # 2. 对日志进行去重
+    # (这是新日志格式所必需的)
+    deduplicated_log = deduplicate_log(original_log_data)
+    if not deduplicated_log:
+        print("未能从日志中提取任何有效数据。退出。")
         return
-
-    # 创建输出目录
-    os.makedirs(IMG_DIR, exist_ok=True) 
-
-    # -----------------------------------------------------------------
-    # HACK: 在所有绘图之前执行核心去重步骤
-    # -----------------------------------------------------------------
-    unique_states_map = preprocess_data_for_deduplication(data)
-
-    # 运行所有绘图函数
-    # 1. 崩溃 vs 独特输入
-    plot_unique_crashes_vs_discovery(unique_states_map)
-    # 2. t-SNE 覆盖率
-    plot_mutate_state_tsne(unique_states_map)
-    # 3. 崩溃代数
-    plot_crash_generation_histogram(unique_states_map)
+        
+    # 3. 运行图表 1
+    plot_crash_trend(deduplicated_log)
     
-    print(f"\n所有绘图已完成并保存到 '{IMG_DIR}' 文件夹中。")
+    # 4. 运行图表 2
+    plot_full_space(deduplicated_log)
+        
+    print("\n所有分析和绘图已完成。")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
