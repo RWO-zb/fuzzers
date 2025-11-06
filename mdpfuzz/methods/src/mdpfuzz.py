@@ -96,7 +96,7 @@ class Fuzzer():
         return episode_reward, done, obs_seq, exec_time
 
 
-    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, **kwargs) -> Tuple[float, float, bool, List[np.ndarray], float]:
+    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None,generation: int = None ,**kwargs) -> Tuple[float, float, bool, List[np.ndarray], float]:
         '''
         Computes the sensitivity of the state @state.
         It first perturbs the state and computes the perturbation quantity.
@@ -123,6 +123,7 @@ class Fuzzer():
                 oracle=crash_perturbed,
                 reward=acc_reward_perturbed,
                 episode_length=episode_length,
+                Generation=generation, # <--- 添加此行
                 test_exec_time=exec_time_perturbed,
                 run_time=time.time()
             )
@@ -154,6 +155,7 @@ class Fuzzer():
                     oracle=crash,
                     reward=reward,
                     episode_length=episode_length,
+                    Generation=0, # <--- 添加此行
                     test_exec_time=exec_time,
                     run_time=time.time()
                     )
@@ -209,13 +211,13 @@ class Fuzzer():
         self.config['num_initial_executions'] = num_initial_executions
         pbar = tqdm.tqdm(total=n)
         for state in initial_inputs:
-            sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, **kwargs)
+            sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, **kwargs)
             state_sequence_conc = self._concatenate_state_sequence(state_sequence)
             # computes the coverage and adds test case in the pool
             t0 = time.time()
             coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
             coverage_time = time.time() - t0
-            pool.add(state, acc_reward, coverage, sensitivity, oracle)
+            pool.add(state, acc_reward, coverage, sensitivity, oracle, generation=0)
 
             if self.logger is not None:
                 episode_length = len(state_sequence)
@@ -226,6 +228,7 @@ class Fuzzer():
                     episode_length=episode_length,
                     sensitivity=sensitivity,
                     coverage=coverage,
+                    Generation=0, # <--- 添加此行
                     test_exec_time=exec_time,
                     coverage_time=coverage_time,
                     run_time=time.time()
@@ -261,7 +264,8 @@ class Fuzzer():
                     if (current_time - start_time) > test_budget_in_seconds:
                         break
 
-                input, acc_reward_input = pool.select(self.rng)
+                input, acc_reward_input, generation = pool.select(self.rng)
+                new_generation = generation + 1
                 mutant = self.mutate_validate(input, **kwargs)
                 acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
                 state_sequence_conc = self._concatenate_state_sequence(state_sequence)
@@ -275,8 +279,8 @@ class Fuzzer():
                     if local_sensitivity:
                         sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                     else:
-                        sensitivity, _acc_reward_mutant_copy, _none_oracle, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, **kwargs)
-                    pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle)
+                        sensitivity, _acc_reward_mutant_copy, _none_oracle, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
+                    pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle, generation=new_generation)
 
                 if self.logger is not None:
                     episode_length = len(state_sequence)
@@ -287,6 +291,7 @@ class Fuzzer():
                         episode_length=episode_length,
                         sensitivity=sensitivity,
                         coverage=coverage,
+                        Generation=new_generation, # <--- 添加此行
                         test_exec_time=exec_time,
                         coverage_time=coverage_time,
                         run_time=time.time()
@@ -340,8 +345,8 @@ class Fuzzer():
             pool = IndexedPool(is_integer=np.issubdtype(initial_inputs.dtype, np.integer)) # type: Pool
         pbar = tqdm.tqdm(total=n)
         for state in initial_inputs:
-            sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, **kwargs)
-            pool.add(state, acc_reward, 0, sensitivity, oracle)
+            sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, **kwargs)
+            pool.add(state, acc_reward, 0, sensitivity, oracle, generation=0)
 
             if self.logger is not None:
                 episode_length = len(state_sequence)
@@ -351,6 +356,7 @@ class Fuzzer():
                     reward=acc_reward,
                     episode_length=episode_length,
                     sensitivity=sensitivity,
+                    Generation=0, # <--- 添加此行
                     test_exec_time=exec_time,
                     run_time=time.time()
                 )
@@ -384,7 +390,8 @@ class Fuzzer():
                 if (current_time - start_time) > test_budget_in_seconds:
                     break
 
-            input, acc_reward_input = pool.select(self.rng)
+            input, acc_reward_input, generation = pool.select(self.rng)
+            new_generation = generation + 1
             mutant = self.mutate_validate(input, **kwargs)
             acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
             sensitivity = None
@@ -394,8 +401,8 @@ class Fuzzer():
                 if local_sensitivity:
                     sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                 else:
-                    sensitivity, _acc_reward_mutant_copy, _none_oracle, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, **kwargs)
-                pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle)
+                    sensitivity, _acc_reward_mutant_copy, _none_oracle, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
+                pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle, generation=new_generation)
 
             if self.logger is not None:
                 episode_length = len(state_sequence)
@@ -405,6 +412,7 @@ class Fuzzer():
                     reward=acc_reward_mutant,
                     episode_length=episode_length,
                     sensitivity=sensitivity,
+                    Generation=new_generation, # <--- 添加此行
                     test_exec_time=exec_time,
                     run_time=time.time()
                 )
@@ -506,6 +514,7 @@ class Fuzzer():
                     oracle=oracle,
                     reward=acc_reward,
                     episode_length=episode_length,
+                    Generation=0, # <--- 添加此行
                     test_exec_time=exec_time,
                     run_time=time.time()
                 )

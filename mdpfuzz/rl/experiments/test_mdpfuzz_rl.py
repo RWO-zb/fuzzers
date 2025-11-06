@@ -9,8 +9,6 @@ import sys
 sys.path.append('../../methods/src/')
 from mdpfuzz import Fuzzer
 from bw_executor import BipedalWalkerExecutor
-from tt_executor import TaxiExecutor
-from ll_executor import LunarLanderExecutor
 
 '''
 Python script that executes MDPFuzz for given parameters (or reads the latter in the related file).
@@ -20,8 +18,8 @@ Args:
     3. Path for logging. It is appended by "k_tau_gamma_seed".
 '''
 
-RL_KEYS = ['bw', 'll', 'tt']
-RL_NAMES = ['Bipedal Walker', 'Lunar Lander', 'Taxi']
+RL_KEYS = ['bw']
+RL_NAMES = ['Bipedal Walker']
 
 if __name__ == '__main__':
     torch.set_num_threads(1)
@@ -61,14 +59,7 @@ if __name__ == '__main__':
     rl = args[5]
     assert rl in RL_KEYS
     rl_index = RL_KEYS.index(rl)
-
-    if rl_index == 0:
-        executor = BipedalWalkerExecutor(300, 0)
-    elif rl_index == 1:
-        executor = LunarLanderExecutor(1000, 0)
-    else:
-        executor = TaxiExecutor(0, 0)
-
+    executor = BipedalWalkerExecutor(300, 0)
     policy = executor.load_policy()
 
     fuzzer = Fuzzer(random_seed=seed, k=k, tau=tau, gamma=gamma, executor=executor)

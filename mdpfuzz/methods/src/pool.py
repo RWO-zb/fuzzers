@@ -16,19 +16,20 @@ class Pool(ABC):
         self.coverages = [] # type: List[float]
         self.selected = [] # type: List[int]
         self.crashes = [] # type: List[np.ndarray]
+        self.generation = [] # type: List[int]
 
         self.delimiter = ' '
 
 
     @abstractmethod
-    def add(self, input: np.ndarray, acc_reward: float, coverage: float, sensitivity: float, oracle: bool) -> None:
+    def add(self, input: np.ndarray, acc_reward: float, coverage: float, sensitivity: float, oracle: bool,generation: int) -> None:
         pass
 
     def add_crash(self, state: np.ndarray):
         '''Keeps track of failure-triggering states by adding @state to the list of crashes.'''
         self.crashes.append(state.copy())
 
-    def select(self, rng: np.random.Generator) -> Tuple[np.ndarray, float]:
+    def select(self, rng: np.random.Generator) -> Tuple[np.ndarray, float,int]:
         '''Returns one of the inputs along with its accumulated reward of the pool with random sampling biased by the sensitivities.'''
         if np.sum(self.sensitivities) == 0:
             index = rng.choice(len(self.inputs))
@@ -36,7 +37,7 @@ class Pool(ABC):
             index = rng.choice(len(self.inputs), p=(self.sensitivities / np.sum(self.sensitivities)))
         self.selected[index] += 1
         # copy.deepcopy(self.inputs[index]) # .copy(() seems to be enough
-        return self.inputs[index].copy(), self.rewards[index]
+        return self.inputs[index].copy(), self.rewards[index],self.generation[index]
 
     @abstractmethod
     def save(self, path: str):
@@ -68,7 +69,7 @@ class IndexedPool(Pool):
             return self.delimiter.join([str(i) for i in input])
 
 
-    def add(self, input: np.ndarray, acc_reward: float, coverage: float, sensitivity: float, oracle: bool):
+    def add(self, input: np.ndarray, acc_reward: float, coverage: float, sensitivity: float, oracle: bool,generation: int) -> None:
         '''
         Adds a test case result to the pool.
         If the input/state has already been evaluated, the results are erased.
@@ -88,6 +89,7 @@ class IndexedPool(Pool):
             self.added.append(0)
             self.selected.append(0)
             self.oracles.append(int(oracle))
+            self.generation.append(generation)
         else:
             # print(f'input {key} is already in the pool!')
             self.rewards[index] = acc_reward
@@ -117,6 +119,7 @@ class IndexedPool(Pool):
         np.savetxt(path + '_rewards.txt', self.rewards, delimiter=',')
         np.savetxt(path + '_sensitivities.txt', self.sensitivities, delimiter=',')
         np.savetxt(path + '_coverages.txt', self.coverages, delimiter=',')
+        np.savetxt(path + '_generation.txt', self.generation, fmt='%1.0f', delimiter=',')
 
 
     #TODO: loading integer values does not work (but it is not an used feature)
@@ -138,6 +141,7 @@ class IndexedPool(Pool):
         self.rewards = [i for i in np.loadtxt(path + '_rewards.txt', delimiter=',', dtype=float)]
         self.sensitivities = [i for i in np.loadtxt(path + '_sensitivities.txt', delimiter=',', dtype=float)]
         self.coverages = [i for i in np.loadtxt(path + '_coverages.txt', delimiter=',', dtype=float)]
+        self.generation = [i for i in np.loadtxt(path + '_generation.txt', delimiter=',', dtype=int)]
 
         tmp = len(self.inputs)
         assert len(self.added) == tmp
@@ -147,16 +151,18 @@ class IndexedPool(Pool):
         assert len(self.sensitivities) == tmp
         assert len(self.coverages) == tmp
         assert len(self.oracles) == tmp
+        assert len(self.generation) == tmp
 
 
 class LightPool(Pool):
     '''Light implementation that does not support saving/loading and only records the needed data.'''
 
-    def add(self, input: np.ndarray, acc_reward: float, coverage: float, sensitivity: float, oracle: bool) -> None:
+    def add(self, input: np.ndarray, acc_reward: float, coverage: float, sensitivity: float, oracle: bool, generation: int) -> None:
         self.inputs.append(input)
         self.rewards.append(acc_reward)
         self.selected.append(0)
         self.sensitivities.append(sensitivity)
+        self.generation.append(generation)
 
 
     def save(self, path: str):
@@ -172,6 +178,7 @@ class LightPool(Pool):
                 np.savetxt(path + '_inputs.txt', self.inputs, delimiter=',')
                 np.savetxt(path + '_crashes.txt', self.crashes, delimiter=',')
             np.savetxt(path + '_selected.txt', self.selected, fmt='%1.0f', delimiter=',')
+            np.savetxt(path + '_generation.txt', self.generation, fmt='%1.0f', delimiter=',')
             # np.savetxt(path + '_rewards.txt', self.rewards, delimiter=',')
             # np.savetxt(path + '_sensitivities.txt', self.sensitivities, delimiter=',')
 

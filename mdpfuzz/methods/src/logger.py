@@ -97,7 +97,7 @@ class FuzzerLogger:
 
     def __init__(self, filepath: str) -> None:
         self.filepath = filepath
-        self.columns = ['input', 'oracle', 'reward', 'episode_length', 'sensitivity', 'coverage', 'test_exec_time', 'coverage_time', 'run_time']
+        self.columns = ['Input', 'Oracle', 'Reward', 'EpisodeLength', 'Sensitivity', 'Coverage', 'Generation', 'TestExecTime', 'CoverageTime', 'RunTime']
         self.delimiter = '; '
 
     def log(self,
@@ -107,6 +107,7 @@ class FuzzerLogger:
             episode_length: Optional[int] = None,
             sensitivity: Optional[float] = None,
             coverage: Optional[float] = None,
+            Generation: Optional[int] = None,
             run_time: Optional[float] = None,
             test_exec_time: Optional[float] = None,
             coverage_time: Optional[float] = None
@@ -128,17 +129,17 @@ class FuzzerLogger:
         log_data = {
             #TODO: compared to the pool np.savetxt(.), np.array2string is less accurate
             # It would be problematic if the precision difference causes reproducibility issue...
-            'input': np.array2string(input, separator=',').replace('\n', '') if input is not None else 'None',
-            'oracle': str(oracle) if oracle is not None else 'None',
-            'reward': str(reward) if reward is not None else 'None',
-            'episode_length': str(episode_length) if episode_length is not None else 'None',
-            'sensitivity': str(sensitivity) if sensitivity is not None else 'None',
-            'coverage': str(coverage) if coverage is not None else 'None',
-            'run_time': str(run_time) if run_time is not None else 'None',
-            'test_exec_time': str(test_exec_time) if test_exec_time is not None else 'None',
-            'coverage_time': str(coverage_time) if coverage_time is not None else 'None'
+            'Input': np.array2string(input, separator=',').replace('\n', '') if input is not None else 'None',
+            'Oracle': str(oracle) if oracle is not None else 'None',
+            'Reward': str(reward) if reward is not None else 'None',
+            'EpisodeLength': str(episode_length) if episode_length is not None else 'None',
+            'Sensitivity': str(sensitivity) if sensitivity is not None else 'None',
+            'Coverage': str(coverage) if coverage is not None else 'None',
+            'Generation': str(Generation) if Generation is not None else 'None',
+            'RunTime': str(run_time) if run_time is not None else 'None',
+            'TestExecTime': str(test_exec_time) if test_exec_time is not None else 'None',
+            'CoverageTime': str(coverage_time) if coverage_time is not None else 'None'
         }
-
         # ensures correct ordering by using the columns (weakness found when Python version is 3.5)
         log_line = self.delimiter.join([log_data[k] for k in self.columns])
 
@@ -167,11 +168,12 @@ class FuzzerLogger:
                     episode_length = int(values[3]) if values[3] != 'None' else None
                     sensitivity = float(values[4]) if values[4] != 'None' else None
                     coverage = float(values[5]) if values[5] != 'None' else None
-                    test_exec_time = float(values[6]) if values[6] != 'None' else None
-                    coverage_time = float(values[7]) if values[7] != 'None' else None
-                    run_time = float(values[8]) if values[8] != 'None' else None
+                    Generation = int(values[6]) if values[6] != 'None' else None
+                    test_exec_time = float(values[7]) if values[7] != 'None' else None
+                    coverage_time = float(values[8]) if values[8] != 'None' else None
+                    run_time = float(values[9]) if values[9] != 'None' else None
 
-                    data.append([input, oracle, reward, episode_length, sensitivity, coverage, test_exec_time, coverage_time, run_time])
+                    data.append([input, oracle, reward, episode_length, sensitivity, coverage, Generation,test_exec_time, coverage_time, run_time])
                 except:
                     malformed_lines.append('\tLine {}: "{}"'.format(num_line, line.strip()))
         # if malformed_lines != []:

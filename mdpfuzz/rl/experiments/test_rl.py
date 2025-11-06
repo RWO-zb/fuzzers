@@ -8,8 +8,6 @@ import torch
 import sys
 sys.path.append('../../methods/src/')
 from bw_executor import BipedalWalkerExecutor
-from tt_executor import TaxiExecutor
-from ll_executor import LunarLanderExecutor
 from mdpfuzz import Fuzzer
 
 
@@ -22,13 +20,14 @@ Args:
 '''
 
 EXPERIMENT_SEEDS = [2021, 42, 2023, 20, 0]
-RL_KEYS = ['bw', 'll', 'tt']
-RL_NAMES = ['Bipedal Walker', 'Lunar Lander', 'Taxi']
+RL_KEYS = ['bw']
+RL_NAMES = ['Bipedal Walker']
 
 
 if __name__ == '__main__':
     torch.set_num_threads(1)
-    test_budget = 5000
+    test_budget = 1000
+    test_budget_in_seconds=43200
     init_budget = 1000
     k = 10
     tau = 0.01
@@ -62,15 +61,8 @@ if __name__ == '__main__':
     path = '{}_{}_{}_{}_{}'.format(result_path, k, tau, gamma, seed)
     print(path)
 
-
-    if rl_index == 0:
-        executor = BipedalWalkerExecutor(300, 0)
-    elif rl_index == 1:
-        executor = LunarLanderExecutor(1000, 0)
-    else:
-        executor = TaxiExecutor(0, 0)
-
-
+    executor = BipedalWalkerExecutor(300, 0)
+    
     policy = executor.load_policy()
     fuzzer = Fuzzer(random_seed=seed, k=k, tau=tau, gamma=gamma, executor=executor)
 
@@ -84,7 +76,7 @@ if __name__ == '__main__':
         fuzzer.fuzzing_no_coverage(
             n=init_budget,
             policy=policy,
-            test_budget=test_budget,
+            test_budget_in_seconds=test_budget_in_seconds,
             saving_path=path,
             local_sensitivity=True,
             save_logs_only=True,
@@ -93,7 +85,7 @@ if __name__ == '__main__':
         fuzzer.fuzzing(
             n=init_budget,
             policy=policy,
-            test_budget=test_budget,
+            test_budget_in_seconds=test_budget_in_seconds,
             saving_path=path,
             local_sensitivity=True,
             save_logs_only=True,
