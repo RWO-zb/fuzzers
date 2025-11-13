@@ -653,7 +653,7 @@ if __name__ == '__main__':
 
     # experimental parameters
     # MODIFIED: 定义时间预算
-    time_budget_hours = 0.2
+    time_budget_hours = 12
     
     # MODIFIED: test_policy 仍需要 init_budget
     init_budget = 100
@@ -676,15 +676,15 @@ if __name__ == '__main__':
             # MODIFIED: 更新了方法调用
             f.test_policy(model, env_seed, time_budget_hours, init_budget, results_fp)
             
-            print(f"--- Running Novelty Search for {time_budget_hours} hours ---")
-            f = Framework(seed, cell_granularity, descriptors=expert_indices, name=f'Novelty Search')
+            #print(f"--- Running Novelty Search for {time_budget_hours} hours ---")
+            #f = Framework(seed, cell_granularity, descriptors=expert_indices, name=f'Novelty Search')
             # MODIFIED: 更新了方法调用
-            f.novelty_search(
-                model, env_seed,
-                population_size,
-                k,
-                novelty_threshold,
-                time_budget_hours,
-                results_fp
-            )
+            #f.novelty_search(
+                #model, env_seed,
+                #population_size,
+                #k,
+                #novelty_threshold,
+                #time_budget_hours,
+                #results_fp
+            #)
         print(f'Experts done.')
