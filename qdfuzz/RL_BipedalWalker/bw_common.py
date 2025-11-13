@@ -39,10 +39,7 @@ MAX_INPUT = np.array([3 for _ in range(15)])
 MAX_DIST_INPUT: np.ndarray = np.linalg.norm(MAX_INPUT - MIN_INPUT)
 AVG_SIZE = 30
 EXPERT_INDICES = [
-    [0, 1],
-    [2, 3],
-    [4, 8],
-    [5, 11]
+    [4, 8]
 ]
 EXPERT_PLOT_ARGS = [
     {'xlabel': 'distance to the goal', 'ylabel': 'hull angle', 'title': 'Distance vs Hull angle'},

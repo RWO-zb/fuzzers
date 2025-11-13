@@ -26,8 +26,8 @@ RL_NAMES = ['Bipedal Walker']
 
 if __name__ == '__main__':
     torch.set_num_threads(1)
-    test_budget = 1000
-    test_budget_in_seconds=43200
+    test_budget = 10000
+    test_budget_in_seconds=300
     init_budget = 1000
     k = 10
     tau = 0.01
