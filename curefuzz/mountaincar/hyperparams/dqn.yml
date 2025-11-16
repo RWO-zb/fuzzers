@@ -1,0 +1,21 @@
+MountainCar-v0:
+  policy: "MlpPolicy"
+  learning_rate: !!float 4e-3
+  buffer_size: 10000
+  learning_starts: 1000
+  batch_size: 128
+  tau: 1.0  # DQN中tau默认为1.0 (硬更新), 你的代码中未指定，这里保留为默认值
+  gamma: 0.99
+  train_freq: 16
+  gradient_steps: 8
+  target_update_interval: 600
+  exploration_fraction: 0.2
+  exploration_final_eps: 0.07
+  
+  # 你的 policy_kwargs 被转换为了一个字符串，
+  # exp_manager.py 会使用 eval() 来解析它
+  policy_kwargs: "dict(net_arch=[256, 256])"
+
+  # n_timesteps 是 exp_manager.py 期望在YAML中存在的参数
+  # 我使用了你最开始命令行中提供的 100000
+  n_timesteps: 100000
