@@ -197,6 +197,7 @@ def main():
             sequences.append(obs[0])
             episode_reward += reward[0]
             if done:
+                print(infos[0]['terminal_observation'][0])
                 break
         
         # final_state 逻辑
@@ -237,9 +238,8 @@ def main():
     pbar1 = tqdm.tqdm(total=seeds_num) 
     seedcount = 0
     
-    # --- 修改 1: 初始化日志列表（移除 crash_timestamps 列表） ---
     fuzz_selection_log = []
-    # ----------------------------------------
+    all_obs_sequences = [] # 用于保存所有 observation 序列
 
     while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
         seedcount += 1
@@ -259,15 +259,30 @@ def main():
         sequences = [obs[0]]
         
         reached_goal = False
+        is_crash_condition = False  # 初始化 crash 标志
 
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, infos = env.step(action)
-            sequences.append(obs[0])
-            episode_reward += reward[0]
+            
+            episode_reward += reward[0] # 累计奖励
+
             if done:
+                # 使用 terminal_observation 替代被重置的 obs
+                terminal_obs = infos[0]['terminal_observation']
+                sequences.append(terminal_obs)
+                
+                # 检查 Crash 条件 (位置 < 0.5)
+                if terminal_obs[0] < 0.5:
+                    is_crash_condition = True
                 break
+            else:
+                # 正常步骤记录 obs
+                sequences.append(obs[0])
         
+        # 将当前episode的序列添加到总列表中
+        all_obs_sequences.append(sequences)
+
         intrinsic_reward = fuzzer.train_rnd(sequences)
         current_final_state = fuzzer.current_final_state if fuzzer.current_final_state is not None else obs[0]
         entropy = np.linalg.norm(np.asarray(obs[0]) - np.asarray(current_final_state))
@@ -277,16 +292,15 @@ def main():
         did_crash = False
         crash_time_point = None 
 
-        if episode_reward == -200:
+        # 使用新的判断条件：is_crash_condition
+        if is_crash_condition:
             pbar1.update(1)
             fuzzer.add_crash(mutate_states)
             print('Found: ', len(fuzzer.result))
             did_crash = True
             
-            # --- 修改 2: 计算时间戳（不再添加到 crash_timestamps 列表） ---
             crash_time_point = time.time() - start_fuzz_time
             print(f"  -> Crash found at {crash_time_point:.2f} seconds")
-            # -------------------------------
             
         elif args.guide:
             if intrinsic_reward > intrins_theta or episode_reward < fuzzer.current_reward or entropy > entropy_theta:
@@ -299,16 +313,14 @@ def main():
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward,  entropy, intrinsic_reward, final_state, orig_pose)
         
-        # --- 修改 3: 记录日志条目 (保留 crash_time 到日志) ---
         log_entry = {
             'seed_state': selected_info['seed_state'], 
             'mutate_state': mutate_states,          
             'parent_depth': current_mutation_depth, 
             'did_crash': did_crash,
-            'crash_time': crash_time_point # 记录时间戳，如果没有crash则为None
+            'crash_time': crash_time_point
         }
         fuzz_selection_log.append(log_entry)
-        # -------------------------------------------
         
         print(f'Total seeds tested: { seedcount}, Crashes found: {len(fuzzer.result)}, Corpus size: {len(fuzzer.corpus)}')
         current_time = time.time()
@@ -325,9 +337,11 @@ def main():
         pickle.dump(fuzz_selection_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"Selection log saved to {log_file_name}")
 
-    # --- 修改 4: 移除了保存 crash_times.pkl 和 crash_times.txt 的代码 ---
-    # (此处已删除相关代码)
-    # ------------------------------
+    # 保存 obs 序列到 pkl 文件
+    obs_seq_file_name = os.path.join(result_path, 'obs_sequences.pkl')
+    with open(obs_seq_file_name, 'wb') as handle:
+        pickle.dump(all_obs_sequences, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"Observation sequences saved to {obs_seq_file_name}")
 
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")

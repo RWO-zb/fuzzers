@@ -17,17 +17,13 @@ from diffusion import Diffusion
 
 def main():
     parser = argparse.ArgumentParser()
-    # --- 修改：默认环境改为 MountainCar-v0 ---
     parser.add_argument("--env", help="environment ID", type=str, default="MountainCar-v0")
-    # --- 修改：日志文件夹指向 mountaincar/logs (假设在上级目录) ---
     parser.add_argument("-f", "--folder", help="Log folder", type=str, default="logs")
-    # --- 修改：默认算法改为 dqn ---
     parser.add_argument("--algo", help="RL Algorithm", default="dqn", type=str, required=False, choices=list(ALGOS.keys()))
-    parser.add_argument("-n", "--n-timesteps", help="number of timesteps", default=200, type=int) # MC 默认 max 200
+    parser.add_argument("-n", "--n-timesteps", help="number of timesteps", default=200, type=int) 
     parser.add_argument("--num-threads", help="Number of threads for PyTorch (-1 to use default)", default=-1, type=int)
     parser.add_argument("--n-envs", help="number of environments", default=1, type=int)
-    # --- 修改：exp-id 默认为 5 (根据你的文件结构 MountainCar-v0_5) ---
-    parser.add_argument("--exp-id", help="Experiment ID (default: 0: latest, -1: no exp folder)", default=5, type=int)
+    parser.add_argument("--exp-id", help="Experiment ID (default: 0: latest, -1: no exp folder)", default=8, type=int)
     parser.add_argument("--verbose", help="Verbose mode (0: no output, 1: INFO)", default=1, type=int)
     parser.add_argument(
         "--no-render", action="store_true", default=False, help="Do not render the environment (useful for tests)"
@@ -64,7 +60,7 @@ def main():
     parser.add_argument("--method", help="select the guidance for testing", default="generative+novelty", type=str, required=False)
     parser.add_argument("--hour", help="test time", default=12, type=int)
     parser.add_argument("--step", help="number of normal cases at each training step", default=50, type=int)
-    parser.add_argument("--grid", help="state abstraction granularity", default=20, type=int) # 增加 grid 密度因为是连续空间
+    parser.add_argument("--grid", help="state abstraction granularity", default=20, type=int) 
     args = parser.parse_args()
 
     result_folder_name = f"MC_{args.method}_{args.step}_seed_{args.seed}"
@@ -170,7 +166,6 @@ def main():
 
     ##################################################################################################
 
-    # --- 修改：MountainCar 状态只有 2 维 (Pos, Vel) ---
     case_dimension = 2 
     diffusion_model = Diffusion(batch_size = 1, epoch = 100, data_size = case_dimension, training_step_per_spoch = 25, num_diffusion_step = 25)
     diffusion_model.setup()
@@ -179,18 +174,14 @@ def main():
 
 
     ################################### nvovelty computation ########################################
-    # --- 修改：MountainCar 的状态范围 ---
-    # Min: [-1.2, -0.07], Max: [0.6, 0.07]
     min_obs = np.array([-0.6, 0])
     max_obs = np.array([-0.4, 0])
     
-    # 确保 Grid 可以处理 2 维数据
     novelty_grid = Grid(min_obs, max_obs, args.grid)
     novelty_test_grid = Grid(min_obs, max_obs, args.grid)
     novelty_dict = dict()
     novelty_test_dict = dict()
 
-    # Deterministic by default except for atari games
     stochastic = args.stochastic or is_atari and not args.deterministic
     deterministic = not stochastic
 
@@ -223,29 +214,22 @@ def main():
     failure_flag = False
 
     all_test_cases_log = []
+    all_trajectories = [] # 用于保存主循环中的轨迹
 
-    # --- 辅助函数：生成随机 MountainCar 状态 ---
     def get_random_mc_state():
-        # 生成在有效范围内的随机状态
-        # Position: [-1.2, 0.6], Velocity: [-0.07, 0.07]
-        # 可以稍微收缩范围以避免极端初始状态
         pos = np.random.uniform(-0.6, -0.4) 
         vel = 0
         return np.array([pos, vel])
 
     # --- 阶段 1：预热 ---
-    initial_collection_count = 100
+    initial_collection_count = 10000
     for pre_step in tqdm.tqdm(range(initial_collection_count), desc="Initial Random Sampling"):
         state = None
-        # --- 修改：生成随机 MC 状态 ---
         normal_case = get_random_mc_state()
         
-        # --- 修改：手动设置环境状态 ---
         obs = env.reset()
-        # 注意：VecEnv 的 envs[0] 是 DummyVecEnv 包装的，通常需要 unwrapped 才能访问 state
-        # 这里的 env 已经是 create_test_env 返回的 VecEnv
         env.envs[0].unwrapped.state = normal_case
-        obs = np.array([normal_case]) # 构造对应的 obs
+        obs = np.array([normal_case]) 
         
         sequences = [obs[0]]
         episode_reward = 0.0
@@ -253,14 +237,20 @@ def main():
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, infos = env.step(action)
-            sequences.append(obs[0])
+            
+            # 预热阶段的序列仅用于计算 metrics，不添加到 all_trajectories
+            if done and "terminal_observation" in infos[0]:
+                sequences.append(infos[0]["terminal_observation"])
+            else:
+                sequences.append(obs[0])
+                
             episode_reward += reward[0]
             if done:
                 break
-
+        
+        # 注意：预热阶段不添加到 all_trajectories
         normal_case_list.append(normal_case)
         
-        # 指标计算部分保持不变 (Density/Sensitivity/Performance/Novelty 均适配 numpy 数组)
         density, norm_density = 0, 0
         sensitivity, norm_sensitivity = 0, 0
         performance, norm_performance = 0, 0
@@ -285,7 +275,6 @@ def main():
             norm_performance = normalize_data(performance, memory_model.min_performance, memory_model.max_performance)
         
         if 'novelty' in  args.method:
-            # grid state abstract works with numpy array
             abstract_id = novelty_grid.state_abstract(np.array([sequences[-1]]))[0]
             if abstract_id in novelty_dict.keys():
                 novelty_dict[abstract_id] += 1
@@ -327,14 +316,12 @@ def main():
     start_time = time.time()
     current_time = time.time()
     
-    # 限制运行时间，比如 2 小时
-    while current_time - start_time < 3600 * 0.05:
+    while current_time - start_time < 3600 * 12:
 
         if cur_step > 0 and cur_step % args.step == 0:
             normal_case_list = np.array(normal_case_list)
             metric_list      = np.array(metric_list)
 
-            # Guidance 逻辑同上，不修改
             if args.method == 'generative':
                 metrics = None
             elif args.method == 'generative+density':
@@ -374,15 +361,25 @@ def main():
                 for _ in range(args.n_timesteps):
                     action, state = model.predict(obs, state=state, deterministic=deterministic)
                     obs, reward, done, infos = env.step(action)
-                    sequences.append(obs[0])
+                    
+                    # 记录 OBS 序列
+                    if done and "terminal_observation" in infos[0]:
+                        sequences.append(infos[0]["terminal_observation"])
+                    else:
+                        sequences.append(obs[0])
+                        
                     episode_reward += reward[0]
                     if done:
                         break
                 
+                # 保存 Generative 阶段的轨迹
+                all_trajectories.append(sequences)
+
                 # --- Crash 定义修改 ---
-                # MountainCar 如果跑满 200 步且没到终点，reward 会接近 -200。
-                # 设定阈值 -190，低于此值视为失败（超时未解决）
-                is_crash = (episode_reward < -180)
+                if "terminal_observation" in infos[0]:
+                    is_crash = (infos[0]['terminal_observation'][0] < 0.5)
+                else:
+                    is_crash = (obs[0][0] < 0.5)
                 
                 all_test_cases_log.append({
                     "input": test_case.tolist(), 
@@ -393,7 +390,6 @@ def main():
 
                 if is_crash:
                     save_case = test_case.tolist()
-                    # 简单的列表查重，注意 float 精度问题可能导致查重失效，这里暂保留原逻辑
                     if save_case in random_failure_list or save_case in diffusion_failure_list:
                         pass
                     else:
@@ -416,7 +412,6 @@ def main():
                 novelty = novelty_dict[abstract_id]
                 norm_novelty = 1 / (math.e ** (novelty - 1))
 
-                # 加入训练集，闭环
                 normal_case_list.append(test_case)
                 metric_list.append([0, 0, 0, norm_novelty])
                 memory_model.append(test_case, 0, 0, 0, novelty)
@@ -440,12 +435,25 @@ def main():
             for _ in range(args.n_timesteps):
                 action, state = model.predict(obs, state=state, deterministic=deterministic)
                 obs, reward, done, infos = env.step(action)
-                sequences.append(obs[0])
+                
+                # 记录 OBS 序列
+                if done and "terminal_observation" in infos[0]:
+                    sequences.append(infos[0]["terminal_observation"])
+                else:
+                    sequences.append(obs[0])
+                    
                 episode_reward += reward[0]
                 if done:
                     break
             
-            is_crash = (episode_reward < -180)
+            # 保存 Random 阶段的轨迹
+            all_trajectories.append(sequences)
+            
+            if "terminal_observation" in infos[0]:
+                is_crash = (infos[0]['terminal_observation'][0] < 0.5)
+            else:
+                is_crash = (obs[0][0] < 0.5)
+
             all_test_cases_log.append({
                 "input": normal_case.tolist(), 
                 "is_crash": bool(is_crash), 
@@ -456,7 +464,6 @@ def main():
             if is_crash:
                  print(f"Crash Found (Rand)! Reward: {episode_reward:.2f}, State: {normal_case.tolist()}")
 
-            # 计算 Metrics
             normal_case_list.append(normal_case)
             density, norm_density = 0, 0
             sensitivity, norm_sensitivity = 0, 0
@@ -499,7 +506,6 @@ def main():
         cur_step += 1
         current_time = time.time()
 
-    # --- 保存结果 ---
     file_path_diffusion = os.path.join(result_path, 'diffusion_failure_count.json')
     with open(file_path_diffusion, 'w') as f:
         json.dump(diffusion_failure_count, f)
@@ -515,6 +521,19 @@ def main():
     log_filename = os.path.join(result_path, 'all_test_cases_log.pkl')
     with open(log_filename, 'wb') as f:
         pickle.dump(all_test_cases_log, f)
+        
+    # 保存所有轨迹 (PKL)
+    traj_pkl_filename = os.path.join(result_path, 'all_trajectories.pkl')
+    with open(traj_pkl_filename, 'wb') as f:
+        pickle.dump(all_trajectories, f)
+        
+    # 保存所有轨迹 (TXT)
+    #traj_txt_filename = os.path.join(result_path, 'all_trajectories.txt')
+    #with open(traj_txt_filename, 'w') as f:
+        #for idx, traj in enumerate(all_trajectories):
+            # 将 numpy 数组转为 list 以便阅读
+            #traj_list = [obs.tolist() if isinstance(obs, np.ndarray) else obs for obs in traj]
+            #f.write(f"Episode {idx}: {traj_list}\n")
 
 if __name__ == '__main__':  
     start_time = datetime.now()
