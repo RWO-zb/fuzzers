@@ -222,7 +222,7 @@ def main():
         return np.array([pos, vel])
 
     # --- 阶段 1：预热 ---
-    initial_collection_count = 10000
+    initial_collection_count = 100
     for pre_step in tqdm.tqdm(range(initial_collection_count), desc="Initial Random Sampling"):
         state = None
         normal_case = get_random_mc_state()
@@ -281,7 +281,11 @@ def main():
             else:
                 novelty_dict[abstract_id] = 1
             novelty = novelty_dict[abstract_id]
-            norm_novelty = 1 / (math.e ** (novelty - 1))
+            # 修复 OverflowError
+            try:
+                norm_novelty = 1 / (math.e ** (novelty - 1))
+            except OverflowError:
+                norm_novelty = 0.0
 
         metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
         memory_model.append(normal_case, density, sensitivity, performance, novelty)
@@ -316,7 +320,7 @@ def main():
     start_time = time.time()
     current_time = time.time()
     
-    while current_time - start_time < 3600 * 12:
+    while current_time - start_time < 3600 * 0.05:
 
         if cur_step > 0 and cur_step % args.step == 0:
             normal_case_list = np.array(normal_case_list)
@@ -381,11 +385,15 @@ def main():
                 else:
                     is_crash = (obs[0][0] < 0.5)
                 
+                # 计算时间戳
+                elapsed_time = time.time() - start_time
+
                 all_test_cases_log.append({
                     "input": test_case.tolist(), 
                     "is_crash": bool(is_crash),
                     "source": "generative",
-                    "step": cur_step
+                    "step": cur_step,
+                    "timestamp": elapsed_time
                 })
 
                 if is_crash:
@@ -410,7 +418,11 @@ def main():
                 else:
                     novelty_dict[abstract_id] = 1
                 novelty = novelty_dict[abstract_id]
-                norm_novelty = 1 / (math.e ** (novelty - 1))
+                # 修复 OverflowError
+                try:
+                    norm_novelty = 1 / (math.e ** (novelty - 1))
+                except OverflowError:
+                    norm_novelty = 0.0
 
                 normal_case_list.append(test_case)
                 metric_list.append([0, 0, 0, norm_novelty])
@@ -454,11 +466,15 @@ def main():
             else:
                 is_crash = (obs[0][0] < 0.5)
 
+            # 计算时间戳
+            elapsed_time = time.time() - start_time
+
             all_test_cases_log.append({
                 "input": normal_case.tolist(), 
                 "is_crash": bool(is_crash), 
                 "source": "random",
-                "step": cur_step
+                "step": cur_step,
+                "timestamp": elapsed_time
             })
             
             if is_crash:
@@ -495,7 +511,11 @@ def main():
                 else:
                     novelty_dict[abstract_id] = 1
                 novelty = novelty_dict[abstract_id]
-                norm_novelty = 1 / (math.e ** (novelty - 1))
+                # 修复 OverflowError
+                try:
+                    norm_novelty = 1 / (math.e ** (novelty - 1))
+                except OverflowError:
+                    norm_novelty = 0.0
 
             metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
             memory_model.append(normal_case, density, sensitivity, performance, novelty)
