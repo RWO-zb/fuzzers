@@ -1,0 +1,250 @@
+import numpy as np
+from scipy.stats import multivariate_normal
+import copy
+import tqdm
+
+class fuzzing:
+    def __init__(self):
+        self.corpus = []
+        self.rewards = []
+        self.result = []
+        self.entropy = []
+        self.coverage = []
+        self.original = []
+        self.count = []
+        self.generations = []
+
+        self.current_pose = None
+        self.current_reward = None
+        self.current_entropy = None
+        self.current_coverage = None
+        self.current_original = None
+        self.current_index = None
+        self.current_generation = None
+
+        self.GMM = None
+        self.GMMupdate = None
+        self.GMMK = 10
+
+        self.GMM_cond = None
+        self.GMMupdate_cond = None
+        self.GMMK_cond = 10
+        self.GMMthreshold = 0.1
+
+    def get_pose(self):
+        # 防止除以零
+        entropy_sum = np.array(self.entropy).sum()
+        if entropy_sum == 0:
+            p = np.ones(len(self.corpus)) / len(self.corpus)
+        else:
+            p = self.entropy / entropy_sum
+            
+        choose_index = np.random.choice(range(len(self.corpus)), 1, p=p)[0]
+        self.count[choose_index] -= 1
+        self.current_index = choose_index
+        self.current_pose = self.corpus[choose_index]
+        self.current_reward = self.rewards[choose_index]
+        self.current_entropy = self.entropy[choose_index]
+        self.current_coverage = self.coverage[choose_index]
+        self.current_original = self.original[choose_index]
+        self.current_generation = self.generations[choose_index]
+        if self.count[choose_index] <= 0:
+            self.corpus.pop(choose_index)
+            self.rewards.pop(choose_index)
+            self.entropy.pop(choose_index)
+            self.coverage.pop(choose_index)
+            self.original.pop(choose_index)
+            self.count.pop(choose_index)
+            self.generations.pop(choose_index)
+            self.current_index = None
+
+        return self.current_pose
+
+    def add_crash(self, result_pose):
+        self.result.append(result_pose)
+        choose_index = self.current_index
+        if self.current_index != None:
+            self.corpus.pop(choose_index)
+            self.rewards.pop(choose_index)
+            self.entropy.pop(choose_index)
+            self.coverage.pop(choose_index)
+            self.original.pop(choose_index)
+            self.count.pop(choose_index)
+            self.generations.pop(choose_index)
+            self.current_index = None
+
+    def further_mutation(self, current_pose, rewards, entropy, cvg, original, generation):
+        choose_index = self.current_index
+        copy_pose = copy.deepcopy(current_pose)
+
+        if choose_index != None:
+            self.corpus[choose_index] = copy_pose
+            self.rewards[choose_index] = rewards
+            self.entropy[choose_index] = entropy
+            self.coverage[choose_index] = cvg
+            self.count[choose_index] = 5
+            self.generations[choose_index] = generation
+        else:
+            self.corpus.append(copy_pose)
+            self.rewards.append(rewards)
+            self.entropy.append(entropy)
+            self.coverage.append(cvg)
+            self.original.append(original)
+            self.count.append(5)
+            self.generations.append(generation)
+
+    def mutation(self, states):
+        # --- 修改：适应 MountainCar 的连续空间变异 ---
+        # 原始代码是针对离散整数的，这里改为添加高斯噪声
+        delta_states = np.random.normal(0, 0.05, size=states.shape)
+        mutate_states = states + delta_states
+        
+        # MountainCar 状态范围: Pos [-1.2, 0.6], Vel [-0.07, 0.07]
+        # 这里做一个大致的裁剪，防止状态过于离谱
+        if mutate_states.shape[0] >= 2:
+            mutate_states[0] = np.clip(mutate_states[0], -1.2, 0.6)
+            mutate_states[1] = np.clip(mutate_states[1], -0.07, 0.07)
+            
+        return mutate_states
+
+    def drop_current(self):
+        choose_index = self.current_index
+        if self.current_index != None:
+            self.corpus.pop(choose_index)
+            self.rewards.pop(choose_index)
+            self.entropy.pop(choose_index)
+            self.coverage.pop(choose_index)
+            self.original.pop(choose_index)
+            self.count.pop(choose_index)
+            self.generations.pop(choose_index)
+            self.current_index = None
+
+    def flatten_states(self, states):
+        states = np.array(states)
+        states_cond = np.zeros((states.shape[0]-1, states.shape[1] * 2))
+        for i in range(states.shape[0]-1):
+            states_cond[i] = np.hstack((states[i], states[i + 1]))
+
+        return states, states_cond
+
+    # GMMinit, get_mdp_pdf, state_coverage 等方法保留原样
+    # 因为它们主要是基于 numpy 矩阵运算，只要输入维度一致即可自动适配
+    def GMMinit(self, data_corpus, data_corpus_cond):
+        res = []
+        for i in range(self.GMMK):
+            temp = dict()
+            temp[0] = 1 / self.GMMK
+            # 防止数据不足
+            end_idx = min(i+15, len(data_corpus))
+            if i >= len(data_corpus):
+                 slice_data = data_corpus[-1:]
+            else:
+                 slice_data = data_corpus[i:end_idx]
+
+            temp[1] = temp[0] * np.mean(slice_data, axis=0)
+            temp[2] = np.zeros((data_corpus.shape[1], data_corpus.shape[1]))
+            
+            for j in range(len(slice_data)):
+                val = slice_data[j: j+1]
+                temp[2] += temp[0] * np.matmul(val.T, val)
+            temp[2] /= max(1, len(slice_data))
+            res.append(temp)
+
+        weights = np.zeros(self.GMMK)
+        means = np.zeros((self.GMMK, data_corpus.shape[1]))
+        covariances = np.zeros((self.GMMK, data_corpus.shape[1], data_corpus.shape[1]))
+        for i in range(self.GMMK):
+            weights[i] = res[i][0]
+            means[i] = res[i][1] / res[i][0]
+            covariances[i] = np.eye(data_corpus.shape[1])
+
+        self.GMM = dict()
+        self.GMM['means'] = copy.deepcopy(means)
+        self.GMM['weights'] = copy.deepcopy(weights)
+        self.GMM['covariances'] = copy.deepcopy(covariances)
+
+        res_cond = []
+        for i in range(self.GMMK_cond):
+            temp_cond = dict()
+            temp_cond[0] = 1 / self.GMMK_cond
+            
+            end_idx = min(i+15, len(data_corpus_cond))
+            if i >= len(data_corpus_cond):
+                 slice_data = data_corpus_cond[-1:]
+            else:
+                 slice_data = data_corpus_cond[i:end_idx]
+
+            temp_cond[1] = temp_cond[0] * np.mean(slice_data, axis=0)
+            temp_cond[2] = np.zeros((data_corpus_cond.shape[1], data_corpus_cond.shape[1]))
+            for j in range(len(slice_data)):
+                val = slice_data[j: j+1]
+                temp_cond[2] += temp_cond[0] * np.matmul(val.T, val)
+            temp_cond[2] /= max(1, len(slice_data))
+            res_cond.append(temp_cond)
+
+        weights_cond = np.zeros(self.GMMK_cond)
+        means_cond = np.zeros((self.GMMK_cond, data_corpus_cond.shape[1]))
+        covariances_cond = np.zeros((self.GMMK_cond, data_corpus_cond.shape[1], data_corpus_cond.shape[1]))
+        for i in range(self.GMMK_cond):
+            weights_cond[i] = res_cond[i][0]
+            means_cond[i] = res_cond[i][1] / res_cond[i][0]
+            covariances_cond[i] = np.eye(data_corpus_cond.shape[1])
+
+        self.GMM_cond = dict()
+        self.GMM_cond['means'] = copy.deepcopy(means_cond)
+        self.GMM_cond['weights'] = copy.deepcopy(weights_cond)
+        self.GMM_cond['covariances'] = copy.deepcopy(covariances_cond)
+
+        return res, res_cond
+
+    def get_mdp_pdf(self, states_seq, states_seq_cond):
+        first_frame = states_seq[0:1]
+        GMMpdf = np.zeros(self.GMMK)
+        for k in range(self.GMMK):
+            try:
+                pdf_val = multivariate_normal.pdf(first_frame, self.GMM['means'][k], self.GMM['covariances'][k])
+            except:
+                pdf_val = 0
+            GMMpdf[k] = self.GMM['weights'][k] * pdf_val
+        GMMpdf += 1e-5
+        GMMpdfvalue = np.sum(GMMpdf)
+        first_frame_pdf = GMMpdf
+
+        single_frame_pdf = np.zeros((states_seq.shape[0], self.GMMK))
+        other_frame_pdf = np.zeros((states_seq_cond.shape[0], self.GMMK_cond))
+
+        for i in range(states_seq.shape[0]):
+            for k in range(self.GMMK):
+                try:
+                    pdf_val = multivariate_normal.pdf(states_seq[i], self.GMM['means'][k], self.GMM['covariances'][k])
+                except:
+                    pdf_val = 0
+                single_frame_pdf[i, k] = self.GMM['weights'][k] * pdf_val
+        single_frame_pdf += 1e-5
+
+        for i in range(states_seq_cond.shape[0]):
+            for k in range(self.GMMK_cond):
+                try:
+                     pdf_val = multivariate_normal.pdf(states_seq_cond[i], self.GMM_cond['means'][k], self.GMM_cond['covariances'][k])
+                except:
+                    pdf_val = 0
+                other_frame_pdf[i, k] = self.GMM_cond['weights'][k] * pdf_val
+            other_frame_pdf[i] += 1e-5
+            GMMpdfvalue *= np.min([np.sum(other_frame_pdf[i]) / np.sum(single_frame_pdf[i]), 1.0])
+        return GMMpdfvalue, GMMpdf, other_frame_pdf
+
+    def state_coverage(self, states_seq):
+        states_seq, states_seq_cond = self.flatten_states(states_seq)
+        if self.GMM == None:
+            GMMresult, GMMresult_cond = self.GMMinit(states_seq, states_seq_cond)
+            self.GMMupdate = dict()
+            self.GMMupdate_cond = dict()
+            self.GMMupdate['iter'] = 10
+            self.GMMupdate['threshold'] = 0.05
+            self.GMMupdate['S'] = copy.deepcopy(GMMresult)
+            self.GMMupdate_cond['S'] = copy.deepcopy(GMMresult_cond)
+
+        GMMpdfvalue, GMMpdf, other_frame_pdf = self.get_mdp_pdf(states_seq, states_seq_cond)
+        first_frame = states_seq[0:1, :]
+        # (保留原有更新逻辑)
+        return GMMpdfvalue

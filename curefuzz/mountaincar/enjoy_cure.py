@@ -1,5 +1,5 @@
 import argparse, importlib, os, sys, time, copy, tqdm, pickle
-import gymnasium as gym # --- 修改：使用 gymnasium ---
+import gymnasium as gym 
 import yaml
 import numpy as np
 import torch as th
@@ -13,6 +13,7 @@ from fuzz.cure_fuzz import CureFuzz
 import torch.nn.functional as F
 import torch.nn as nn
 from datetime import datetime
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", help="environment ID", type=str, default="MountainCar-v0")
@@ -57,21 +58,20 @@ def main():
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
     parser.add_argument("--seed_number", help="Number of seeds", default=100, type=int)
     args = parser.parse_args()
-    # --- 新增代码：在这里创建基于种子和时间戳的唯一文件夹 ---
+    
+    # --- 创建基于种子和时间戳的唯一文件夹 ---
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
-    # --- 修改：确保 'results' 文件夹存在 ---
     if not os.path.exists('./results'):
         os.mkdir('./results')
     result_path = './results/' + result_folder + '/'
-    # --- 结束修改 ---
     if not os.path.exists(result_path):
         os.mkdir(result_path)
     log_file_path = os.path.join(result_path, 'cure_fuzz.txt')
     f = open(log_file_path, 'w', buffering=1)
     sys.stdout = f
     sys.stderr = f 
-    # --- 结束新增 ---
+    
     # Going through custom gym packages to let them register in the global registory
     for env_module in args.gym_packages:
         importlib.import_module(env_module)
@@ -163,18 +163,7 @@ def main():
         }
 
     model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, **kwargs)
-    '''
-    # for display 
-    video_length = args.n_timesteps
-    env = VecVideoRecorder(
-    env,
-    "./recording/test",
-    record_video_trigger=lambda x: x == 0,
-    video_length=video_length,
-    name_prefix=f"{algo}-{env_id}",
-    )
-    obs = env.reset(states)
-    '''
+    
     stochastic = args.stochastic or is_atari and not args.deterministic
     deterministic = not stochastic
     episode_rewards, episode_lengths = [], []
@@ -188,23 +177,18 @@ def main():
     print("--- 正在生成初始语料库 (Corpus) ---")
     while i < seeds_num and (time.time() - start_corpus_time) <= (3600*2):
         
-        # --- 修改：生成 MountainCar 的初始状态 ---
-        # 标准初始状态是 pos: [-0.6, -0.4], vel: 0
+        # 生成 MountainCar 的初始状态
         pos = np.random.uniform(-0.6, -0.4)
         vel = 0.0
         states = np.array([pos, vel])
-        # --- 结束修改 ---
 
         state = None
         episode_reward = 0.0
         
-        # --- 修改：自定义状态重置 (env.reset) ---
-        obs = env.reset() # 1. 标准重置 (VecEnv 只返回 obs)
-        # 2. 手动设置底层环境的状态 (因为 n_envs=1)
+        # 自定义状态重置 (env.reset)
+        obs = env.reset()
         env.envs[0].unwrapped.state = states
-        # 3. 将状态作为新的观测值 (对于MountainCar，state == obs)
         obs = np.array([states]) 
-        # --- 结束修改 ---
 
         sequences = [obs[0]]
         for _ in range(args.n_timesteps):
@@ -215,24 +199,19 @@ def main():
             if done:
                 break
         
-        # --- 修改：final_state 逻辑 ---
-        # 确保 sequences 至少有两个元素
+        # final_state 逻辑
         final_state = sequences[-1] if len(sequences) > 1 else sequences[0]
-        # --- 结束修改 ---
 
         state = None
         episode_reward_mutate = 0.0
 
-        # --- 修改：使用 Fuzzer 的变异逻辑 ---
-        # (删除旧的 BipedalWalker 15维 变异代码)
-        mutate_states = fuzzer.mutation(states) # 使用新的2D浮点数变异
-        # --- 结束修改 ---
+        # 使用 Fuzzer 的变异逻辑
+        mutate_states = fuzzer.mutation(states)
 
-        # --- 修改：自定义状态重置 (env.reset) ---
+        # 自定义状态重置
         obs = env.reset()
         env.envs[0].unwrapped.state = mutate_states
         obs = np.array([mutate_states])
-        # --- 结束修改 ---
         
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
@@ -255,79 +234,59 @@ def main():
 
     start_fuzz_time = time.time()
     current_time = time.time()
-    pbar1 = tqdm.tqdm(total=seeds_num) # 这可能不是一个准确的总数，只是一个进度指示
+    pbar1 = tqdm.tqdm(total=seeds_num) 
     seedcount = 0
-    # --- 新增：初始化日志列表 ---
+    
+    # --- 修改 1: 初始化日志列表（移除 crash_timestamps 列表） ---
     fuzz_selection_log = []
-    # --- 结束新增 ---
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
-        seedcount+=1
+    # ----------------------------------------
 
-        # --- 修改：接收包含 'depth' 的字典 ---
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
+        seedcount += 1
+
         selected_info = fuzzer.get_pose()
         states = selected_info['seed_state']
-        current_mutation_depth = selected_info['depth'] # <--- 这是父种子的代数
-        # --- 结束修改 ---
+        current_mutation_depth = selected_info['depth'] 
 
         mutate_states = fuzzer.mutation(states)
         state = None
         episode_reward = 0.0
         
-        # --- 修改：自定义状态重置 (env.reset) ---
         obs = env.reset()
         env.envs[0].unwrapped.state = mutate_states
         obs = np.array([mutate_states])
-        # --- 结束修改 ---
 
         sequences = [obs[0]]
         
-        # --- 新增：用于 "Crash" 检测的标志 ---
         reached_goal = False
-        # --- 结束新增 ---
 
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, infos = env.step(action)
             sequences.append(obs[0])
-            # if not args.no_render:
-            #     env.render("human")
             episode_reward += reward[0]
-            
-            # --- 新增：检查是否达到目标 ---
-            # obs[0] 是 VecEnv 的第一个 (也是唯一一个) 环境的观测值
-            # obs[0][0] 是该观测值的第一维 (Position)
-            # print(obs[0][0]) # <--- 为了日志清晰，注释掉这一行
-            if obs[0][0] >= 0.5: # 0.5 是 MountainCar 的终点位置
-                reached_goal = True
-            # --- 结束新增 ---
-            
             if done:
                 break
         
         intrinsic_reward = fuzzer.train_rnd(sequences)
-        # --- 修改：确保 fuzzer.final_state 存在 ---
         current_final_state = fuzzer.current_final_state if fuzzer.current_final_state is not None else obs[0]
         entropy = np.linalg.norm(np.asarray(obs[0]) - np.asarray(current_final_state))
-        # --- 结束修改 ---
 
         # =================================================================
-        # --- 重大修改："Crash" (崩溃) 定义 ---
-        #
-        # 这是你要求修改的地方
-        #
-        did_crash = False # 默认
-        
-        # 原定义: if done and not reached_goal:
-        
-        # 新定义: 如果回合总奖励 (episode_reward) 低于 -180，则视为 "Crash"
-        # (注意: 这意味着任何花费超过 180 步的回合，无论成功与否，都将被视为 "Crash")
-        if episode_reward < -180:
+        # --- Crash (崩溃) 定义与时间戳记录 ---
+        did_crash = False
+        crash_time_point = None 
+
+        if episode_reward == -200:
             pbar1.update(1)
             fuzzer.add_crash(mutate_states)
             print('Found: ', len(fuzzer.result))
-            did_crash = True # <--- 标记为崩溃
-        # --- 结束修改 ---
-        # =================================================================
+            did_crash = True
+            
+            # --- 修改 2: 计算时间戳（不再添加到 crash_timestamps 列表） ---
+            crash_time_point = time.time() - start_fuzz_time
+            print(f"  -> Crash found at {crash_time_point:.2f} seconds")
+            # -------------------------------
             
         elif args.guide:
             if intrinsic_reward > intrins_theta or episode_reward < fuzzer.current_reward or entropy > entropy_theta:
@@ -340,15 +299,17 @@ def main():
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward,  entropy, intrinsic_reward, final_state, orig_pose)
         
-        # --- 修改：记录更简单的日志条目 ---
+        # --- 修改 3: 记录日志条目 (保留 crash_time 到日志) ---
         log_entry = {
-            'seed_state': selected_info['seed_state'], # 原始父种子 state
-            'mutate_state': mutate_states,          # 变异后的 state (可能导致crash)
-            'parent_depth': current_mutation_depth, # 父种子的代数 (e.g., 0)
-            'did_crash': did_crash                  # 崩溃状态 (bool)
+            'seed_state': selected_info['seed_state'], 
+            'mutate_state': mutate_states,          
+            'parent_depth': current_mutation_depth, 
+            'did_crash': did_crash,
+            'crash_time': crash_time_point # 记录时间戳，如果没有crash则为None
         }
         fuzz_selection_log.append(log_entry)
-        # --- 结束修改 ---
+        # -------------------------------------------
+        
         print(f'Total seeds tested: { seedcount}, Crashes found: {len(fuzzer.result)}, Corpus size: {len(fuzzer.corpus)}')
         current_time = time.time()
         
@@ -358,11 +319,15 @@ def main():
         file_name = os.path.join(result_path, 'ablated_crash.pkl')
     with open(file_name, 'wb') as handle:
         pickle.dump(fuzzer.result, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        
     log_file_name = os.path.join(result_path, 'selection_log.pkl')
     with open(log_file_name, 'wb') as handle:
         pickle.dump(fuzz_selection_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"Selection log saved to {log_file_name}")
 
+    # --- 修改 4: 移除了保存 crash_times.pkl 和 crash_times.txt 的代码 ---
+    # (此处已删除相关代码)
+    # ------------------------------
 
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")
@@ -379,9 +344,7 @@ def main():
             while isinstance(env, VecEnvWrapper):
                 env = env.venv
             if isinstance(env, DummyVecEnv):
-                # --- 修改：适配 gymnasium (移除 .env) ---
                 env.envs[0].close()
-                # --- 结束修改 ---
             else:
                 env.close()
         else:
@@ -389,8 +352,6 @@ def main():
 
 
 if __name__ == "__main__":
-    #f = open('./results'+result_folder+'/cure_fuzz.txt', 'w', buffering=1)
-    #sys.stdout = f
     start_time = datetime.now()
     start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"--- start time: {start_time_str} ---")

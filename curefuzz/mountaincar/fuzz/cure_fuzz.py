@@ -175,8 +175,8 @@ class CureFuzz:
         # 将变异后的状态限制在 MountainCar-v0 的有效范围内
         # 位置 (Position): [-1.2, 0.6]
         # 速度 (Velocity): [-0.07, 0.07]
-        mutate_states[0] = np.clip(mutate_states[0], -1.2, 0.6)
-        mutate_states[1] = np.clip(mutate_states[1], -0.07, 0.07)
+        mutate_states[0] = np.clip(mutate_states[0], -0.6, -0.4)
+        mutate_states[1] = np.clip(mutate_states[1], 0, 0)
         
         return mutate_states
     # --- 结束修改 ---
