@@ -91,6 +91,8 @@ class Fuzzer():
         
         if self.logger is not None:
             episode_length = len(state_sequence_perturbed)
+            # 注意：这里是敏感度计算产生的额外执行，通常不计入主 CrashTime 统计，
+            # 但如果您希望记录这些执行的 obs，可以在这里也调用 _save_observations
             self.logger.log(
                 input=perturbed_state,
                 oracle=crash_perturbed,
@@ -108,14 +110,46 @@ class Fuzzer():
         perturbation = np.linalg.norm(state - state_mutate)
         return np.abs(state_reward - state_mutate_reward) / perturbation
 
+    def _save_observations(self, path: str, input_data: np.ndarray, oracle: bool, obs_seq: np.ndarray, generation: int):
+        """
+        辅助函数：将观测序列保存到单独的 txt 文件中。
+        """
+        if path is None:
+            return
+            
+        file_path = path + '_obs.txt'
+        
+        # 使用追加模式 ('a') 打开文件
+        with open(file_path, 'a') as f:
+            # 创建一个简单的头部信息，方便区分不同的测试用例
+            header_info = {
+                "Generation": generation,
+                "Input": input_data.tolist() if isinstance(input_data, np.ndarray) else input_data,
+                "Oracle": bool(oracle),
+                "Steps": len(obs_seq)
+            }
+            f.write(f"--- Test Case Info: {json.dumps(header_info)} ---\n")
+            
+            # 保存观测数据矩阵，每一行对应一个时间步的观测
+            np.savetxt(f, obs_seq, fmt='%.6f', delimiter=', ')
+            f.write("\n") # 添加空行作为分隔
+
     def initialize_coverage_model(self, **kwargs) -> int:
         exec_counter = kwargs.get('exec_counter', 0)
         state_sequence = kwargs.pop('state_sequence', None)
+        
+        # 从 kwargs 获取 path，以便保存初始阶段的 obs
+        path = kwargs.get('saving_path', None) 
+
         if state_sequence is None:
             policy = kwargs.get('policy', None)
             random_input = kwargs.get('input', self.sampling())
             reward, crash, state_sequence, exec_time = self.mdp(random_input, policy)
             exec_counter += 1
+            
+            # 保存初始采样的 obs
+            self._save_observations(path, random_input, crash, state_sequence, 0)
+
             if self.logger is not None:
                 self.logger.log(
                     input=random_input,
@@ -149,12 +183,18 @@ class Fuzzer():
         self.config['init_budget'] = n
         pool = IndexedPool(is_integer=np.issubdtype(initial_inputs.dtype, np.integer))
 
-        num_initial_executions = self.initialize_coverage_model(policy=policy)
+        # 传递 saving_path 给 initialize_coverage_model 以保存初始 obs
+        kwargs['saving_path'] = path
+        num_initial_executions = self.initialize_coverage_model(policy=policy, **kwargs)
         self.config['num_initial_executions'] = num_initial_executions
         
         pbar = tqdm.tqdm(total=n)
         for state in initial_inputs:
             sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, **kwargs)
+            
+            # 保存 obs
+            self._save_observations(path, state, oracle, state_sequence, 0)
+
             state_sequence_conc = self._concatenate_state_sequence(state_sequence)
             t0 = time.time()
             coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
@@ -191,6 +231,10 @@ class Fuzzer():
             new_generation = generation + 1
             mutant = self.mutate_validate(input, **kwargs)
             acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
+            
+            # 保存 obs
+            self._save_observations(path, mutant, oracle, state_sequence, new_generation)
+
             state_sequence_conc = self._concatenate_state_sequence(state_sequence)
             t0 = time.time()
             coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
@@ -250,6 +294,10 @@ class Fuzzer():
         pbar = tqdm.tqdm(total=n)
         for state in initial_inputs:
             sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, **kwargs)
+            
+            # [新增] 保存 obs 到新文件
+            self._save_observations(path, state, oracle, state_sequence, 0)
+
             # 注意：Coverage 传入 0
             pool.add(state, acc_reward, 0, sensitivity, oracle, generation=0)
 
@@ -276,14 +324,24 @@ class Fuzzer():
         pbar = tqdm.tqdm(total=test_budget)
         num_iterations = 0
 
+        # [保留功能] 记录主循环开始时间
+        main_loop_start_time = time.time()
+
         while num_iterations < test_budget:
             input, acc_reward_input, generation = pool.select(self.rng)
             new_generation = generation + 1
             mutant = self.mutate_validate(input, **kwargs)
             acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
             
+            # [新增] 保存 obs 到新文件
+            self._save_observations(path, mutant, oracle, state_sequence, new_generation)
+
             sensitivity = None
+            
+            # [保留功能] 计算 CrashTime
+            crash_time = None
             if oracle:
+                crash_time = time.time() - main_loop_start_time
                 pool.add_crash(mutant)
             elif acc_reward_mutant < acc_reward_input:
                 if local_sensitivity:
@@ -301,7 +359,8 @@ class Fuzzer():
                     sensitivity=sensitivity,
                     Generation=new_generation,
                     test_exec_time=exec_time,
-                    run_time=time.time()
+                    run_time=time.time(),
+                    crash_time=crash_time # [保留功能] 记录 CrashTime
                 )
 
             num_iterations += 1
@@ -343,6 +402,10 @@ class Fuzzer():
 
             if execute:
                 acc_reward, oracle, state_sequence, exec_time = self.mdp(random_input, policy)
+                
+                # [新增] 保存 obs
+                self._save_observations(path, random_input, oracle, state_sequence, 0)
+
                 if self.logger is not None:
                     self.logger.log(
                         input=random_input,

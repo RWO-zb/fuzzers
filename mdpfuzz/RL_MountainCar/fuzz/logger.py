@@ -97,7 +97,8 @@ class FuzzerLogger:
 
     def __init__(self, filepath: str) -> None:
         self.filepath = filepath
-        self.columns = ['Input', 'Oracle', 'Reward', 'EpisodeLength', 'Sensitivity', 'Coverage', 'Generation', 'TestExecTime', 'CoverageTime', 'RunTime']
+        # Changed: Added 'CrashTime' to columns
+        self.columns = ['Input', 'Oracle', 'Reward', 'EpisodeLength', 'Sensitivity', 'Coverage', 'Generation', 'TestExecTime', 'CoverageTime', 'RunTime', 'CrashTime']
         self.delimiter = '; '
 
     def log(self,
@@ -110,7 +111,8 @@ class FuzzerLogger:
             Generation: Optional[int] = None,
             run_time: Optional[float] = None,
             test_exec_time: Optional[float] = None,
-            coverage_time: Optional[float] = None
+            coverage_time: Optional[float] = None,
+            crash_time: Optional[float] = None  # Changed: Added crash_time argument
         ) -> None:
         '''
         Log values to the file.
@@ -125,6 +127,7 @@ class FuzzerLogger:
         - run_time (Optional[float]): Run time value as a floating-point number.
         - test_exec_time (Optional[float]): Test execution time value as a floating-point number.
         - coverage_time (Optional[float]): Time to compute a coverage value as a floating-point number.
+        - crash_time (Optional[float]): Time from main loop start to crash discovery.
         '''
         log_data = {
             #TODO: compared to the pool np.savetxt(.), np.array2string is less accurate
@@ -138,7 +141,8 @@ class FuzzerLogger:
             'Generation': str(Generation) if Generation is not None else 'None',
             'RunTime': str(run_time) if run_time is not None else 'None',
             'TestExecTime': str(test_exec_time) if test_exec_time is not None else 'None',
-            'CoverageTime': str(coverage_time) if coverage_time is not None else 'None'
+            'CoverageTime': str(coverage_time) if coverage_time is not None else 'None',
+            'CrashTime': str(crash_time) if crash_time is not None else 'None' # Changed: Added logging logic
         }
         # ensures correct ordering by using the columns (weakness found when Python version is 3.5)
         log_line = self.delimiter.join([log_data[k] for k in self.columns])
@@ -172,8 +176,10 @@ class FuzzerLogger:
                     test_exec_time = float(values[7]) if values[7] != 'None' else None
                     coverage_time = float(values[8]) if values[8] != 'None' else None
                     run_time = float(values[9]) if values[9] != 'None' else None
+                    # Changed: Added parsing for CrashTime
+                    crash_time = float(values[10]) if len(values) > 10 and values[10] != 'None' else None
 
-                    data.append([input, oracle, reward, episode_length, sensitivity, coverage, Generation,test_exec_time, coverage_time, run_time])
+                    data.append([input, oracle, reward, episode_length, sensitivity, coverage, Generation,test_exec_time, coverage_time, run_time, crash_time])
                 except:
                     malformed_lines.append('\tLine {}: "{}"'.format(num_line, line.strip()))
         # if malformed_lines != []:
