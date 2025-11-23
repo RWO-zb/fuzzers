@@ -3,8 +3,7 @@ import gym
 import numpy as np
 
 import sys
-sys.path.append('../../methods/src/')
-from executor import Executor
+from fuzz.executor import Executor
 from sb3_contrib import TQC
 from typing import Any, Tuple
 
@@ -31,7 +30,7 @@ class BipedalWalkerExecutor(Executor):
 
     def load_policy(self):
         return TQC.load(
-            "D:\\code\\fuzzers\\mdpfuzz\\RL_BipedalWalker\\rl\\experiments\\rl-trained-agents\\tqc\\BipedalWalkerHardcore-v3_1\\BipedalWalkerHardcore-v3.zip",
+            "D:\\code\\fuzzers\\mdpfuzz\\RL_BipedalWalker\\rl-trained-agents\\tqc\\BipedalWalkerHardcore-v3_1\\BipedalWalkerHardcore-v3.zip",
             device='cpu',
             custom_objects={"learning_rate":lambda _: 3e-4, "lr_schedule": lambda _: 3e-4}, 
             kwargs={'seed': 0, 'buffer_size': 1})

@@ -8,7 +8,7 @@ import torch
 import sys
 sys.path.append('../../methods/src/')
 from bw_executor import BipedalWalkerExecutor
-from mdpfuzz import Fuzzer
+from fuzz.mdpfuzz import Fuzzer
 from datetime import datetime
 
 '''
