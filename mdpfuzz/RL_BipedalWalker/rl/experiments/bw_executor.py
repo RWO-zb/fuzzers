@@ -31,7 +31,7 @@ class BipedalWalkerExecutor(Executor):
 
     def load_policy(self):
         return TQC.load(
-            "D:\\code\\fuzzers\\mdpfuzz\\rl\\experiments\\rl-trained-agents\\tqc\\BipedalWalkerHardcore-v3_1\\BipedalWalkerHardcore-v3.zip",
+            "D:\\code\\fuzzers\\mdpfuzz\\RL_BipedalWalker\\rl\\experiments\\rl-trained-agents\\tqc\\BipedalWalkerHardcore-v3_1\\BipedalWalkerHardcore-v3.zip",
             device='cpu',
             custom_objects={"learning_rate":lambda _: 3e-4, "lr_schedule": lambda _: 3e-4}, 
             kwargs={'seed': 0, 'buffer_size': 1})

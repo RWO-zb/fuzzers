@@ -9,7 +9,7 @@ import sys
 sys.path.append('../../methods/src/')
 from bw_executor import BipedalWalkerExecutor
 from mdpfuzz import Fuzzer
-
+from datetime import datetime
 
 '''
 Python script that launches Fuzzer, MDPFuzz or RT for one of the RL use-cases (bw, ll or tt).
@@ -19,16 +19,19 @@ Args:
     3. The RL key (bw, ll or tt).
 '''
 
-EXPERIMENT_SEEDS = [2021, 42, 2023, 20, 0]
+EXPERIMENT_SEEDS = [1022,42,723,1022,0]
 RL_KEYS = ['bw']
 RL_NAMES = ['Bipedal Walker']
 
 
 if __name__ == '__main__':
+    start_time = datetime.now()
+    start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"--- 脚本开始运行时间: {start_time_str} ---")
     torch.set_num_threads(1)
-    test_budget = 10000
-    test_budget_in_seconds=300
-    init_budget = 1000
+    test_budget = 500
+    test_budget_in_seconds=60
+    init_budget = 100
     k = 10
     tau = 0.01
     gamma = 0.01
@@ -90,3 +93,8 @@ if __name__ == '__main__':
             local_sensitivity=True,
             save_logs_only=True,
             exp_name=RL_NAMES[rl_index])
+    end_time = datetime.now()
+    end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"--- 脚本结束运行时间: {end_time_str} ---")
+    duration = end_time - start_time
+    print(f"--- 总计运行时间: {duration} ---")
