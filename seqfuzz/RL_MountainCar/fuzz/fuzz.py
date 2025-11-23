@@ -98,12 +98,8 @@ class fuzzing:
         # 原始代码是针对离散整数的，这里改为添加高斯噪声
         delta_states = np.random.normal(0, 0.05, size=states.shape)
         mutate_states = states + delta_states
-        
-        # MountainCar 状态范围: Pos [-1.2, 0.6], Vel [-0.07, 0.07]
-        # 这里做一个大致的裁剪，防止状态过于离谱
-        if mutate_states.shape[0] >= 2:
-            mutate_states[0] = np.clip(mutate_states[0], -1.2, 0.6)
-            mutate_states[1] = np.clip(mutate_states[1], -0.07, 0.07)
+        mutate_states[0] = np.clip(mutate_states[0], -0.6, -0.4)
+        mutate_states[1] = np.clip(mutate_states[1], 0,0)
             
         return mutate_states
 

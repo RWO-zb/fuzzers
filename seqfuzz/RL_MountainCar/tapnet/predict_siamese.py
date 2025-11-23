@@ -11,8 +11,8 @@ def load_tapnet_mode():
     parser = argparse.ArgumentParser()
     args = parser.parse_args([])
 
-    args.seed = 42
-    np.random.seed(42)
+    args.seed = 0
+    np.random.seed(0)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)

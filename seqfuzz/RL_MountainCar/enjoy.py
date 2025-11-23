@@ -208,9 +208,6 @@ def main():
          if len(bench_noCrash.shape) == 2:
             bench_noCrash = bench_noCrash.unsqueeze(0)
    
-    print('nodel:')
-    print(siamese_model)
-
     stochastic = args.stochastic or is_atari and not args.deterministic
     deterministic = not stochastic
 
@@ -243,6 +240,7 @@ def main():
             obs, reward, done, infos = env.step(action)
             sequences.append(obs[0])
             episode_reward += reward[0]
+            print(obs[0])
             if done:
                 break
                 
@@ -309,7 +307,7 @@ def main():
     timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
     seedcount = 0
     
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<100:
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<1000:
         is_crash = False
         seedcount+=1
         output_obs = []
@@ -335,7 +333,6 @@ def main():
             if not args.no_render:
                 env.render("human")
             episode_reward += reward[0]
-
             output_obs.append(obs[0])
             
             # TapNet 预测逻辑
@@ -345,6 +342,9 @@ def main():
                     print('end')
                 else:
                     print('continue')
+            if done:
+                print(infos[0]['terminal_observation'][0])
+                break
 
         temp2_time = time.time()
         time_of_env += temp2_time - temp1_time
@@ -354,14 +354,13 @@ def main():
         local_sensitivity = np.abs(episode_reward - fuzzer.current_reward)
         
         # --- 修改 8: Crash 定义 ---
-        # 原始代码: if done or episode_reward < 10
-        # MountainCar 中，通常到达目标 reward > -200 (比如 -150)，未到达是 -200
-        # 这里假设如果 reward < -190 且未 done (或者 done了但是没到目标) 为 Crash (实际上在 Gym 中，MC 200步 done 是默认的)
-        # 这里的 "Crash" 实际上是指 "性能失效"。
-        # 为了遵循第一段代码逻辑，我们保留结构，但调整阈值。
-        if episode_reward < -180: # 对于 MountainCar，-200 意味着失败
+        # 这里的 infos 是循环结束后的最后一次 info
+        # 用户要求只使用 terminal_observation 并赋值给 final_pos
+        print(infos[0]['terminal_observation'][0])
+        final_pos = infos[0]['terminal_observation'][0]
+
+        if final_pos < 0.5: 
              is_crash = True
-             # (日志写入逻辑保持不变，省略重复代码结构)
              if len(output_obs) == Hyperparameter.Step:
                 for i in range(len(output_obs)):
                     outputStr = ''
