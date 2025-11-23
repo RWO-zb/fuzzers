@@ -91,8 +91,7 @@ class Fuzzer():
         
         if self.logger is not None:
             episode_length = len(state_sequence_perturbed)
-            # 注意：这里是敏感度计算产生的额外执行，通常不计入主 CrashTime 统计，
-            # 但如果您希望记录这些执行的 obs，可以在这里也调用 _save_observations
+            # 这里的敏感度计算产生的额外执行
             self.logger.log(
                 input=perturbed_state,
                 oracle=crash_perturbed,
@@ -291,11 +290,15 @@ class Fuzzer():
         self.config['init_budget'] = n
         pool = IndexedPool(is_integer=np.issubdtype(initial_inputs.dtype, np.integer))
         
-        pbar = tqdm.tqdm(total=n)
+        # [修改] 获取时间预算
+        time_budget = kwargs.get('time_budget', None)
+        test_budget = kwargs.get('test_budget', None) # 兼容旧参数，但本场景下主要使用 time_budget
+
+        pbar = tqdm.tqdm(total=n, desc="Initialization")
         for state in initial_inputs:
             sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, **kwargs)
             
-            # [新增] 保存 obs 到新文件
+            # 保存 obs 到新文件
             self._save_observations(path, state, oracle, state_sequence, 0)
 
             # 注意：Coverage 传入 0
@@ -317,31 +320,50 @@ class Fuzzer():
             pbar.update(1)
         pbar.close()
 
-        test_budget = kwargs.get('test_budget', None)
-        test_budget -= (2 * n)
-        self.config['test_budget'] = test_budget
-        
-        pbar = tqdm.tqdm(total=test_budget)
+        # [修改] 设置进度条和循环条件
         num_iterations = 0
-
-        # [保留功能] 记录主循环开始时间
         main_loop_start_time = time.time()
+        
+        if time_budget is not None:
+            print(f"Fuzzing started with time budget: {time_budget} seconds.")
+            pbar = tqdm.tqdm(desc="Fuzzing (Time-based)")
+        else:
+            # 回退到基于次数的逻辑（如果未提供时间预算）
+            if test_budget is not None:
+                test_budget -= (2 * n)
+            else:
+                test_budget = 1000 # 默认值
+            pbar = tqdm.tqdm(total=test_budget, desc="Fuzzing (Iter-based)")
 
-        while num_iterations < test_budget:
+        while True:
+            # [修改] 检查停止条件
+            current_time = time.time()
+            elapsed_time = current_time - main_loop_start_time
+            
+            if time_budget is not None:
+                if elapsed_time >= time_budget:
+                    print(f"Time budget ({time_budget}s) reached. Stopping.")
+                    break
+                # 更新进度条显示时间
+                pbar.set_postfix({"elapsed": f"{elapsed_time:.1f}s"})
+            elif test_budget is not None:
+                if num_iterations >= test_budget:
+                    break
+
             input, acc_reward_input, generation = pool.select(self.rng)
             new_generation = generation + 1
             mutant = self.mutate_validate(input, **kwargs)
             acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
             
-            # [新增] 保存 obs 到新文件
+            # 保存 obs 到新文件
             self._save_observations(path, mutant, oracle, state_sequence, new_generation)
 
             sensitivity = None
             
-            # [保留功能] 计算 CrashTime
+            # 计算 CrashTime
             crash_time = None
             if oracle:
-                crash_time = time.time() - main_loop_start_time
+                crash_time = elapsed_time # 使用当前经过的时间
                 pool.add_crash(mutant)
             elif acc_reward_mutant < acc_reward_input:
                 if local_sensitivity:
@@ -359,8 +381,8 @@ class Fuzzer():
                     sensitivity=sensitivity,
                     Generation=new_generation,
                     test_exec_time=exec_time,
-                    run_time=time.time(),
-                    crash_time=crash_time # [保留功能] 记录 CrashTime
+                    run_time=current_time,
+                    crash_time=crash_time
                 )
 
             num_iterations += 1
@@ -403,7 +425,7 @@ class Fuzzer():
             if execute:
                 acc_reward, oracle, state_sequence, exec_time = self.mdp(random_input, policy)
                 
-                # [新增] 保存 obs
+                # 保存 obs
                 self._save_observations(path, random_input, oracle, state_sequence, 0)
 
                 if self.logger is not None:
