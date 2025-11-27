@@ -113,8 +113,7 @@ class Diffusion:
                 if method != 'generative':
                     guidances = metrics[index]
                     guidances = torch.from_numpy(guidances).to(torch.float32).to(self.device)
-                    target = torch.ones_like(guidances)
-                    loss2 = self.criterion(guidances, target)
+                    loss2 = self.criterion(guidances, guidances * 0)
                     loss2.requires_grad = True
                     loss2.backward()
                     running_loss += loss2.detach()

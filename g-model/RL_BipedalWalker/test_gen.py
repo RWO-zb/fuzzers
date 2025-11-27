@@ -222,7 +222,7 @@ def main():
     failure_flag = False
 
     # --- 阶段 1：主循环前的 1000 次初始随机采样（预热） ---
-    initial_collection_count = 1000
+    initial_collection_count = 100
     # 使用 tqdm 显示进度条
     for pre_step in tqdm.tqdm(range(initial_collection_count), desc="Initial Random Sampling"):
         # seed = np.random.randint(1,1000)
@@ -313,7 +313,7 @@ def main():
     all_test_cases_log = []
     # ---------------------------------------------------
 
-    while current_time - start_time < 3600 * 12:
+    while current_time - start_time < 3600 * 0.05:
 
 
         if cur_step > 0 and cur_step % args.step == 0:

@@ -20,9 +20,7 @@ def load_tapnet_mode():
     args.layers = "500,300"
     args.layers = [int(l) for l in args.layers.split(",")]
     
-    # --- 修改重点：适配 MountainCar 的低维度 (Dim=2) ---
-    # 原代码: args.kernels = "8,5,3"
-    # 修改为: "2,1,1" (因为输入维度只有2，卷积核不能超过2)
+    # --- 适配 MountainCar 的低维度 (Dim=2) ---
     args.kernels = "2,1,1" 
     # ------------------------------------------------
     
@@ -64,30 +62,47 @@ def load_tapnet_mode():
                    )
     return model
 
-def predict_once(model, bench_noCrash0, seq):
-    # 确保 seq 有正确的形状
+# --- 新增：K-Voting 预测函数 ---
+def predict_voting(model, golden_sequences_tensor, seq, threshold=0.43):
+    """
+    实现论文中的 K-Voting 机制。
+    将当前序列 seq 与一组 golden_sequences_tensor 进行比对。
+    """
+    # 1. 预处理当前序列 seq (填充或截断)
     if len(seq) < Hyperparameter.Step:
-        # 如果序列长度不够，进行填充
-        # 注意：这里创建一个形状正确的零列表
         padding = [np.zeros(Hyperparameter.Dimension).tolist()] * (Hyperparameter.Step - len(seq))
         seq = seq + padding
     elif len(seq) > Hyperparameter.Step:
-        # 如果序列太长，进行截断
         seq = seq[:Hyperparameter.Step]
     
-    siameseP2 = [seq]
-    siameseP2 = torch.FloatTensor(np.array(siameseP2))
+    # 2. 将当前序列转换为 Tensor
+    current_seq_tensor = torch.FloatTensor(np.array([seq]))
     if torch.cuda.is_available():
-        siameseP2 = siameseP2.cuda()
+        current_seq_tensor = current_seq_tensor.cuda()
     
-    # 确保输入张量有正确的形状 [batch_size, seq_len, input_size]
-    if len(siameseP2.shape) == 2:
-        siameseP2 = siameseP2.unsqueeze(0)
+    # 3. 构造 Batch 输入
+    # golden_sequences_tensor 形状为 [K, Step, Dim]
+    # 我们需要将 current_seq_tensor 复制 K 次以匹配形状 [K, Step, Dim]
+    K = golden_sequences_tensor.size(0)
+    current_seq_batch = current_seq_tensor.repeat(K, 1, 1)
     
-    output1 = model(bench_noCrash0, siameseP2)
-    output1 = torch.nn.Sigmoid()(output1)
-
-    if output1[0][0] > 0.43:
-        return 1
+    # 4. 模型批量预测
+    # model.forward 接受两个 [Batch, Step, Dim] 的输入
+    with torch.no_grad():
+        output = model(golden_sequences_tensor, current_seq_batch)
+        probs = torch.nn.Sigmoid()(output) # 形状 [K, 1]
+    
+    # 5. 投票统计
+    # 假设输出 > threshold 表示“相似”（即预测为 Non-Diverse/Class 0 或 1，取决于训练标签定义）
+    # 根据代码逻辑，这里 output > threshold 意味着 Similar to Golden (Non-Crash)
+    votes = (probs > threshold).sum().item()
+    
+    # 论文逻辑：如果超过半数认为相似，则判定为 Non-Diverse，需要终止
+    if votes > (K / 2):
+        return 1 # 终止信号 (Terminate)
     else:
-        return 0
+        return 0 # 继续信号 (Continue)
+
+# 保留旧函数以兼容（如果需要）
+def predict_once(model, bench_noCrash0, seq):
+    return predict_voting(model, bench_noCrash0, seq)

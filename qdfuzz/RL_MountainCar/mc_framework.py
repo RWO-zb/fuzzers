@@ -44,7 +44,7 @@ class MAPElitesFramework:
 
     def select_input(self, index: int):
         scores = [x[1] for x in self.cells_data[index]]
-        best_idx = int(np.argmax(scores))
+        best_idx = int(np.argmin(scores))
         selected = self.cells_data[index][best_idx]
         return selected[0], selected[4]
 

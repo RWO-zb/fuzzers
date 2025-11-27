@@ -10,7 +10,7 @@ import ast # 用于安全地将字符串 '[3, 2, 1]' 转换为列表 [3, 2, 1]
 # --- 1. 配置 ---
 # !!! 关键: 请将 'your_data_file.csv' 替换为您实际的文件名 !!!
 # 假设您的 Excel 文件已另存为 CSV 格式
-LOG_FILE = '1762783158.2151027_data.csv' 
+LOG_FILE = '1763135173.1744554_data.csv' 
 
 PLOT_1_FILE = 'faults_over_unique_inputs.png'
 PLOT_2_FILE = 'full_input_space_tsne.png'

@@ -10,18 +10,17 @@ from utils.utils import StoreDict
 from fuzz.fuzz import fuzzing
 from datetime import datetime
 import joblib
-from tapnet import predict_siamese, Hyperparameter
+# --- 引入 read_data 以加载历史数据 ---
+from tapnet import predict_siamese, Hyperparameter, read_data 
 import torch
 
 
 def main():
     parser = argparse.ArgumentParser()
-    # --- 修改 1: 默认环境改为 MountainCar-v0 ---
     parser.add_argument("--env", help="environment ID", type=str, default="MountainCar-v0")
     parser.add_argument("-f", "--folder", help="Log folder", type=str, default="logs")
     parser.add_argument("--algo", help="RL Algorithm", default="dqn", type=str, required=False, choices=list(ALGOS.keys()))
-    parser.add_argument("-n", "--n_timesteps", help="number of timesteps", default=200, type=int) # MountainCar 默认 max_steps 200
-    # -----------------------------------------
+    parser.add_argument("-n", "--n_timesteps", help="number of timesteps", default=200, type=int)
     parser.add_argument("--num-threads", help="Number of threads for PyTorch (-1 to use default)", default=-1, type=int)
     parser.add_argument("--n-envs", help="number of environments", default=1, type=int)
     parser.add_argument("--exp-id", help="Experiment ID (default: 0: latest, -1: no exp folder)", default=0, type=int)
@@ -58,10 +57,8 @@ def main():
     parser.add_argument("--em", action="store_true", default=True)
     args = parser.parse_args()
     
-    # --- 创建结果文件夹 ---
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
-    # 确保 results 目录存在
     if not os.path.exists('./results'):
         os.makedirs('./results')
     result_path = os.path.join('results', result_folder)
@@ -82,7 +79,6 @@ def main():
         args.exp_id = get_latest_run_id(os.path.join(folder, algo), env_id)
         print(f"Loading latest experiment, id={args.exp_id}")
 
-    # Sanity checks
     if args.exp_id > 0:
         log_path = os.path.join(folder, algo, f"{env_id}_{args.exp_id}")
     else:
@@ -166,27 +162,16 @@ def main():
 
     np.random.seed(2021)
     
-    # --- 修改 2: MountainCar 初始状态生成 (2维) ---
-    # 原代码: states = np.random.randint(low=1, high=4, size=15)
-    # 新代码: Position [-0.6, -0.4], Velocity 0
     states = np.array([np.random.uniform(-0.6, -0.4), 0.0])
-    # -------------------------------------------
-
-    # --- 修改 3: Reset 逻辑适配 ---
-    # 原代码: obs = env.reset(states)
-    # 新代码: 先 reset，再手动 set state
     obs = env.reset()
     env.envs[0].unwrapped.state = states
-    obs = np.array([states]) # VecEnv wrapper 需要 batch 维度
-    # -------------------------------------------
+    obs = np.array([states])
 
-    # --- TapNet 初始化 (增加异常处理，防止权重形状不匹配报错) ---
+    # --- TapNet 初始化与 K-Voting 数据准备 ---
     siamese_model = predict_siamese.load_tapnet_mode()
     try:
         if torch.cuda.is_available():
             siamese_model.cuda()
-        # 尝试加载权重，如果维度不对（比如原权重是24维，现模型是2维）则捕获异常
-        # 注意：如果是在新的环境下运行，建议使用新的权重文件或先不加载旧权重
         if os.path.exists('./tapnet/data/weights/tapnet.pkl'):
             siamese_model.load_state_dict(torch.load(r'./tapnet/data/weights/tapnet.pkl'))
             print("Loaded TapNet weights.")
@@ -196,17 +181,36 @@ def main():
         print(f"Warning: Could not load TapNet weights: {e}. Proceeding with random weights for testing flow.")
 
     siamese_model.eval()
-    bench_noCrash = Hyperparameter.bench_noCrash
-    if len(bench_noCrash) == 0:
-        bench_noCrash = torch.zeros((1, Hyperparameter.Step, Hyperparameter.Dimension))
-        if torch.cuda.is_available():
-            bench_noCrash = bench_noCrash.cuda()
-    else:
-         bench_noCrash = torch.FloatTensor(np.array(bench_noCrash))
-         if torch.cuda.is_available():
-             bench_noCrash = bench_noCrash.cuda()
-         if len(bench_noCrash.shape) == 2:
-            bench_noCrash = bench_noCrash.unsqueeze(0)
+
+    # [关键修改] 准备 Golden Sequences (K=10)
+    # 尝试从文件中读取成功的历史轨迹
+    try:
+        _, success_data = read_data.get_data() # 获取历史成功数据
+        K = 10 # K-Voting 的 K 值
+        if len(success_data) > 0:
+            if len(success_data) >= K:
+                # 随机采样 K 个作为 Golden Sequences
+                indices = np.random.choice(len(success_data), K, replace=False)
+                bench_noCrash = [success_data[i] for i in indices]
+            else:
+                # 如果数据不足，重复使用
+                print(f"Warning: Not enough golden sequences found ({len(success_data)} < {K}). Using available ones.")
+                bench_noCrash = success_data
+                # 补齐到 K 个 (可选，这里暂不补齐，predict_voting 会自动处理 batch size)
+        else:
+            # 如果没有文件数据，使用全0初始化 (Fallback)
+            print("Warning: No golden sequences found in file. Using zero tensors.")
+            bench_noCrash = [np.zeros((Hyperparameter.Step, Hyperparameter.Dimension)).tolist()] * K
+    except Exception as e:
+        print(f"Error loading golden sequences: {e}. Using zero tensors.")
+        bench_noCrash = [np.zeros((Hyperparameter.Step, Hyperparameter.Dimension)).tolist()] * 10
+
+    # 将 bench_noCrash 转换为 Tensor [K, Step, Dim]
+    bench_noCrash_tensor = torch.FloatTensor(np.array(bench_noCrash))
+    if torch.cuda.is_available():
+        bench_noCrash_tensor = bench_noCrash_tensor.cuda()
+    
+    # ----------------------------------------
    
     stochastic = args.stochastic or is_atari and not args.deterministic
     deterministic = not stochastic
@@ -221,18 +225,13 @@ def main():
     
     # === 循环 1: 初始种群生成 (预热) ===
     while i < seeds_num:
-        # --- 修改 4: 初始状态生成 (2维) ---
         states = np.array([np.random.uniform(-0.6, -0.4), 0.0])
-        # -------------------------------
-        
         state = None
         episode_reward = 0.0
         
-        # --- 修改 5: Reset ---
         obs = env.reset()
         env.envs[0].unwrapped.state = states
         obs = np.array([states])
-        # --------------------
         
         sequences = [obs[0]]
         for _ in range(args.n_timesteps):
@@ -240,27 +239,20 @@ def main():
             obs, reward, done, infos = env.step(action)
             sequences.append(obs[0])
             episode_reward += reward[0]
-            print(obs[0])
             if done:
                 break
-                
         
         state = None
         episode_reward_mutate = 0.0
             
-         # --- 修改 6: 连续空间变异逻辑 (替代原有的离散位翻转) ---
-         # 原逻辑: delta_states = np.random.choice(2, 15...)
         delta_states = np.random.normal(0, 0.05, size=states.shape)
         mutate_states = states + delta_states
         mutate_states[0] = np.clip(mutate_states[0], -0.6, -0.4)
         mutate_states[1] = np.clip(mutate_states[1],0, 0)
             
-        print('mutate states ', mutate_states)
-            
         obs = env.reset()
         env.envs[0].unwrapped.state = mutate_states
         obs = np.array([mutate_states])
-        # --------------------------------------------------
 
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
@@ -269,8 +261,7 @@ def main():
             if done:
                 break
             
-        # 计算 Entropy (简单 L2 距离)
-        entropy = np.linalg.norm(episode_reward_mutate - episode_reward) # 简化计算，原代码除以 sum(delta) 在连续空间可能不稳定
+        entropy = np.linalg.norm(episode_reward_mutate - episode_reward)
         cvg = fuzzer.state_coverage(sequences)
         fuzzer.further_mutation(states, episode_reward, entropy, cvg, states, 0)
         print(entropy, episode_reward, episode_reward_mutate, done, cvg)
@@ -314,18 +305,19 @@ def main():
         temp1_time = time.time()
         
         states = fuzzer.get_pose()
-        mutate_states = fuzzer.mutation(states) # 调用修改后的 fuzzer.mutation (连续变异)
+        mutate_states = fuzzer.mutation(states)
         current_gen = fuzzer.current_generation + 1 
         state = None
         episode_reward = 0.0
         
-        # --- 修改 7: Reset ---
         obs = env.reset()
         env.envs[0].unwrapped.state = mutate_states
         obs = np.array([mutate_states])
-        # --------------------
         
         sequences = [obs[0]]
+        
+        # --- Episode Loop ---
+        early_terminated = False
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, infos = env.step(action)
@@ -335,28 +327,38 @@ def main():
             episode_reward += reward[0]
             output_obs.append(obs[0])
             
-            # TapNet 预测逻辑
+            # [关键修改] Diversity Inference & Early Termination Logic
+            # 在指定步数 (CheckPoint) 进行检查，这里是 Hyperparameter.Step
             if (len(output_obs) == Hyperparameter.Step): 
-                ret = predict_siamese.predict_once(siamese_model, bench_noCrash, output_obs)
+                # 调用新的 K-Voting 预测函数
+                ret = predict_siamese.predict_voting(siamese_model, bench_noCrash_tensor, output_obs)
                 if ret == 1:
-                    print('end')
+                    print(f'--- Early termination triggered at step {len(output_obs)} ---')
+                    early_terminated = True
+                    break # 真正的提早终止
                 else:
-                    print('continue')
+                    print('--- Continue execution (Diverse sequence) ---')
+                    
             if done:
-                print(infos[0]['terminal_observation'][0])
                 break
+        # -------------------
 
         temp2_time = time.time()
         time_of_env += temp2_time - temp1_time
+        
+        # 如果提早终止，我们跳过后续的覆盖率更新和Crash检查，或者仅标记为非Crash
+        if early_terminated:
+             # 提早终止的用例被认为是非多样性的/非Crash的，节省了资源
+             # 不进行后续复杂的覆盖率计算或Crash记录
+             current_time = time.time()
+             print('Episode terminated early. Skipping post-processing.')
+             continue 
+
         cvg = fuzzer.state_coverage(sequences)
         temp3_time = time.time()
         time_of_DynEM += temp3_time - temp2_time
         local_sensitivity = np.abs(episode_reward - fuzzer.current_reward)
         
-        # --- 修改 8: Crash 定义 ---
-        # 这里的 infos 是循环结束后的最后一次 info
-        # 用户要求只使用 terminal_observation 并赋值给 final_pos
-        print(infos[0]['terminal_observation'][0])
         final_pos = infos[0]['terminal_observation'][0]
 
         if final_pos < 0.5: 
@@ -391,7 +393,6 @@ def main():
              print('Found: ', len(fuzzer.result))
         
         elif args.em:
-            # 成功案例写入逻辑 (Success)
             if len(output_obs) == Hyperparameter.Step:
                 for i in range(len(output_obs)):
                     outputStr = ''
@@ -422,8 +423,6 @@ def main():
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
         else:
-            # 同上，略去重复写入逻辑以节省篇幅，实际代码应包含写入
-             # ... (写入 successObs) ...
             if episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
@@ -465,7 +464,7 @@ def main():
             while isinstance(env, VecEnvWrapper):
                 env = env.venv
             if isinstance(env, DummyVecEnv):
-                env.envs[0].close() # 适配 gym 接口
+                env.envs[0].close()
             else:
                 env.close()
         else:
