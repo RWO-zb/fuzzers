@@ -7,7 +7,7 @@ import utils.import_envs
 from utils import ALGOS, create_test_env, get_latest_run_id, get_saved_hyperparams
 from utils.exp_manager import ExperimentManager
 from utils.utils import StoreDict
-import json, random, pickle, math
+import json, random, math
 from datetime import datetime
 
 from interfaces import normalize_data, Memory, Density, compute_sensitivity, case_clip, compute_novelty, Grid
@@ -61,7 +61,7 @@ def main():
     parser.add_argument("--step", help="number of normal cases at each training step", default=50, type=int)
     parser.add_argument("--grid", help="state abstraction granularity", default=5, type=int)
     args = parser.parse_args()
-    # --- 开始修改 ---
+    
     result_folder_name = f"{args.method}_{args.step}_seed_{args.seed}"
     result_path = os.path.join('results', result_folder_name)
     os.makedirs(result_path, exist_ok=True)
@@ -69,7 +69,6 @@ def main():
     f = open(log_file_path, 'w', buffering=1)
     sys.stdout = f
     sys.stderr = f
-    # --- 结束修改 ---
 
     # Going through custom gym packages to let them register in the global registory
     for env_module in args.gym_packages:
@@ -223,17 +222,14 @@ def main():
 
     # --- 阶段 1：主循环前的 1000 次初始随机采样（预热） ---
     initial_collection_count = 100
-    # 使用 tqdm 显示进度条
     for pre_step in tqdm.tqdm(range(initial_collection_count), desc="Initial Random Sampling"):
-        # seed = np.random.randint(1,1000)
-        # env.seed(seed)
         state = None
         normal_case = np.random.randint(low=1, high=4, size=15)
         
         obs = env.reset(normal_case)
         sequences = [obs[0]]
         episode_reward = 0.0
-        # print('states ', states)
+        
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, infos = env.step(action)
@@ -242,7 +238,6 @@ def main():
             if done:
                 break
 
-        ########################## 复制 'else' 块中的指标计算逻辑 ############################
         normal_case_list.append(normal_case)
         density, norm_density = 0, 0
         sensitivity, norm_sensitivity = 0, 0
@@ -305,22 +300,20 @@ def main():
         metric_list = []
         
         memory_model.clear()
+        
     # --- 阶段 3：重置计时器并准备开始主循环 ---
     start_time = time.time()
     current_time = time.time()
     
-    # --- 新增代码：初始化用于记录所有主循环测试用例的列表 ---
+    # 初始化日志列表
     all_test_cases_log = []
-    # ---------------------------------------------------
 
-    while current_time - start_time < 3600 * 0.05:
-
+    while current_time - start_time < 3600 * 0.05 :
 
         if cur_step > 0 and cur_step % args.step == 0:
             normal_case_list = np.array(normal_case_list)
             metric_list      = np.array(metric_list)
 
-            ######################################################## add guidance to loss here #################################################
             if args.method == 'generative':
                 metrics = None
             elif args.method == 'generative+density':
@@ -359,15 +352,17 @@ def main():
                     if done:
                         break
                 
-                # --- 记录生成式测试用例 (if 块) ---
+                # --- [修改点] 记录生成式测试用例及时间戳 ---
                 is_crash = (done or episode_reward < 10)
+                elapsed_time = time.time() - start_time  # 计算耗时（秒）
                 all_test_cases_log.append({
                     "input": test_case.tolist(), 
-                    "is_crash": bool(is_crash), # 显式转换为 Python bool
+                    "is_crash": bool(is_crash),
                     "source": "generative",
-                    "step": cur_step
+                    "step": cur_step,
+                    "time": elapsed_time  # 新增时间戳
                 })
-                # ---------------------------------
+                # ----------------------------------------
 
                 if is_crash:
                     save_case = test_case.tolist()
@@ -385,8 +380,6 @@ def main():
                 else:
                     wins += 1  
 
-                ################################################## compare density and novelty ######################################
-
                 abstract_id = novelty_grid.state_abstract(np.array([sequences[-1]]))[0]
                 if abstract_id in novelty_test_dict.keys():
                     novelty_dict[abstract_id] += 1
@@ -395,7 +388,6 @@ def main():
                 novelty = novelty_dict[abstract_id]
                 norm_novelty = 1 / (math.e ** (novelty - 1))
 
-                ############################################# add to training #######################################################3
                 normal_case_list.append(test_case)
                 metric_list.append([0, 0, 0, norm_novelty])
                 memory_model.append(test_case, 0, 0, 0, novelty)
@@ -421,17 +413,18 @@ def main():
                 if done:
                     break
             
-            # --- 记录随机测试用例 (else 块) ---
+            # --- [修改点] 记录随机测试用例及时间戳 ---
             is_crash = (done or episode_reward < 10)
+            elapsed_time = time.time() - start_time  # 计算耗时（秒）
             all_test_cases_log.append({
                 "input": normal_case.tolist(), 
-                "is_crash": bool(is_crash), # 显式转换为 Python bool
+                "is_crash": bool(is_crash),
                 "source": "random",
-                "step": cur_step
+                "step": cur_step,
+                "time": elapsed_time  # 新增时间戳
             })
-            # --------------------------------
+            # ---------------------------------------
 
-            ########################## Density, Sensitivity and other guidance ############################
             normal_case_list.append(normal_case)
             density, norm_density = 0, 0
             sensitivity, norm_sensitivity = 0, 0
@@ -485,11 +478,9 @@ def main():
     with open(file_path_novelty, 'w') as f:
         json.dump(novelty_dict, f)
         
-    # --- 更改：使用 Pickle 保存所有测试用例的日志 ---
     log_filename = os.path.join(result_path, 'all_test_cases_log.pkl')
     with open(log_filename, 'wb') as f:
         pickle.dump(all_test_cases_log, f)
-    # ------------------------------------
 
 if __name__ == '__main__':  
     start_time = datetime.now()
