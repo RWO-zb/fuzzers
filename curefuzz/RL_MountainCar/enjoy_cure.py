@@ -56,7 +56,7 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=100, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=10, type=int)
     args = parser.parse_args()
     
     # --- 创建基于种子和时间戳的唯一文件夹 ---
@@ -197,7 +197,7 @@ def main():
             sequences.append(obs[0])
             episode_reward += reward[0]
             if done:
-                print(infos[0]['terminal_observation'][0])
+                # print(infos[0]['terminal_observation'][0])
                 break
         
         # final_state 逻辑
@@ -233,6 +233,11 @@ def main():
     print(f"--- 初始语料库生成完毕，数量：{len(fuzzer.corpus)} ---")
     print("--- 开始 Fuzzing 循环 ---")
 
+    # =========================================================================
+    # [新增] 初始化 Trace 数据列表，用于存储所有 episodes 的 Action Gap 等信息
+    # =========================================================================
+    all_traces = []
+
     start_fuzz_time = time.time()
     current_time = time.time()
     pbar1 = tqdm.tqdm(total=seeds_num) 
@@ -258,12 +263,51 @@ def main():
 
         sequences = [obs[0]]
         
+        # =========================================================================
+        # [新增] 初始化单次 Trace 记录器
+        # =========================================================================
+        trace_record = {
+            "steps": [],
+            "positions": [],
+            "velocities": [],
+            "action_gaps": [],
+            "q_values": [],
+            "actions": [],
+            "rewards": [],
+            "start_state": mutate_states
+        }
+        
         reached_goal = False
         is_crash_condition = False  # 初始化 crash 标志
 
-        for _ in range(args.n_timesteps):
+        for step_idx in range(args.n_timesteps):
+            # =========================================================================
+            # [新增] 归因数据采集逻辑：提取 Q 值并计算 Gap
+            # =========================================================================
+            # 1. 转换观测值为 Tensor
+            obs_tensor, _ = model.q_net.obs_to_tensor(obs)
+            # 2. 提取 Q 值 (不计算梯度)
+            with th.no_grad():
+                q_values = model.q_net(obs_tensor).cpu().numpy()[0]
+            
+            # 3. 计算 Action Gap
+            sorted_q = np.sort(q_values)
+            gap = sorted_q[-1] - sorted_q[-2]
+            
+            # 4. 预测动作 (使用模型)
             action, state = model.predict(obs, state=state, deterministic=deterministic)
+            
+            # 5. 存储这一步的数据
+            trace_record["steps"].append(step_idx)
+            trace_record["positions"].append(obs[0][0])
+            trace_record["velocities"].append(obs[0][1])
+            trace_record["action_gaps"].append(gap)
+            trace_record["q_values"].append(q_values)
+            trace_record["actions"].append(action[0])
+            # =========================================================================
+
             obs, reward, done, infos = env.step(action)
+            trace_record["rewards"].append(reward[0]) # 记录奖励
             
             episode_reward += reward[0] # 累计奖励
 
@@ -280,19 +324,22 @@ def main():
                 # 正常步骤记录 obs
                 sequences.append(obs[0])
         
-        # 将当前episode的序列添加到总列表中
         all_obs_sequences.append(sequences)
+
+        # 标记 Trace 结果
+        trace_record["did_crash"] = is_crash_condition
+        trace_record["total_reward"] = episode_reward
+        
+        # 将本条 Trace 加入总列表
+        all_traces.append(trace_record)
 
         intrinsic_reward = fuzzer.train_rnd(sequences)
         current_final_state = fuzzer.current_final_state if fuzzer.current_final_state is not None else obs[0]
         entropy = np.linalg.norm(np.asarray(obs[0]) - np.asarray(current_final_state))
 
-        # =================================================================
-        # --- Crash (崩溃) 定义与时间戳记录 ---
         did_crash = False
         crash_time_point = None 
 
-        # 使用新的判断条件：is_crash_condition
         if is_crash_condition:
             pbar1.update(1)
             fuzzer.add_crash(mutate_states)
@@ -337,11 +384,18 @@ def main():
         pickle.dump(fuzz_selection_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"Selection log saved to {log_file_name}")
 
-    # 保存 obs 序列到 pkl 文件
     obs_seq_file_name = os.path.join(result_path, 'obs_sequences.pkl')
     with open(obs_seq_file_name, 'wb') as handle:
         pickle.dump(all_obs_sequences, handle, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"Observation sequences saved to {obs_seq_file_name}")
+
+    # =========================================================================
+    # [新增] 保存详细的 Trace 归因数据 (Q值、Action Gap等)
+    # =========================================================================
+    trace_data_file = os.path.join(result_path, 'trace_data.pkl')
+    with open(trace_data_file, 'wb') as f:
+        pickle.dump(all_traces, f)
+    print(f"详细归因数据已保存至: {trace_data_file}")
 
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")
