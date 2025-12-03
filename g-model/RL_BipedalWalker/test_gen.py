@@ -220,97 +220,39 @@ def main():
     information_list = []
     failure_flag = False
 
-    # --- 阶段 1：主循环前的 1000 次初始随机采样（预热） ---
-    initial_collection_count = 100
+    # --- 阶段 1：严格遵循论文的初始化预热 (Strict Initialization) ---
+    print("--- Stage 1: Initialization (Warm-up) ---")
+    initial_collection_count = 1000
+    
     for pre_step in tqdm.tqdm(range(initial_collection_count), desc="Initial Random Sampling"):
-        state = None
+        # 仅生成随机的初始状态，不进行 env.step() 执行
         normal_case = np.random.randint(low=1, high=4, size=15)
-        
-        obs = env.reset(normal_case)
-        sequences = [obs[0]]
-        episode_reward = 0.0
-        
-        for _ in range(args.n_timesteps):
-            action, state = model.predict(obs, state=state, deterministic=deterministic)
-            obs, reward, done, infos = env.step(action)
-            sequences.append(obs[0])
-            episode_reward += reward[0]
-            if done:
-                break
-
         normal_case_list.append(normal_case)
-        density, norm_density = 0, 0
-        sensitivity, norm_sensitivity = 0, 0
-        performance, norm_performance = 0, 0
-        novelty, norm_novelty = 0, 0
-        cases_list = memory_model.get_cases()
 
-        if 'density' in args.method:
-            density_list = memory_model.get_densities()
-            density = density_model.state_coverage(sequences)
-            norm_density = normalize_data(density, memory_model.min_density, memory_model.max_density)
-        
-        if 'sensitivity' in args.method:
-            sensitivity_list = memory_model.get_sensitivities()
-            sensitivity = compute_sensitivity(normal_case, cases_list, performance_list, episode_reward)
-            norm_sensitivity = normalize_data(sensitivity, memory_model.min_sensitivity, memory_model.max_sensitivity)
-            norm_sensitivity = 1 - norm_sensitivity
-            metric = norm_sensitivity
-        
-        if 'performance' in args.method:
-            performance_list = memory_model.get_performances()
-            performance = episode_reward
-            norm_performance = normalize_data(performance, memory_model.min_performance, memory_model.max_performance)
-        
-        if 'novelty' in  args.method:
-            abstract_id = novelty_grid.state_abstract(np.array([sequences[-1]]))[0]
-            if abstract_id in novelty_dict.keys():
-                novelty_dict[abstract_id] += 1
-            else:
-                novelty_dict[abstract_id] = 1
-            novelty = novelty_dict[abstract_id]
-            norm_novelty = 1 / (math.e ** (novelty - 1))
-
-        metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
-        memory_model.append(normal_case, density, sensitivity, performance, novelty)
-
-    # --- 阶段 2：使用这 1000 个样本进行第一次扩散模型训练 ---
+    # --- 阶段 2：预训练扩散模型 (Pre-training) ---
     if len(normal_case_list) > 0:
+        print(f"--- Pre-training Diffusion Model with {len(normal_case_list)} samples ---")
         normal_case_list = np.array(normal_case_list)
-        metric_list      = np.array(metric_list)
-
-        if args.method == 'generative':
-            metrics = None
-        elif args.method == 'generative+density':
-            metrics = metric_list[:, [0]]
-        elif args.method == 'generative+sensitivity':
-            metrics = metric_list[:, [1]]
-        elif args.method == 'generative+performance':
-            metrics = metric_list[:, [2]]
-        elif args.method == 'generative+baseline':
-            metrics = metric_list[:, [0,1,2]]
-        elif args.method == 'generative+novelty':
-            metrics = metric_list[:, [3]]
-        else:
-            print('Please check the method parameters!')
-            return 
-
-        diffusion_model.train(normal_case_list, metrics, args.method)
+        
+        diffusion_model.train(normal_case_list, None, 'generative')
+        
         normal_case_list = []
         metric_list = []
-        
         memory_model.clear()
         
-    # --- 阶段 3：重置计时器并准备开始主循环 ---
+    # --- 阶段 3：正式测试循环 (Main Loop) ---
+    # [修改点 1] 记录测试开始时间
     start_time = time.time()
     current_time = time.time()
     
     # 初始化日志列表
     all_test_cases_log = []
 
-    while current_time - start_time < 3600 * 0.05 :
+    print("--- Stage 2: Main Testing Loop ---")
+    while current_time - start_time < 3600 * 12: # 使用参数控制时间
 
         if cur_step > 0 and cur_step % args.step == 0:
+            # --- 扩散模型微调与生成阶段 ---
             normal_case_list = np.array(normal_case_list)
             metric_list      = np.array(metric_list)
 
@@ -333,7 +275,6 @@ def main():
             diffusion_model.train(normal_case_list, metrics, args.method)
             normal_case_list = []
             metric_list = []
-            
             memory_model.clear()
 
             for _ in range(val_step):
@@ -352,17 +293,17 @@ def main():
                     if done:
                         break
                 
-                # --- [修改点] 记录生成式测试用例及时间戳 ---
+                # [修改点 2] 计算时间差并保存
                 is_crash = (done or episode_reward < 10)
-                elapsed_time = time.time() - start_time  # 计算耗时（秒）
+                elapsed_time = time.time() - start_time
+                
                 all_test_cases_log.append({
                     "input": test_case.tolist(), 
                     "is_crash": bool(is_crash),
                     "source": "generative",
                     "step": cur_step,
-                    "time": elapsed_time  # 新增时间戳
+                    "time": elapsed_time # <--- 增加的时间戳字段
                 })
-                # ----------------------------------------
 
                 if is_crash:
                     save_case = test_case.tolist()
@@ -398,6 +339,7 @@ def main():
                 print(failure_flag, abstract_id, len(novelty_dict.keys()), len(set(diffusion_failure_clusters)))
                 information_list.append([sequences[-1].tolist(), failure_flag, abstract_id, norm_novelty])
         else:
+            # --- 随机采样阶段 ---
             state = None
             normal_case = np.random.randint(low=1, high=4, size=15)
             
@@ -413,19 +355,20 @@ def main():
                 if done:
                     break
             
-            # --- [修改点] 记录随机测试用例及时间戳 ---
+            # [修改点 3] 随机生成阶段同样记录时间
             is_crash = (done or episode_reward < 10)
-            elapsed_time = time.time() - start_time  # 计算耗时（秒）
+            elapsed_time = time.time() - start_time
+            
             all_test_cases_log.append({
                 "input": normal_case.tolist(), 
                 "is_crash": bool(is_crash),
                 "source": "random",
                 "step": cur_step,
-                "time": elapsed_time  # 新增时间戳
+                "time": elapsed_time # <--- 增加的时间戳字段
             })
-            # ---------------------------------------
 
             normal_case_list.append(normal_case)
+            
             density, norm_density = 0, 0
             sensitivity, norm_sensitivity = 0, 0
             performance, norm_performance = 0, 0

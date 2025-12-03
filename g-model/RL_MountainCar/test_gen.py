@@ -60,7 +60,7 @@ def main():
     parser.add_argument("--method", help="select the guidance for testing", default="generative+novelty", type=str, required=False)
     parser.add_argument("--hour", help="test time", default=12, type=int)
     parser.add_argument("--step", help="number of normal cases at each training step", default=50, type=int)
-    parser.add_argument("--grid", help="state abstraction granularity", default=20, type=int) 
+    parser.add_argument("--grid", help="state abstraction granularity", default=5, type=int) 
     args = parser.parse_args()
 
     result_folder_name = f"MC_{args.method}_{args.step}_seed_{args.seed}"
@@ -174,8 +174,8 @@ def main():
 
 
     ################################### nvovelty computation ########################################
-    min_obs = np.array([-0.6, 0])
-    max_obs = np.array([-0.4, 0])
+    min_obs = np.array([-1.2, -0.07])
+    max_obs = np.array([0.6, 0.07])
     
     novelty_grid = Grid(min_obs, max_obs, args.grid)
     novelty_test_grid = Grid(min_obs, max_obs, args.grid)
@@ -221,106 +221,35 @@ def main():
         vel = 0
         return np.array([pos, vel])
 
-    # --- 阶段 1：预热 ---
-    initial_collection_count = 100
+    # --- 阶段 1：严格遵循论文的初始化预热 (Strict Initialization) ---
+    print("--- Stage 1: Initialization (Warm-up) ---")
+    initial_collection_count = 1000 # 论文要求：采样 1000 个正常用例
+    
     for pre_step in tqdm.tqdm(range(initial_collection_count), desc="Initial Random Sampling"):
-        state = None
+        # 仅生成随机初始状态，不执行环境交互，不计算 metrics
         normal_case = get_random_mc_state()
-        
-        obs = env.reset()
-        env.envs[0].unwrapped.state = normal_case
-        obs = np.array([normal_case]) 
-        
-        sequences = [obs[0]]
-        episode_reward = 0.0
-        
-        for _ in range(args.n_timesteps):
-            action, state = model.predict(obs, state=state, deterministic=deterministic)
-            obs, reward, done, infos = env.step(action)
-            
-            # 预热阶段的序列仅用于计算 metrics，不添加到 all_trajectories
-            if done and "terminal_observation" in infos[0]:
-                sequences.append(infos[0]["terminal_observation"])
-            else:
-                sequences.append(obs[0])
-                
-            episode_reward += reward[0]
-            if done:
-                break
-        
-        # 注意：预热阶段不添加到 all_trajectories
         normal_case_list.append(normal_case)
-        
-        density, norm_density = 0, 0
-        sensitivity, norm_sensitivity = 0, 0
-        performance, norm_performance = 0, 0
-        novelty, norm_novelty = 0, 0
-        cases_list = memory_model.get_cases()
 
-        if 'density' in args.method:
-            density_list = memory_model.get_densities()
-            density = density_model.state_coverage(sequences)
-            norm_density = normalize_data(density, memory_model.min_density, memory_model.max_density)
-        
-        if 'sensitivity' in args.method:
-            sensitivity_list = memory_model.get_sensitivities()
-            sensitivity = compute_sensitivity(normal_case, cases_list, performance_list, episode_reward)
-            norm_sensitivity = normalize_data(sensitivity, memory_model.min_sensitivity, memory_model.max_sensitivity)
-            norm_sensitivity = 1 - norm_sensitivity
-            metric = norm_sensitivity
-        
-        if 'performance' in args.method:
-            performance_list = memory_model.get_performances()
-            performance = episode_reward
-            norm_performance = normalize_data(performance, memory_model.min_performance, memory_model.max_performance)
-        
-        if 'novelty' in  args.method:
-            abstract_id = novelty_grid.state_abstract(np.array([sequences[-1]]))[0]
-            if abstract_id in novelty_dict.keys():
-                novelty_dict[abstract_id] += 1
-            else:
-                novelty_dict[abstract_id] = 1
-            novelty = novelty_dict[abstract_id]
-            # 修复 OverflowError
-            try:
-                norm_novelty = 1 / (math.e ** (novelty - 1))
-            except OverflowError:
-                norm_novelty = 0.0
-
-        metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
-        memory_model.append(normal_case, density, sensitivity, performance, novelty)
-
-    # --- 阶段 2：第一次训练 ---
+    # --- 阶段 2：预训练扩散模型 (Pre-training) ---
     if len(normal_case_list) > 0:
+        print(f"--- Pre-training Diffusion Model with {len(normal_case_list)} samples ---")
         normal_case_list = np.array(normal_case_list)
-        metric_list      = np.array(metric_list)
-
-        if args.method == 'generative':
-            metrics = None
-        elif args.method == 'generative+density':
-            metrics = metric_list[:, [0]]
-        elif args.method == 'generative+sensitivity':
-            metrics = metric_list[:, [1]]
-        elif args.method == 'generative+performance':
-            metrics = metric_list[:, [2]]
-        elif args.method == 'generative+baseline':
-            metrics = metric_list[:, [0,1,2]]
-        elif args.method == 'generative+novelty':
-            metrics = metric_list[:, [3]]
-        else:
-            print('Please check the method parameters!')
-            return 
-
-        diffusion_model.train(normal_case_list, metrics, args.method)
+        
+        # 论文要求：在第一阶段，扩散模型仅捕捉正常分布，不涉及 metrics。
+        # 强制 metrics=None 且 method='generative'
+        diffusion_model.train(normal_case_list, None, 'generative')
+        
+        # 清空数据，为正式测试循环做准备
         normal_case_list = []
         metric_list = []
         memory_model.clear()
 
     # --- 阶段 3：主循环 ---
+    print("--- Stage 3: Main Testing Loop ---")
     start_time = time.time()
     current_time = time.time()
     
-    while current_time - start_time < 3600 * 0.05:
+    while current_time - start_time < 3600 * 0.05: # 使用参数 args.hour 控制时长
 
         if cur_step > 0 and cur_step % args.step == 0:
             normal_case_list = np.array(normal_case_list)
@@ -546,14 +475,6 @@ def main():
     traj_pkl_filename = os.path.join(result_path, 'all_trajectories.pkl')
     with open(traj_pkl_filename, 'wb') as f:
         pickle.dump(all_trajectories, f)
-        
-    # 保存所有轨迹 (TXT)
-    #traj_txt_filename = os.path.join(result_path, 'all_trajectories.txt')
-    #with open(traj_txt_filename, 'w') as f:
-        #for idx, traj in enumerate(all_trajectories):
-            # 将 numpy 数组转为 list 以便阅读
-            #traj_list = [obs.tolist() if isinstance(obs, np.ndarray) else obs for obs in traj]
-            #f.write(f"Episode {idx}: {traj_list}\n")
 
 if __name__ == '__main__':  
     start_time = datetime.now()
