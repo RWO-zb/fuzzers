@@ -10,10 +10,8 @@ from utils.utils import StoreDict
 from fuzz.fuzz import fuzzing
 from datetime import datetime
 import joblib
-# --- 引入 read_data 以加载历史数据 ---
-from tapnet import predict_siamese, Hyperparameter, read_data 
+from tapnet import predict_siamese, Hyperparameter
 import torch
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -56,7 +54,8 @@ def main():
     )
     parser.add_argument("--em", action="store_true", default=True)
     args = parser.parse_args()
-    
+
+    # --- 文件夹与日志初始化 ---
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
     if not os.path.exists('./results'):
@@ -67,7 +66,7 @@ def main():
     f = open(log_file_path, 'w', buffering=1)
     sys.stdout = f
     sys.stderr = f
-    
+
     for env_module in args.gym_packages:
         importlib.import_module(env_module)
 
@@ -79,6 +78,7 @@ def main():
         args.exp_id = get_latest_run_id(os.path.join(folder, algo), env_id)
         print(f"Loading latest experiment, id={args.exp_id}")
 
+    # Sanity checks
     if args.exp_id > 0:
         log_path = os.path.join(folder, algo, f"{env_id}_{args.exp_id}")
     else:
@@ -125,7 +125,7 @@ def main():
     args_path = os.path.join(log_path, env_id, "args.yml")
     if os.path.isfile(args_path):
         with open(args_path, "r") as f:
-            loaded_args = yaml.load(f, Loader=yaml.UnsafeLoader) 
+            loaded_args = yaml.load(f, Loader=yaml.UnsafeLoader)
             if loaded_args["env_kwargs"] is not None:
                 env_kwargs = loaded_args["env_kwargs"]
     if args.env_kwargs is not None:
@@ -160,58 +160,45 @@ def main():
 
     model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, **kwargs)
 
+    # --- Initial Random State ---
     np.random.seed(2021)
-    
     states = np.array([np.random.uniform(-0.6, -0.4), 0.0])
     obs = env.reset()
     env.envs[0].unwrapped.state = states
     obs = np.array([states])
 
-    # --- TapNet 初始化与 K-Voting 数据准备 ---
+    # --- TapNet Setup ---
     siamese_model = predict_siamese.load_tapnet_mode()
-    try:
-        if torch.cuda.is_available():
-            siamese_model.cuda()
-        if os.path.exists('./tapnet/data/weights/tapnet.pkl'):
-            siamese_model.load_state_dict(torch.load(r'./tapnet/data/weights/tapnet.pkl'))
-            print("Loaded TapNet weights.")
-        else: 
-            print("TapNet weights not found, using random init.")
-    except Exception as e:
-        print(f"Warning: Could not load TapNet weights: {e}. Proceeding with random weights for testing flow.")
+    if torch.cuda.is_available():
+        siamese_model.cuda()
+    
+    weights_path = r'./tapnet/data/weights/tapnet.pkl'
+    if os.path.exists(weights_path):
+        siamese_model.load_state_dict(torch.load(weights_path))
+    else:
+        print(f"Warning: Weights not found at {weights_path}")
 
     siamese_model.eval()
-
-    # [关键修改] 准备 Golden Sequences (K=10)
-    # 尝试从文件中读取成功的历史轨迹
-    try:
-        _, success_data = read_data.get_data() # 获取历史成功数据
-        K = 10 # K-Voting 的 K 值
-        if len(success_data) > 0:
-            if len(success_data) >= K:
-                # 随机采样 K 个作为 Golden Sequences
-                indices = np.random.choice(len(success_data), K, replace=False)
-                bench_noCrash = [success_data[i] for i in indices]
-            else:
-                # 如果数据不足，重复使用
-                print(f"Warning: Not enough golden sequences found ({len(success_data)} < {K}). Using available ones.")
-                bench_noCrash = success_data
-                # 补齐到 K 个 (可选，这里暂不补齐，predict_voting 会自动处理 batch size)
-        else:
-            # 如果没有文件数据，使用全0初始化 (Fallback)
-            print("Warning: No golden sequences found in file. Using zero tensors.")
-            bench_noCrash = [np.zeros((Hyperparameter.Step, Hyperparameter.Dimension)).tolist()] * K
-    except Exception as e:
-        print(f"Error loading golden sequences: {e}. Using zero tensors.")
-        bench_noCrash = [np.zeros((Hyperparameter.Step, Hyperparameter.Dimension)).tolist()] * 10
-
-    # 将 bench_noCrash 转换为 Tensor [K, Step, Dim]
-    bench_noCrash_tensor = torch.FloatTensor(np.array(bench_noCrash))
-    if torch.cuda.is_available():
-        bench_noCrash_tensor = bench_noCrash_tensor.cuda()
     
-    # ----------------------------------------
-   
+    try:
+        bench_noCrash = Hyperparameter.bench_noCrash
+    except AttributeError:
+        bench_noCrash = []
+
+    if len(bench_noCrash) == 0:
+        bench_noCrash = torch.zeros((1, Hyperparameter.Step, Hyperparameter.Dimension))
+        if torch.cuda.is_available():
+            bench_noCrash = bench_noCrash.cuda()
+    else:
+         bench_noCrash = torch.FloatTensor(np.array(bench_noCrash))
+         if torch.cuda.is_available():
+             bench_noCrash = bench_noCrash.cuda()
+         if len(bench_noCrash.shape) == 2:
+            bench_noCrash = bench_noCrash.unsqueeze(0)
+
+    print('nodel:')
+    print(siamese_model)
+
     stochastic = args.stochastic or is_atari and not args.deterministic
     deterministic = not stochastic
 
@@ -219,21 +206,25 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 100
+    seeds_num = 10000
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     
-    # === 循环 1: 初始种群生成 (预热) ===
+    # === 循环 1: 初始种群生成 ===
     while i < seeds_num:
+        # MountainCar Random State
         states = np.array([np.random.uniform(-0.6, -0.4), 0.0])
         state = None
         episode_reward = 0.0
         
+        # Reset Env
         obs = env.reset()
         env.envs[0].unwrapped.state = states
         obs = np.array([states])
         
         sequences = [obs[0]]
+        
+        # 运行第一次 Episode
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, infos = env.step(action)
@@ -242,31 +233,53 @@ def main():
             if done:
                 break
         
-        state = None
-        episode_reward_mutate = 0.0
+        # 判定是否成功 (MountainCar)
+        is_success = False
+        if done:
+            final_pos = -1.2
+            if infos and 'terminal_observation' in infos[0]:
+                final_pos = infos[0]['terminal_observation'][0]
+            elif len(obs) > 0:
+                final_pos = obs[0][0] # Fallback
             
-        delta_states = np.random.normal(0, 0.05, size=states.shape)
-        mutate_states = states + delta_states
-        mutate_states[0] = np.clip(mutate_states[0], -0.6, -0.4)
-        mutate_states[1] = np.clip(mutate_states[1],0, 0)
+            if final_pos >= 0.5:
+                is_success = True
+        
+        if is_success:
+            state = None
+            episode_reward_mutate = 0.0
             
-        obs = env.reset()
-        env.envs[0].unwrapped.state = mutate_states
-        obs = np.array([mutate_states])
+            # --- Mutation Logic ---
+            delta_states = np.random.normal(0, 0.05, size=states.shape)
+            mutate_states = states + delta_states
+            mutate_states[0] = np.clip(mutate_states[0], -0.6, -0.4)
+            mutate_states[1] = np.clip(mutate_states[1], 0, 0) 
+            
+            # Reset with mutated state
+            obs = env.reset()
+            env.envs[0].unwrapped.state = mutate_states
+            obs = np.array([mutate_states])
+            
+            print('Mutate states: ', mutate_states)
 
-        for _ in range(args.n_timesteps):
-            action, state = model.predict(obs, state=state, deterministic=deterministic)
-            obs, reward, done, infos = env.step(action)
-            episode_reward_mutate += reward[0]
-            if done:
-                break
+            for _ in range(args.n_timesteps):
+                action, state = model.predict(obs, state=state, deterministic=deterministic)
+                obs, reward, done, infos = env.step(action)
+                episode_reward_mutate += reward[0]
+                if done:
+                    break
             
-        entropy = np.linalg.norm(episode_reward_mutate - episode_reward)
-        cvg = fuzzer.state_coverage(sequences)
-        fuzzer.further_mutation(states, episode_reward, entropy, cvg, states, 0)
-        print(entropy, episode_reward, episode_reward_mutate, done, cvg)
-        i += 1
-        pbar.update(1)
+            # 计算敏感度 (Entropy)
+            entropy = np.abs(episode_reward_mutate - episode_reward)
+            
+            cvg = fuzzer.state_coverage(sequences)
+            fuzzer.further_mutation(states, episode_reward, entropy, cvg, states, 0)
+            print(f"Success Seed | Entropy: {entropy:.4f}, Reward: {episode_reward:.2f}, Cvg: {cvg}")
+            
+            i += 1
+            pbar.update(1)
+        else:
+            pass
 
     
     with open(os.path.join(result_path, 'corpus_EM.pkl'), 'wb') as handle:
@@ -281,7 +294,7 @@ def main():
     fuzzer.original = copy.deepcopy(fuzzer.corpus)
     mutation_log = [] 
 
-    # === 循环 2: Fuzzing 测试 ===
+    # HACK: start fuzzing
     start_fuzz_time = time.time()
     cvg_threshold = 0.02
 
@@ -296,9 +309,15 @@ def main():
     crashF_40 = open(os.path.join(result_path, 'crashStateSeqV2_40.txt'), mode='a')
     noCrashF_40 = open(os.path.join(result_path, 'noCrashStateSeqV2_40.txt'), mode='a')
     timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
+    
+    # --- [新增] 创建记录所有Episode观测值的文件 ---
+    allObsFile = open(os.path.join(result_path, 'all_episodes_obs.txt'), mode='a')
+    # --------------------------------------------
+
     seedcount = 0
     
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<1000:
+    # === 循环 2: Fuzzing Main Loop ===
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0:
         is_crash = False
         seedcount+=1
         output_obs = []
@@ -307,17 +326,16 @@ def main():
         states = fuzzer.get_pose()
         mutate_states = fuzzer.mutation(states)
         current_gen = fuzzer.current_generation + 1 
+        
         state = None
         episode_reward = 0.0
         
+        # Reset Env
         obs = env.reset()
         env.envs[0].unwrapped.state = mutate_states
         obs = np.array([mutate_states])
         
         sequences = [obs[0]]
-        
-        # --- Episode Loop ---
-        early_terminated = False
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, infos = env.step(action)
@@ -325,45 +343,51 @@ def main():
             if not args.no_render:
                 env.render("human")
             episode_reward += reward[0]
+
             output_obs.append(obs[0])
             
-            # [关键修改] Diversity Inference & Early Termination Logic
-            # 在指定步数 (CheckPoint) 进行检查，这里是 Hyperparameter.Step
             if (len(output_obs) == Hyperparameter.Step): 
-                # 调用新的 K-Voting 预测函数
-                ret = predict_siamese.predict_voting(siamese_model, bench_noCrash_tensor, output_obs)
+                ret = predict_siamese.predict_once(siamese_model, bench_noCrash, output_obs)
                 if ret == 1:
-                    print(f'--- Early termination triggered at step {len(output_obs)} ---')
-                    early_terminated = True
-                    break # 真正的提早终止
+                    print('end')
                 else:
-                    print('--- Continue execution (Diverse sequence) ---')
-                    
+                    print('continue')
+
             if done:
                 break
-        # -------------------
+
+        # --- [新增] 将当前Episode的所有观测值写入文件 ---
+        if len(output_obs) > 0:
+            for i in range(len(output_obs)):
+                outputStr = ''
+                for d in output_obs[i]:
+                    outputStr = outputStr + str(d) + ', '
+                allObsFile.write(outputStr)
+                allObsFile.write('\n')
+            allObsFile.write('######') # 分隔符，表示一个Episode结束
+            allObsFile.write('\n')
+            # 实时刷新缓冲区，防止程序中断丢失数据
+            allObsFile.flush()
+        # ---------------------------------------------
 
         temp2_time = time.time()
         time_of_env += temp2_time - temp1_time
-        
-        # 如果提早终止，我们跳过后续的覆盖率更新和Crash检查，或者仅标记为非Crash
-        if early_terminated:
-             # 提早终止的用例被认为是非多样性的/非Crash的，节省了资源
-             # 不进行后续复杂的覆盖率计算或Crash记录
-             current_time = time.time()
-             print('Episode terminated early. Skipping post-processing.')
-             continue 
-
         cvg = fuzzer.state_coverage(sequences)
         temp3_time = time.time()
         time_of_DynEM += temp3_time - temp2_time
         local_sensitivity = np.abs(episode_reward - fuzzer.current_reward)
         
-        final_pos = infos[0]['terminal_observation'][0]
+        # --- Crash Definition (MountainCar Specific) ---
+        final_pos = -1.2
+        if infos and 'terminal_observation' in infos[0]:
+             final_pos = infos[0]['terminal_observation'][0]
+        elif len(obs) > 0:
+             final_pos = obs[0][0]
 
-        if final_pos < 0.5: 
-             is_crash = True
-             if len(output_obs) == Hyperparameter.Step:
+        # 判定条件：如果最终位置小于 0.5，视为失败/Crash
+        if final_pos < 0.5:
+            is_crash = True
+            if len(output_obs) == Hyperparameter.Step:
                 for i in range(len(output_obs)):
                     outputStr = ''
                     for d in output_obs[i]:
@@ -372,10 +396,14 @@ def main():
                     crashF_40.write('\n')
                 crashF_40.write('######')
                 crashF_40.write('\n')
+
                 current_time = time.time()
                 s = 'fail_40: '
-                timeStamp.write(s + str(current_time) + '\n')
-             else:
+                timeStamp.write(s)
+                timeStamp.write(str(current_time))
+                timeStamp.write('\n')
+
+            else:
                 for i in range(len(output_obs)):
                     outputStr = ''
                     for d in output_obs[i]:
@@ -384,14 +412,17 @@ def main():
                     failObs.write('\n')
                 failObs.write('######')
                 failObs.write('\n')
+
                 current_time = time.time()
                 s = 'fail: '
-                timeStamp.write(s + str(current_time) + '\n')
+                timeStamp.write(s)
+                timeStamp.write(str(current_time))
+                timeStamp.write('\n')
 
-             pbar1.update(1)
-             fuzzer.add_crash(mutate_states)
-             print('Found: ', len(fuzzer.result))
-        
+
+            pbar1.update(1)
+            fuzzer.add_crash(mutate_states)
+            print('Found: ', len(fuzzer.result))
         elif args.em:
             if len(output_obs) == Hyperparameter.Step:
                 for i in range(len(output_obs)):
@@ -403,8 +434,11 @@ def main():
                 noCrashF_40.write('######')
                 noCrashF_40.write('\n')
                 current_time = time.time()
+
                 s = 'success_40: '
-                timeStamp.write(s + str(current_time) + '\n')
+                timeStamp.write(s)
+                timeStamp.write(str(current_time))
+                timeStamp.write('\n')
             else:
                 for i in range(len(output_obs)):
                     outputStr = ''
@@ -415,14 +449,48 @@ def main():
                 successObs.write('######')
                 successObs.write('\n')
                 current_time = time.time()
+
                 s = 'success: '
-                timeStamp.write(s + str(current_time) + '\n')
+                timeStamp.write(s)
+                timeStamp.write(str(current_time))
+                timeStamp.write('\n')
 
             if cvg < cvg_threshold or episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
         else:
+            if len(output_obs) == Hyperparameter.Step:
+                for i in range(len(output_obs)):
+                    outputStr = ''
+                    for d in output_obs[i]:
+                        outputStr = outputStr + str(d) + ', '
+                    noCrashF_40.write(outputStr)
+                    noCrashF_40.write('\n')
+                noCrashF_40.write('######')
+                noCrashF_40.write('\n')
+                current_time = time.time()
+
+                s = 'success_40: '
+                timeStamp.write(s)
+                timeStamp.write(str(current_time))
+                timeStamp.write('\n')
+            else:
+                for i in range(len(output_obs)):
+                    outputStr = ''
+                    for d in output_obs[i]:
+                        outputStr = outputStr + str(d) + ', '
+                    successObs.write(outputStr)
+                    successObs.write('\n')
+                successObs.write('######')
+                successObs.write('\n')
+                current_time = time.time()
+
+                s = 'success: '
+                timeStamp.write(s)
+                timeStamp.write(str(current_time))
+                timeStamp.write('\n')
+
             if episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
@@ -430,14 +498,23 @@ def main():
         
         log_entry = {
             'state': copy.deepcopy(mutate_states),
-            'generation': current_gen,             
-            'crashed': is_crash                    
+            'generation': current_gen,
+            'crashed': is_crash
         }
         mutation_log.append(log_entry)
+        
         current_time = time.time()
         time_of_fuzzer += current_time - temp2_time
         print('total reward: ', episode_reward, ', coverage: ', cvg, ', passed time: ', current_time - start_fuzz_time, ', corpus size: ', len(fuzzer.corpus), 'time_of_fuzzer: ', time_of_fuzzer, 'time_of_env: ', time_of_env)
     
+    # 循环结束后关闭所有文件句柄
+    allObsFile.close() # 关闭新增的文件
+    successObs.close()
+    failObs.close()
+    crashF_40.close()
+    noCrashF_40.close()
+    timeStamp.close()
+
     if args.em:
         file_name = os.path.join(result_path, 'crash_EM.pkl')
     else:
@@ -448,28 +525,19 @@ def main():
     with open(os.path.join(result_path, 'all_run_seeds_0.pkl'), 'wb') as handle:
         pickle.dump(mutation_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")
-
-    if args.verbose > 0 and len(episode_rewards) > 0:
-        print(f"{len(episode_rewards)} Episodes")
-        print(f"Mean reward: {np.mean(episode_rewards):.2f} +/- {np.std(episode_rewards):.2f}")
-
-    if args.verbose > 0 and len(episode_lengths) > 0:
-        print(f"Mean episode length: {np.mean(episode_lengths):.2f} +/- {np.std(episode_lengths):.2f}")
-
+    
     if not args.no_render:
         if args.n_envs == 1 and "Bullet" not in env_id and not is_atari and isinstance(env, VecEnv):
             while isinstance(env, VecEnvWrapper):
                 env = env.venv
             if isinstance(env, DummyVecEnv):
-                env.envs[0].close()
+                env.envs[0].env.close()
             else:
                 env.close()
         else:
             env.close()
-
 
 if __name__ == "__main__":
     start_time = datetime.now()

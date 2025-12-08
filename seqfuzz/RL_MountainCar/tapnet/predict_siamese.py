@@ -4,15 +4,20 @@ import numpy as np
 import torch
 
 from tapnet.models import TapNet
+from tapnet.read_data import get_data_siamese, get_data_siamese2, get_test_data
 from tapnet.utils import *
+
+from sklearn.metrics import precision_score, recall_score
+from sklearn.metrics import f1_score
+
 from tapnet import Hyperparameter
 
 def load_tapnet_mode():
     parser = argparse.ArgumentParser()
-    args = parser.parse_args([])
+    args = parser.parse_args()
 
-    args.seed = 0
-    np.random.seed(0)
+    args.seed = 42
+    np.random.seed(42)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
@@ -20,22 +25,20 @@ def load_tapnet_mode():
     args.layers = "500,300"
     args.layers = [int(l) for l in args.layers.split(",")]
     
-    # --- 适配 MountainCar 的低维度 (Dim=2) ---
-    args.kernels = "2,1,1" 
-    # ------------------------------------------------
-    
+    # MountainCar 使用小卷积核
+    args.kernels = "2,1,1"
     args.kernels = [int(l) for l in args.kernels.split(",")]
     args.filters = "256,256,128"
     args.filters = [int(l) for l in args.filters.split(",")]
     args.rp_params = '-1,3'
     args.rp_params = [float(l) for l in args.rp_params.split(",")]
 
-    # update random permutation parameter
+    # --- 修正 1: dim 应该是特征维度 (Dimension)，而不是时间步长 (Step) ---
     if args.rp_params[0] < 0:
-        dim = Hyperparameter.Step
+        dim = Hyperparameter.Dimension  # Dimension = 2
         args.rp_params = [3, math.floor(dim / (3 / 2))]
     else:
-        dim = Hyperparameter.Step
+        dim = Hyperparameter.Dimension  # Dimension = 2
         args.rp_params[1] = math.floor(dim / args.rp_params[1])
 
     args.rp_params = [int(l) for l in args.rp_params]
@@ -45,8 +48,11 @@ def load_tapnet_mode():
     if args.dilation == -1:
         args.dilation = math.floor(Hyperparameter.Dimension / 64)
 
-    model = TapNet(nfeat=Hyperparameter.Step,
-                   len_ts=Hyperparameter.Dimension,
+    # --- 修正 2: TapNet 初始化参数互换 ---
+    # 确保这里的 nfeat=2, len_ts=80，与训练时保持一致
+    model = TapNet(
+                   nfeat=Hyperparameter.Dimension,  # 2
+                   len_ts=Hyperparameter.Step,      # 80
                    layers=args.layers,
                    nclass=Hyperparameter.nclass,
                    dropout=0,
@@ -62,47 +68,41 @@ def load_tapnet_mode():
                    )
     return model
 
-# --- 新增：K-Voting 预测函数 ---
-def predict_voting(model, golden_sequences_tensor, seq, threshold=0.43):
-    """
-    实现论文中的 K-Voting 机制。
-    将当前序列 seq 与一组 golden_sequences_tensor 进行比对。
-    """
-    # 1. 预处理当前序列 seq (填充或截断)
+def predict_once(model, bench_noCrash0, seq):
+    # 确保 seq 有正确的形状
     if len(seq) < Hyperparameter.Step:
-        padding = [np.zeros(Hyperparameter.Dimension).tolist()] * (Hyperparameter.Step - len(seq))
+        # 如果序列长度不够，进行填充
+        padding = [[0] * Hyperparameter.Dimension] * (Hyperparameter.Step - len(seq))
         seq = seq + padding
     elif len(seq) > Hyperparameter.Step:
+        # 如果序列太长，进行截断
         seq = seq[:Hyperparameter.Step]
     
-    # 2. 将当前序列转换为 Tensor
-    current_seq_tensor = torch.FloatTensor(np.array([seq]))
+    # seq 此时是 list 形式 [Step, Dim] -> [80, 2]
+    
+    # 转换为 Tensor: [1, Step, Dim] -> [1, 80, 2]
+    siameseP2 = [seq]
+    siameseP2 = torch.FloatTensor(np.array(siameseP2))
+    
     if torch.cuda.is_available():
-        current_seq_tensor = current_seq_tensor.cuda()
+        siameseP2 = siameseP2.cuda()
     
-    # 3. 构造 Batch 输入
-    # golden_sequences_tensor 形状为 [K, Step, Dim]
-    # 我们需要将 current_seq_tensor 复制 K 次以匹配形状 [K, Step, Dim]
-    K = golden_sequences_tensor.size(0)
-    current_seq_batch = current_seq_tensor.repeat(K, 1, 1)
+    # --- 关键修正：转置输入数据 ---
+    # 训练时的输入是 (N, Dim, Step) 即 (N, 2, 80)
+    # 当前 siameseP2 是 (N, 80, 2)，需要转置
+    if siameseP2.shape[2] == Hyperparameter.Dimension: # 如果最后一维是2
+        siameseP2 = siameseP2.transpose(1, 2) # 变为 (1, 2, 80)
     
-    # 4. 模型批量预测
-    # model.forward 接受两个 [Batch, Step, Dim] 的输入
-    with torch.no_grad():
-        output = model(golden_sequences_tensor, current_seq_batch)
-        probs = torch.nn.Sigmoid()(output) # 形状 [K, 1]
-    
-    # 5. 投票统计
-    # 假设输出 > threshold 表示“相似”（即预测为 Non-Diverse/Class 0 或 1，取决于训练标签定义）
-    # 根据代码逻辑，这里 output > threshold 意味着 Similar to Golden (Non-Crash)
-    votes = (probs > threshold).sum().item()
-    
-    # 论文逻辑：如果超过半数认为相似，则判定为 Non-Diverse，需要终止
-    if votes > (K / 2):
-        return 1 # 终止信号 (Terminate)
-    else:
-        return 0 # 继续信号 (Continue)
+    # 同时也要检查 bench_noCrash0 并进行转置
+    # enjoy.py 中创建的 bench_noCrash 通常也是 (1, 80, 2)
+    if bench_noCrash0.shape[2] == Hyperparameter.Dimension:
+        bench_noCrash0 = bench_noCrash0.transpose(1, 2)
 
-# 保留旧函数以兼容（如果需要）
-def predict_once(model, bench_noCrash0, seq):
-    return predict_voting(model, bench_noCrash0, seq)
+    # 现在两个输入都是 (1, 2, 80)，符合模型期望
+    output1 = model(bench_noCrash0, siameseP2)
+    output1 = torch.nn.Sigmoid()(output1)
+
+    if output1[0][0] > 0.43:
+        return 1
+    else:
+        return 0

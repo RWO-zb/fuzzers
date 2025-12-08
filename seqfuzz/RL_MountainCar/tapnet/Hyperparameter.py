@@ -1,4 +1,4 @@
-Step = 200  # all：300
+Step = 80  # all：300
 Dimension = 2
 nclass = 2
 bench_noCrash = []

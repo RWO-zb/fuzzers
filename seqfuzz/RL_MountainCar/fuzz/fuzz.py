@@ -123,8 +123,6 @@ class fuzzing:
 
         return states, states_cond
 
-    # GMMinit, get_mdp_pdf, state_coverage 等方法保留原样
-    # 因为它们主要是基于 numpy 矩阵运算，只要输入维度一致即可自动适配
     def GMMinit(self, data_corpus, data_corpus_cond):
         res = []
         for i in range(self.GMMK):
@@ -242,5 +240,51 @@ class fuzzing:
 
         GMMpdfvalue, GMMpdf, other_frame_pdf = self.get_mdp_pdf(states_seq, states_seq_cond)
         first_frame = states_seq[0:1, :]
-        # (保留原有更新逻辑)
+
+        if GMMpdfvalue < self.GMMthreshold:
+            gamma = 1.0 / (self.GMMupdate['iter'])
+            GMMpdf /= np.sum(GMMpdf)
+            new_S = copy.deepcopy(self.GMMupdate['S'])
+
+            for i in range(self.GMMK):
+                new_S[i][0] = self.GMMupdate['S'][i][0] + gamma * (GMMpdf[i] - self.GMMupdate['S'][i][0])
+                new_S[i][1] = self.GMMupdate['S'][i][1] + gamma * (GMMpdf[i]*first_frame - self.GMMupdate['S'][i][1])
+                new_S[i][2] = self.GMMupdate['S'][i][2] + gamma * (GMMpdf[i]*np.matmul(first_frame.T, first_frame) - self.GMMupdate['S'][i][2])
+
+            self.GMMupdate['S'] = copy.deepcopy(new_S)
+
+            for i in range(self.GMMK):
+                self.GMM['weights'][i] = new_S[i][0]
+                self.GMM['means'][i] = new_S[i][1] / new_S[i][0]
+                self.GMM['covariances'][i] = (new_S[i][2] - np.matmul(self.GMM['means'][i].reshape(1, -1).T, new_S[i][1])) / new_S[i][0]
+                W, V = np.linalg.eigh(self.GMM['covariances'][i])
+                W = np.maximum(W, 1e-3)
+                D = np.diag(W)
+                reconstruction = np.matmul(np.matmul(V, D), np.linalg.inv(V))
+                self.GMM['covariances'][i] = copy.deepcopy(reconstruction)
+
+            cond_choices = np.argsort(np.sum(other_frame_pdf, axis=1))
+            for cond_index in cond_choices[:cond_choices.shape[0] // 10]:
+                GMMpdf_cond = other_frame_pdf[cond_index]
+                GMMpdf_cond /= np.sum(GMMpdf_cond)
+                current_frame = states_seq_cond[cond_index: cond_index + 1, :]
+                new_S_cond = copy.deepcopy(self.GMMupdate_cond['S'])
+
+                for i in range(self.GMMK_cond):
+                    new_S_cond[i][0] = self.GMMupdate_cond['S'][i][0] + gamma * (GMMpdf_cond[i] - self.GMMupdate_cond['S'][i][0])
+                    new_S_cond[i][1] = self.GMMupdate_cond['S'][i][1] + gamma * (GMMpdf_cond[i]*current_frame - self.GMMupdate_cond['S'][i][1])
+                    new_S_cond[i][2] = self.GMMupdate_cond['S'][i][2] + gamma * (GMMpdf_cond[i]*np.matmul(current_frame.T, current_frame) - self.GMMupdate_cond['S'][i][2])
+
+                self.GMMupdate_cond['S'] = copy.deepcopy(new_S_cond)
+
+                for i in range(self.GMMK_cond):
+                    self.GMM_cond['weights'][i] = new_S_cond[i][0]
+                    self.GMM_cond['means'][i] = new_S_cond[i][1] / new_S_cond[i][0]
+                    self.GMM_cond['covariances'][i] = (new_S_cond[i][2] - np.matmul(self.GMM_cond['means'][i].reshape(1, -1).T, new_S_cond[i][1])) / new_S_cond[i][0]
+                    W, V = np.linalg.eigh(self.GMM_cond['covariances'][i])
+                    W = np.maximum(W, 1e-3)
+                    D = np.diag(W)
+                    reconstruction = np.matmul(np.matmul(V, D), np.linalg.inv(V))
+                    self.GMM_cond['covariances'][i] = copy.deepcopy(reconstruction)
+
         return GMMpdfvalue
