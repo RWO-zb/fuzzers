@@ -11,6 +11,7 @@ LOG_FILE = 'selection_log.pkl'
 PLOT_1_FILE = 'crashes_over_unique_inputs.png'
 PLOT_2_FILE = 'full_input_space_tsne.png'
 PLOT_3_FILE = 'crash_generation_histogram.png'
+PLOT_4_FILE = 'crashes_over_time.png'  # <--- 新增配置
 
 # --- 2. 核心辅助函数 (保持不变) ---
 
@@ -232,13 +233,12 @@ def plot_full_space(deduplicated_log, dtype_to_use, expected_size):
     plt.close() # 释放内存
 
 
-# --- 5. 图表3：崩溃代数直方图 (已根据 'parent_depth' 简化) ---
+# --- 5. 图表3：崩溃代数直方图 (保持不变) ---
 
 def plot_generation_histogram(deduplicated_log):
     """
-    (已修改)
+    (保持不变)
     绘制 *独特崩溃输入* 的代数直方图。
-    此版本直接从日志中读取 'parent_depth'，不再需要递归。
     """
     print(f"\n[图表 3] 正在分析崩溃代数...")
     
@@ -252,7 +252,8 @@ def plot_generation_histogram(deduplicated_log):
             parent_depth = entry.get('parent_depth') 
             
             if parent_depth is None:
-                print("警告: 发现一个 crash 条目缺少 'parent_depth'。可能来自旧版日志。跳过。")
+                # 兼容旧日志或缺失数据的情况
+                # print("警告: 发现一个 crash 条目缺少 'parent_depth'。")
                 continue
             
             # crash 本身的代数 = 父代数 + 1
@@ -267,7 +268,7 @@ def plot_generation_histogram(deduplicated_log):
 
     generation_counts = Counter(crash_generations)
     
-    # 确保我们至少绘制到第1代 (如果只有第0代种子，它们不会崩溃)
+    # 确保我们至少绘制到第1代
     max_gen = 0
     if generation_counts:
         max_gen = max(generation_counts.keys())
@@ -277,8 +278,9 @@ def plot_generation_histogram(deduplicated_log):
     
     print("\n--- 独特崩溃代数统计 ---")
     print(f"  平均崩溃代数: {np.mean(crash_generations):.2f}")
-    print(f"  中位崩溃代数: {np.median(crash_generations)}")
-    print(f"  最大崩溃代数: {np.max(crash_generations)}")
+    if len(crash_generations) > 0:
+        print(f"  中位崩溃代数: {np.median(crash_generations)}")
+        print(f"  最大崩溃代数: {np.max(crash_generations)}")
 
     plt.figure(figsize=(12, 7))
     plt.bar(generations, counts, color='red', alpha=0.7, zorder=3)
@@ -298,12 +300,75 @@ def plot_generation_histogram(deduplicated_log):
         print(f"[图表 3] 保存图表时出错: {e}")
     plt.close() # 释放内存
 
-# --- 6. 主函数 (已简化) ---
+
+# --- 6. 图表4：崩溃随时间变化图 (新增) ---
+
+def plot_crashes_over_time(deduplicated_log):
+    """
+    (新增)
+    绘制独特崩溃随时间变化的累积曲线。
+    依赖于日志条目中的 'elapsed_time' 字段。
+    """
+    print(f"\n[图表 4] 正在分析崩溃随时间的变化...")
+    
+    crash_times = []
+    
+    for entry in deduplicated_log:
+        if entry.get('did_crash', False):
+            # 尝试获取时间戳
+            t = entry.get('elapsed_time')
+            if t is not None:
+                crash_times.append(t)
+            else:
+                # 如果是旧日志没有时间戳，这部分数据将被忽略
+                pass
+                
+    if not crash_times:
+        print("[图表 4] 未在崩溃数据中找到 'elapsed_time' 字段。无法绘制时间曲线。")
+        print("提示：请确保您运行的是更新后的 enjoy_cure.py。")
+        return
+
+    # 确保按时间排序（理论上日志是顺序的，但去重后顺序可能取决于保留的是哪一个，通常是第一个）
+    # 但去重逻辑保留的是原列表中的顺序，所以 sort 是为了保险
+    crash_times.sort()
+    
+    # 构造累积数量
+    cumulative_counts = list(range(1, len(crash_times) + 1))
+    
+    # 打印一些统计信息
+    print(f"  共找到 {len(crash_times)} 个带有时间戳的独特崩溃。")
+    print(f"  首次崩溃时间: {crash_times[0]:.2f} 秒")
+    print(f"  最后崩溃时间: {crash_times[-1]:.2f} 秒")
+    
+    plt.figure(figsize=(12, 7))
+    
+    # 使用 step 图可以更清晰地显示离散的发现过程
+    plt.step(crash_times, cumulative_counts, where='post', color='darkorange', linewidth=2, label='Cumulative Crashes')
+    plt.fill_between(crash_times, cumulative_counts, step='post', color='darkorange', alpha=0.1)
+    
+    plt.title('Cumulative Unique Crashes vs. Time')
+    plt.xlabel('Time Elapsed (seconds)')
+    plt.ylabel('Cumulative Number of Unique Crashes')
+    
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend()
+    
+    # 设置坐标轴范围更好看一点
+    plt.ylim(bottom=0)
+    plt.xlim(left=0)
+    
+    try:
+        plt.savefig(PLOT_4_FILE)
+        print(f"[图表 4] 已保存到: {PLOT_4_FILE}")
+    except Exception as e:
+        print(f"[图表 4] 保存图表时出错: {e}")
+    plt.close()
+
+
+# --- 7. 主函数 ---
 
 def main():
     # 1. 加载原始数据
-    # 注意：我们不再需要 'original_log_data' 来构建家谱图，
-    # 但 'deduplicate_log' 仍然需要它。
     original_log_data = load_data(LOG_FILE)
     if not original_log_data:
         return
@@ -314,15 +379,17 @@ def main():
         print("未能从日志中提取任何有效数据。退出。")
         return
         
-    # 3. 运行图表 1 (保持不变)
+    # 3. 运行图表 1
     plot_crash_trend(deduplicated_log)
     
-    # 4. 运行图表 2 (保持不变)
+    # 4. 运行图表 2
     plot_full_space(deduplicated_log, dtype, expected_size)
     
-    # 5. 运行图表 3 (已简化)
-    # 我们不再需要 build_parent_map 或 parent_map
+    # 5. 运行图表 3
     plot_generation_histogram(deduplicated_log)
+    
+    # 6. 运行图表 4 (新增)
+    plot_crashes_over_time(deduplicated_log)
         
     print("\n所有分析和绘图已完成。")
 

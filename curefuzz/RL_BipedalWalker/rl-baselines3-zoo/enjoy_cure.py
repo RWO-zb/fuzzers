@@ -11,6 +11,7 @@ from fuzz.cure_fuzz import CureFuzz
 import torch.nn.functional as F
 import torch.nn as nn
 from datetime import datetime
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", help="environment ID", type=str, default="CartPole-v1")
@@ -270,15 +271,18 @@ def main():
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward,  entropy, intrinsic_reward, final_state, orig_pose)
-        # --- 修改：记录更简单的日志条目 ---
+        
+        # --- 修改：记录更简单的日志条目（含时间戳） ---
         log_entry = {
             'seed_state': selected_info['seed_state'], # 原始父种子 state
             'mutate_state': mutate_states,          # 变异后的 state (可能导致crash)
             'parent_depth': current_mutation_depth, # 父种子的代数 (e.g., 0)
-            'did_crash': did_crash                  # 崩溃状态 (bool)
+            'did_crash': did_crash,                 # 崩溃状态 (bool)
+            'elapsed_time': time.time() - start_fuzz_time # <--- 新增：距离主循环开始的秒数
         }
         fuzz_selection_log.append(log_entry)
         # --- 结束修改 ---
+        
         print(f'Total seeds tested: { seedcount}, Crashes found: {len(fuzzer.result)}')
         current_time = time.time()
     if args.guide:
