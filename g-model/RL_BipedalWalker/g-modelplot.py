@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.ticker import MaxNLocator
+from sklearn.manifold import TSNE
+import time
 
 # ==========================================
 # 全局配置与风格设置
@@ -15,12 +17,13 @@ COLORS = {
     'bar_rand': '#95a5a6',    # 柱状图-Random (灰色)
     'bar_gen': '#e67e22',     # 柱状图-Generative (橙色)
     'line_total': '#d35400',  # 时间图-总数 (深橙色)
+    'tsne_safe': '#3498db',   # t-SNE-安全点 (蓝色)
+    'tsne_crash': '#e74c3c',  # t-SNE-崩溃点 (红色)
 }
 
 # 路径配置
 # 注意：请根据 test_gen.py 实际生成的文件夹名称修改此处
-# test_gen.py 默认参数生成的文件夹通常是 "generative_50_seed_0"
-RESULT_DIR = os.path.join("results", "generative+novelty_50_seed_1022")
+RESULT_DIR = os.path.join("results", "generative+novelty_50_seed_0")
 LOG_FILENAME = os.path.join(RESULT_DIR, "all_test_cases_log.pkl")
 
 def load_data():
@@ -103,21 +106,18 @@ def process_and_plot_bars(log_data):
     )
 
 def plot_total_crashes_over_time(log_data):
-    """绘制所有唯一 Crash 随时间变化的累计图（合并来源）"""
+    """绘制所有唯一 Crash 随时间变化的累计图（横坐标：小时）"""
     if not log_data:
         return
 
     # 提取所有唯一 Crash 的时间戳
-    # Key: input_tuple, Value: first_timestamp (time)
     unique_crashes_timestamps = {} 
     
     for entry in log_data:
         if entry.get('is_crash'):
             t_in = tuple(entry['input'])
-            # BipedalWalker 代码中使用的是 "time" 字段表示 elapsed time
             timestamp = entry.get('time', 0)
             
-            # 如果是新发现的 unique crash，记录发现时间
             if t_in not in unique_crashes_timestamps:
                 unique_crashes_timestamps[t_in] = timestamp
 
@@ -128,29 +128,26 @@ def plot_total_crashes_over_time(log_data):
         print("未发现 Unique Crash，跳过时间图绘制。")
         return
 
-    # 将秒转换为分钟
-    times_in_min = [t / 60.0 for t in sorted_times]
-    # 累计计数 (1, 2, 3 ...)
-    counts = np.arange(1, len(times_in_min) + 1)
+    # 将秒转换为小时
+    times_in_hours = [t / 3600.0 for t in sorted_times]
+    counts = np.arange(1, len(times_in_hours) + 1)
 
     # 绘图
     plt.figure(figsize=(10, 6))
     
-    plt.plot(times_in_min, counts, color=COLORS['line_total'], linewidth=3, label='Total Unique Crashes')
-    plt.fill_between(times_in_min, counts, color=COLORS['line_total'], alpha=0.1)
+    plt.plot(times_in_hours, counts, color=COLORS['line_total'], linewidth=3, label='Total Unique Crashes')
+    plt.fill_between(times_in_hours, counts, color=COLORS['line_total'], alpha=0.1)
 
     plt.title('Cumulative Unique Crashes Over Time', fontweight='bold', fontsize=16, pad=20)
-    plt.xlabel('Time (Minutes)', fontsize=14)
+    plt.xlabel('Time (Hours)', fontsize=14)
     plt.ylabel('Cumulative Count', fontsize=14)
     
-    # 强制 Y 轴刻度为整数
     plt.gca().yaxis.set_major_locator(MaxNLocator(integer=True))
     
-    # 添加统计信息框
     stats_text = (
         f"$\\bf{{Summary}}$\n"
         f"Total Unique Crashes: {len(counts)}\n"
-        f"Final Time: {times_in_min[-1]:.1f} min"
+        f"Final Time: {times_in_hours[-1]:.2f} h"
     )
     props = dict(boxstyle='round,pad=0.6', facecolor='white', alpha=0.9, edgecolor='#B0BEC5')
     plt.gca().text(0.95, 0.05, stats_text, transform=plt.gca().transAxes, fontsize=12,
@@ -162,6 +159,118 @@ def plot_total_crashes_over_time(log_data):
     
     filename = '3_crash_time_series_total.png'
     plt.savefig(os.path.join(RESULT_DIR, filename), dpi=300)
+    print(f"图表已保存: {filename}")
+    plt.close()
+
+# ==========================================
+# 新增 t-SNE 相关功能
+# ==========================================
+
+def run_tsne(data, n_samples):
+    """
+    运行 t-SNE 降维
+    """
+    # 如果样本太少，动态调整 perplexity 以避免报错
+    if n_samples < 50:
+        print(f"数据点较少 ({n_samples}个)，自动调整 Perplexity。")
+        perplexity_value = max(5, n_samples - 1)
+    else:
+        perplexity_value = min(30, n_samples - 1)
+        
+    print(f"正在对 {n_samples} 个唯一输入运行 t-SNE (Perplexity={perplexity_value})...")
+    
+    start_time = time.time()
+    
+    # 【修改】：使用 max_iter 替代 n_iter，并移除可能不兼容的 init 和 learning_rate 参数
+    # 以匹配 curefuzzplot.py 的配置
+    tsne = TSNE(
+        n_components=2,
+        verbose=1,
+        perplexity=perplexity_value,
+        max_iter=1000,  # 修复处：n_iter -> max_iter
+        random_state=42
+    )
+    tsne_results = tsne.fit_transform(data)
+    
+    end_time = time.time()
+    print(f"t-SNE 运行完成，耗时: {end_time - start_time:.2f} 秒")
+    return tsne_results
+
+def plot_tsne_distribution(log_data):
+    """
+    提取所有唯一输入，并绘制 t-SNE 散点图
+    红色 = Crash, 蓝色 = Safe
+    """
+    print("\n=== 开始绘制 t-SNE 分布图 ===")
+    
+    unique_inputs = []
+    labels = []  # 0: Safe, 1: Crash
+    seen_inputs = set()
+
+    # 1. 数据准备与去重
+    for entry in log_data:
+        t_in = tuple(entry['input'])
+        if t_in not in seen_inputs:
+            seen_inputs.add(t_in)
+            
+            # 将 tuple 转回 numpy array
+            input_arr = np.array(t_in)
+            unique_inputs.append(input_arr)
+            
+            # 标记 Label
+            if entry.get('is_crash'):
+                labels.append(1)
+            else:
+                labels.append(0)
+    
+    if not unique_inputs:
+        print("未找到有效输入数据，跳过 t-SNE。")
+        return
+
+    X = np.array(unique_inputs)
+    y = np.array(labels)
+    n_samples = X.shape[0]
+
+    # 2. 运行 t-SNE
+    tsne_results = run_tsne(X, n_samples)
+    
+    # 3. 绘图
+    plt.figure(figsize=(12, 10))
+    
+    # 分离数据点
+    safe_mask = (y == 0)
+    crash_mask = (y == 1)
+    
+    safe_points = tsne_results[safe_mask]
+    crash_points = tsne_results[crash_mask]
+    
+    # 绘制安全点 (蓝色, 半透明)
+    plt.scatter(
+        safe_points[:, 0], safe_points[:, 1], 
+        c=COLORS['tsne_safe'], alpha=0.3, s=20, 
+        label=f'Safe Inputs ({len(safe_points)})'
+    )
+    
+    # 绘制崩溃点 (红色, 显眼)
+    if len(crash_points) > 0:
+        plt.scatter(
+            crash_points[:, 0], crash_points[:, 1], 
+            c=COLORS['tsne_crash'], alpha=0.9, s=30, marker='X',
+            label=f'Crashes ({len(crash_points)})'
+        )
+    
+    plt.title('t-SNE Visualization of Input Space\n(Red=Crash, Blue=Safe)', fontweight='bold', fontsize=16)
+    plt.xlabel('t-SNE Component 1', fontsize=14)
+    plt.ylabel('t-SNE Component 2', fontsize=14)
+    plt.legend(frameon=True, fancybox=True, framealpha=0.9)
+    plt.grid(True, linestyle='--', alpha=0.5)
+    
+    sns.despine()
+    plt.tight_layout()
+    
+    filename = '4_input_space_tsne.png'
+    save_path = os.path.join(RESULT_DIR, filename)
+    plt.savefig(save_path, dpi=300)
     print(f"图表已保存: {filename}")
     plt.close()
 
@@ -180,8 +289,11 @@ def main():
         # 1. 绘制柱状图 (Raw & Unique)
         process_and_plot_bars(log_data)
         
-        # 2. 绘制时间曲线图 (Total Only)
+        # 2. 绘制时间曲线图 (Total Only - Time in Hours)
         plot_total_crashes_over_time(log_data)
+        
+        # 3. 绘制 t-SNE 输入空间分布图 (新增)
+        plot_tsne_distribution(log_data)
         
     print("\n=== 所有绘图任务完成 ===")
 

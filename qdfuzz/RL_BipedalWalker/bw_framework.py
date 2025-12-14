@@ -36,8 +36,8 @@ class Framework():
 
         # data structure consists of a list of cells (list of integers) and a list of list of test results
         self.cells: list[list[int]] = []
-        # MODIFIED: a 5-tuple: (input, performance, oracle result, behavior, mutation_count)
-        self.cells_data: list[list[tuple[np.ndarray, float, bool, np.ndarray, int]]] = []
+        # MODIFIED: a 6-tuple: (input, performance, oracle result, behavior, mutation_count, elapsed_time)
+        self.cells_data: list[list[tuple[np.ndarray, float, bool, np.ndarray, int, float]]] = []
 
         self.config = {
             'rand_seed': self.rand_seed,
@@ -90,16 +90,16 @@ class Framework():
         # 定义基础列名
         base_columns = ['score', 'is_faulty', 'cell_index'] + [f'cell{i}' for i in range(2)] + [f'behavior{i}' for i in range(2)]
         
-        # MODIFIED: 定义包含 'input' (列表对象) 和 'mutation_count' 的列
-        all_columns = base_columns + ['input', 'mutation_count']
+        # MODIFIED: 定义包含 'input', 'mutation_count', 'elapsed_time' 的列
+        all_columns = base_columns + ['input', 'mutation_count', 'elapsed_time']
 
         for i, cell_data in enumerate(self.cells_data):
             # a record consist of a score, the oracle result, the cell index, the cell and behavior point
             cell_dfs.append(
                 pd.DataFrame.from_records(
-                    # MODIFIED: 解包 5 元素元组,并将 _input.tolist() (一个列表) 传递
-                    data=[[score, is_faulty, i] + self.cells[i] + behavior.tolist() + [_input.tolist()] + [mutation_count]
-                          for (_input, score, is_faulty, behavior, mutation_count) in cell_data],
+                    # MODIFIED: 解包 6 元素元组
+                    data=[[score, is_faulty, i] + self.cells[i] + behavior.tolist() + [_input.tolist()] + [mutation_count] + [elapsed_time]
+                          for (_input, score, is_faulty, behavior, mutation_count, elapsed_time) in cell_data],
                     # MODIFIED: 使用新的列定义
                     columns=all_columns
                     )
@@ -110,9 +110,6 @@ class Framework():
         else:
             print("No data in cells_data to save.")
             
-        # MODIFIED: _inputs.npy 文件已合并到 CSV 中,不再需要
-        # np.save(f'{filepath}_inputs.npy', np.concatenate([np.array(list(map(lambda x: x[0], cell_data))) for cell_data in self.cells_data]))
-        
         # saves the random state
         self.save_random_state(filepath)
         # saves the configuration
@@ -157,6 +154,8 @@ class Framework():
         assert len(cell_cols) > 0, "CSV 中未找到 Cell 列"
         assert len(behavior_cols) > 0, "CSV 中未找到 Behavior 列"
 
+        # 检查是否存在 elapsed_time 列（为了兼容旧数据）
+        has_elapsed_time = 'elapsed_time' in df.columns
 
         for i, row in df.iterrows():
             # MODIFIED: 从行中提取数据
@@ -166,14 +165,16 @@ class Framework():
             behavior = row[behavior_cols].values
             
             # MODIFIED: 使用 json.loads 将 'input' 列的字符串解析回列表,然后转为 numpy 数组
-            # (Pandas 自动将列表保存为 [1, 2, 3] 格式的字符串)
             input_vec = np.array(json.loads(row['input']), dtype=int) 
             
             # MODIFIED: 加载 mutation_count
             mutation_count = row['mutation_count']
+
+            # MODIFIED: 加载 elapsed_time
+            elapsed_time = row['elapsed_time'] if has_elapsed_time else 0.0
             
             # MODIFIED: 调用新的 update_cell
-            self.update_cell(cell, input_vec, performance, is_faulty, np.array(behavior), mutation_count)
+            self.update_cell(cell, input_vec, performance, is_faulty, np.array(behavior), mutation_count, elapsed_time)
 
         self.load_random_state(filepath)
         self.load_configuration(filepath)
@@ -190,6 +191,7 @@ class Framework():
         
         selected_data = self.cells_data[index][input_index]
         # 返回 input (索引 0) 和 mutation_count (索引 4)
+        # 索引 5 是 elapsed_time，不需要在这里返回
         return selected_data[0], selected_data[4]
 
 
@@ -198,24 +200,22 @@ class Framework():
         return int(self.rng.integers(0, len(self.cells)))
 
 
-    def update_cell(self, cell: List[int], input: np.ndarray, performance: float, is_faulty: bool, behavior: np.ndarray, mutation_count: int):
+    def update_cell(self, cell: List[int], input: np.ndarray, performance: float, is_faulty: bool, behavior: np.ndarray, mutation_count: int, elapsed_time: float):
         '''
         Records the execution result to the corresponding cell.
-        MODIFIED: Accepts and stores mutation_count.
+        MODIFIED: Accepts and stores mutation_count and elapsed_time.
         It returns the index of the cell updated.
         '''
         index = None
         try:
             # index of the cell to update
             index = self.cells.index(cell)
-            # MODIFIED: 存储 5 元素元组
-            self.cells_data[index].append((input, performance, is_faulty, behavior, mutation_count))
-            # print(f'[DATA UPDATE LOG] CELL {index} UPDATED: {len(cells_data[index])} RECORDS; AVG SCORE: {np.mean(list(map(lambda x: x[1], cells_data[index]))):.2f}.')
+            # MODIFIED: 存储 6 元素元组
+            self.cells_data[index].append((input, performance, is_faulty, behavior, mutation_count, elapsed_time))
         except ValueError:
             self.cells.append(cell)
-            # MODIFIED: 存储 5 元素元组
-            self.cells_data.append([(input, performance, is_faulty, behavior, mutation_count)])
-            # print(f'[DATA UPDATE LOG] NEW CELL CREATED. CURRENT SCORE: {performance}.')
+            # MODIFIED: 存储 6 元素元组
+            self.cells_data.append([(input, performance, is_faulty, behavior, mutation_count, elapsed_time)])
         finally:
             # sanity checks
             assert len(self.cells) == len(self.cells_data), 'inconsistent cells and cells_data lists!'
@@ -314,8 +314,8 @@ class Framework():
         for i in range(len(inputs)): # MODIFIED: 使用 len(inputs) 应对提前退出的情况
             behavior = behaviors[i]
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
-            # MODIFIED: 初始种子, mutation_count = 0
-            mutated_input_index = self.update_cell(cell, inputs[i], acc_rewards[i], oracles[i], behavior, 0)
+            # MODIFIED: 初始种子, mutation_count = 0, elapsed_time = 0.0 (表示在 Fuzzing Loop 之前)
+            mutated_input_index = self.update_cell(cell, inputs[i], acc_rewards[i], oracles[i], behavior, 0, 0.0)
             print(f'episode_reward: {acc_rewards[i]}, oracle: {float(oracles[i])}, cell_selected_index: -1, cell_updated_index: {mutated_input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, inputs[i].reshape(1, -1), fmt='%1.0f', delimiter=',')
             np.savetxt(behaviors_buffer, behavior.reshape(1, -1), delimiter=',')
@@ -329,6 +329,10 @@ class Framework():
         pbar.set_description(f"Fuzzing loop (running for {time_budget_hours}h total)")
 
         print("Starting fuzzing loop...")
+        
+        # MODIFIED: 记录主循环开始时间
+        fuzzing_start_time = time.time()
+
         # MODIFIED: 循环条件只检查总时间
         while (current_time - testing_start_time < time_budget_seconds):
             cell_index = self.select_cell()
@@ -345,7 +349,11 @@ class Framework():
 
             # MODIFIED: 传递新的 count (父代 + 1)
             new_mutation_count = parent_mutation_count + 1
-            mutated_input_index = self.update_cell(cell, mutated_input, episode_reward, oracle, behavior, new_mutation_count)
+            
+            # MODIFIED: 计算距离主循环开始的时间
+            elapsed_time = time.time() - fuzzing_start_time
+            
+            mutated_input_index = self.update_cell(cell, mutated_input, episode_reward, oracle, behavior, new_mutation_count, elapsed_time)
             print(f'episode_reward: {episode_reward}, oracle: {float(oracle)}, cell_selected_index: {cell_index}, cell_updated_index: {mutated_input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, mutated_input.reshape(1, -1), fmt='%1.0f', delimiter=',')
             np.savetxt(behaviors_buffer, behavior.reshape(1, -1), delimiter=',')
@@ -361,6 +369,8 @@ class Framework():
         self.config['testing_end_time'] = testing_end_time
         self.config['testing_time'] = testing_end_time - testing_start_time
         self.config['total_execution_time'] = sum(execution_times)
+        # MODIFIED: 也可以记录 fuzzing 开始时间
+        self.config['fuzzing_start_time'] = fuzzing_start_time
 
         pbar.close()
         behaviors_buffer.close()
@@ -420,8 +430,11 @@ class Framework():
             execution_times.append(t1 - t0)
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
 
+            # MODIFIED: 计算时间
+            elapsed_time = time.time() - start_time
+
             # MODIFIED: 随机测试, mutation_count = 0
-            input_index = self.update_cell(cell, input, episode_reward, oracle, behavior, 0)
+            input_index = self.update_cell(cell, input, episode_reward, oracle, behavior, 0, elapsed_time)
             print(f'episode_reward: {episode_reward}, oracle: {float(oracle)}, cell_selected_index: -1, cell_updated_index: {input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, input.reshape(1, -1), fmt='%1.0f', delimiter=',')
             np.savetxt(behaviors_buffer, behavior.reshape(1, -1), delimiter=',')
@@ -487,11 +500,11 @@ class Framework():
         self.config['xedges'] = list(self.xedges)
         self.config['yedges'] = list(self.xedges)
 
-        # helpers 1: MODIFIED: 接收 mutation_count
-        def record(input: np.ndarray, reward: float, oracle: bool, behavior: np.ndarray, final_state: np.ndarray, mutation_count: int) -> None:
+        # helpers 1: MODIFIED: 接收 mutation_count 和 elapsed_time
+        def record(input: np.ndarray, reward: float, oracle: bool, behavior: np.ndarray, final_state: np.ndarray, mutation_count: int, elapsed_time: float) -> None:
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
-            # MODIFIED: 传递 mutation_count
-            updated_cell_index = self.update_cell(cell, input, reward, oracle, behavior, mutation_count)
+            # MODIFIED: 传递 mutation_count 和 elapsed_time
+            updated_cell_index = self.update_cell(cell, input, reward, oracle, behavior, mutation_count, elapsed_time)
             # parent's cell is not logged
             print(f'episode_reward: {reward}, oracle: {float(oracle)}, cell_updated_index: {updated_cell_index}, nb_cells: {len(self.cells)}', file=logs_buffer)
             np.savetxt(inputs_buffer, input.reshape(1, -1), fmt='%1.0f', delimiter=',')
@@ -499,8 +512,8 @@ class Framework():
             np.savetxt(final_states_buffer, final_state.reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
         
-        # helpers 2: MODIFIED: 接收和传递 mutation_counts
-        def evaluate(individuals: np.ndarray, mutation_counts: np.ndarray) -> np.ndarray:
+        # helpers 2: MODIFIED: 接收和传递 mutation_counts, 计算时间
+        def evaluate(individuals: np.ndarray, mutation_counts: np.ndarray, loop_start_time: float = None) -> np.ndarray:
             behaviors = []
             for i, ind in enumerate(individuals):
                 # MODIFIED: 在执行前检查时间
@@ -509,8 +522,15 @@ class Framework():
                     break # 停止 evaluate 循环
                 
                 r, o, b, fs, _ = execute_policy(ind, model, env_seed, self.descriptors, 300)
-                # MODIFIED: 传递 mutation_counts[i]
-                record(ind, r, o, b, fs, mutation_counts[i])
+                
+                # MODIFIED: 计算时间
+                if loop_start_time is None:
+                    e_time = 0.0 # 初始化阶段
+                else:
+                    e_time = time.time() - loop_start_time
+
+                # MODIFIED: 传递 mutation_counts[i] 和 e_time
+                record(ind, r, o, b, fs, mutation_counts[i], e_time)
                 behaviors.append(b)
             return np.array(behaviors)
         
@@ -529,8 +549,8 @@ class Framework():
         # MODIFIED: 创建初始 counts
         pop_mutation_counts = np.zeros(pop_size, dtype=int)
         
-        # MODIFIED: 传递 counts
-        pop_behaviors = evaluate(pop, pop_mutation_counts)
+        # MODIFIED: 传递 counts, loop_start_time=None
+        pop_behaviors = evaluate(pop, pop_mutation_counts, loop_start_time=None)
         
         # 检查 evaluate 是否因时间耗尽而提前退出
         if not pop_behaviors.any():
@@ -557,6 +577,10 @@ class Framework():
         pbar.set_description(f"Novelty Search loop (running for {time_budget_hours}h total)")
 
         print("Starting Novelty Search loop...")
+        
+        # MODIFIED: 记录主循环开始时间
+        ns_start_time = time.time()
+
         while (time.time() - testing_start_time < time_budget_seconds):
             # 1. generates offspring
             offspring = mutate(pop)
@@ -564,8 +588,8 @@ class Framework():
             offspring_mutation_counts = pop_mutation_counts + 1
             
             # 1. evaluates the offspring
-            # MODIFIED: 传递 counts
-            offspring_behaviors = evaluate(offspring, offspring_mutation_counts)
+            # MODIFIED: 传递 counts 和 start_time
+            offspring_behaviors = evaluate(offspring, offspring_mutation_counts, loop_start_time=ns_start_time)
             
             # 检查 evaluate 是否耗尽了时间
             if not offspring_behaviors.any():
@@ -638,7 +662,7 @@ class MAPElitesFramework(Framework):
         best_performer_index = int(np.argmin(scores))
         
         # MODIFIED: 获取完整的元组
-        # 结构: (input, score, is_faulty, behavior, mutation_count)
+        # 结构: (input, score, is_faulty, behavior, mutation_count, elapsed_time)
         selected_data = self.cells_data[index][best_performer_index]
         
         # 返回 input (索引 0) 和 mutation_count (索引 4)
@@ -656,7 +680,7 @@ if __name__ == '__main__':
     time_budget_hours = 12
     
     # MODIFIED: test_policy 仍需要 init_budget
-    init_budget = 100
+    init_budget = 1000
     cell_granularity = 50
 
     # MODIFIED: novelty_search 仍需要这些参数

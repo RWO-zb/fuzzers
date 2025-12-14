@@ -7,19 +7,21 @@ import os
 import time
 
 # --- 1. 配置 ---
-LOG_FILE = 'selection_log.pkl'
+# 请确保此文件名与 enjoy.py 生成的日志文件名一致
+LOG_FILE = 'all_run_seeds_0.pkl' 
+
 PLOT_1_FILE = 'crashes_over_unique_inputs.png'
 PLOT_2_FILE = 'full_input_space_tsne.png'
 PLOT_3_FILE = 'crash_generation_histogram.png'
-PLOT_4_FILE = 'crashes_over_time.png'  # <--- 新增配置
+PLOT_4_FILE = 'crashes_over_time.png'
 
-# --- 2. 核心辅助函数 (保持不变) ---
+# --- 2. 核心辅助函数 ---
 
 def load_data(file_path):
-    """加载 selection_log.pkl 文件"""
+    """加载日志文件"""
     if not os.path.exists(file_path):
         print(f"错误: 未找到文件: {file_path}")
-        print("请确保此脚本与 'selection_log.pkl' 位于同一文件夹中。")
+        print(f"请确保此脚本与 '{file_path}' 位于同一文件夹中，或修改脚本中的 LOG_FILE 路径。")
         return None
     
     try:
@@ -34,29 +36,30 @@ def load_data(file_path):
 
 def deduplicate_log(original_log_data):
     """
-    (保持不变)
-    根据 'mutate_state' 对日志进行去重，只保留第一次出现的条目。
+    根据 'state' 对日志进行去重，只保留第一次出现的条目。
+    注意：这里的字段名已适配新的 enjoy.py 输出 ('state' 而非 'mutate_state')。
     """
-    print("正在根据 'mutate_state' 对日志进行去重（保留首次出现）...")
+    print("正在根据 'state' 对日志进行去重（保留首次出现）...")
     
-    seen_mutate_states = set()
+    seen_states = set()
     deduplicated_log = []
     dtype_to_use = None
     expected_size = 0
     
-    # 动态检测 dtype
-    int32_size = 15 * np.dtype(np.int32).itemsize # 15 * 4 = 60
-    int64_size = 15 * np.dtype(np.int64).itemsize # 15 * 8 = 120
+    # 动态检测 dtype (兼容 int32 和 int64)
+    int32_size = 15 * np.dtype(np.int32).itemsize # 60
+    int64_size = 15 * np.dtype(np.int64).itemsize # 120
 
     for entry in original_log_data:
-        state = entry.get('mutate_state')
+        # --- 修改：字段名适配 'state' ---
+        state = entry.get('state')
         if state is None:
             continue
             
         try:
             state_bytes = state.tobytes()
         except AttributeError:
-            print("警告: 发现非Numpy数组的 mutate_state，跳过。")
+            print("警告: 发现非Numpy数组的 state，跳过。")
             continue
             
         # 第一次运行时检测 dtype
@@ -77,29 +80,27 @@ def deduplicate_log(original_log_data):
             continue
             
         # 核心去重逻辑
-        if state_bytes not in seen_mutate_states:
-            seen_mutate_states.add(state_bytes)
+        if state_bytes not in seen_states:
+            seen_states.add(state_bytes)
             
-            # 为了节省内存，我们在去重日志中存储字节，而不是Numpy数组
-            # 关键：entry.copy() 会保留 'parent_depth' 等其他元数据
             entry_copy = entry.copy() 
-            entry_copy['mutate_state'] = state_bytes
+            # 统一将 bytes 存回以便后续处理
+            entry_copy['state_bytes'] = state_bytes 
             deduplicated_log.append(entry_copy)
 
-    print(f"去重完成。总共找到 {len(deduplicated_log)} 个独特的 'mutate_state'。")
+    print(f"去重完成。总共找到 {len(deduplicated_log)} 个独特的 'state'。")
     
     if dtype_to_use is None:
-        print("错误：未能从日志中检测到任何有效的 'mutate_state'。")
+        print("错误：未能从日志中检测到任何有效的 'state'。")
         return None, None, 0
 
     return deduplicated_log, dtype_to_use, expected_size
 
 
-# --- 3. 图表1：崩溃趋势图 (保持不变) ---
+# --- 3. 图表1：崩溃趋势图 ---
 
 def plot_crash_trend(deduplicated_log):
     """
-    (保持不变)
     绘制随发现的“独特输入”数量而变化的“独特崩溃”累积数量。
     """
     print(f"\n[图表 1] 正在计算崩溃趋势...")
@@ -108,7 +109,7 @@ def plot_crash_trend(deduplicated_log):
     current_crash_count = 0
     
     for i, entry in enumerate(deduplicated_log):
-        if entry.get('did_crash', False):
+        if entry.get('crashed', False):
             current_crash_count += 1
         
         cumulative_crashes_list.append(current_crash_count)
@@ -138,16 +139,12 @@ def plot_crash_trend(deduplicated_log):
         print(f"[图表 1] 已保存到: {PLOT_1_FILE}")
     except Exception as e:
         print(f"[图表 1] 保存图表时出错: {e}")
-    plt.close() # 释放内存
+    plt.close()
 
 
-# --- 4. 图表2：t-SNE 空间图 (保持不变) ---
+# --- 4. 图表2：t-SNE 空间图 ---
 
 def run_tsne(data, n_samples):
-    """
-    (保持不变)
-    对 (N, 15) 的数据运行 t-SNE 降维到 2 维
-    """
     if n_samples < 50:
         print(f"数据点太少 ({n_samples}个)，t-SNE 可能效果不佳。")
         perplexity_value = max(5, n_samples - 1)
@@ -172,8 +169,7 @@ def run_tsne(data, n_samples):
 
 def plot_full_space(deduplicated_log, dtype_to_use, expected_size):
     """
-    (保持不变)
-    绘制 t-SNE 结果的 2D 散点图，用两种颜色区分
+    绘制 t-SNE 结果的 2D 散点图
     """
     print(f"\n[图表 2] 正在准备 t-SNE 数据...")
     
@@ -181,12 +177,12 @@ def plot_full_space(deduplicated_log, dtype_to_use, expected_size):
     labels_list = []
     
     for entry in deduplicated_log:
-        state_bytes = entry.get('mutate_state')
+        state_bytes = entry.get('state_bytes') # 使用去重时保存的 bytes
         if state_bytes is None or len(state_bytes) != expected_size:
             continue
             
         all_data_list.append(np.frombuffer(state_bytes, dtype=dtype_to_use))
-        labels_list.append(1 if entry.get('did_crash', False) else 0) # 1 = Crash, 0 = No Crash
+        labels_list.append(1 if entry.get('crashed', False) else 0) 
         
     if not all_data_list:
         print("[图表 2] 未找到可用于 t-SNE 的数据。")
@@ -219,7 +215,7 @@ def plot_full_space(deduplicated_log, dtype_to_use, expected_size):
             label=f'Crashing Inputs ({crashing_points.shape[0]})'
         )
     
-    plt.title('t-SNE Visualization of Unique Explored Inputs (by First Appearance)')
+    plt.title('t-SNE Visualization of Unique Explored Inputs')
     plt.xlabel('t-SNE Component 1')
     plt.ylabel('t-SNE Component 2')
     plt.legend()
@@ -230,14 +226,13 @@ def plot_full_space(deduplicated_log, dtype_to_use, expected_size):
         print(f"[图表 2] 已保存到: {PLOT_2_FILE}")
     except Exception as e:
         print(f"[图表 2] 保存图表时出错: {e}")
-    plt.close() # 释放内存
+    plt.close()
 
 
-# --- 5. 图表3：崩溃代数直方图 (保持不变) ---
+# --- 5. 图表3：崩溃代数直方图 ---
 
 def plot_generation_histogram(deduplicated_log):
     """
-    (保持不变)
     绘制 *独特崩溃输入* 的代数直方图。
     """
     print(f"\n[图表 3] 正在分析崩溃代数...")
@@ -245,20 +240,14 @@ def plot_generation_histogram(deduplicated_log):
     crash_generations = []
 
     for entry in deduplicated_log:
-        if entry.get('did_crash', False):
-            # 这是一个在首次出现时就崩溃的独特输入
+        if entry.get('crashed', False):
+            # enjoy.py 中记录的 'generation' 已经是当前的代数
+            gen = entry.get('generation') 
             
-            # 'parent_depth' 是在 enjoy_cure.py 中记录的父种子的代数
-            parent_depth = entry.get('parent_depth') 
-            
-            if parent_depth is None:
-                # 兼容旧日志或缺失数据的情况
-                # print("警告: 发现一个 crash 条目缺少 'parent_depth'。")
+            if gen is None:
                 continue
             
-            # crash 本身的代数 = 父代数 + 1
-            crash_generation = parent_depth + 1
-            crash_generations.append(crash_generation)
+            crash_generations.append(gen)
             
     print(f"分析完成。总共找到 {len(crash_generations)} 个独特的崩溃事件。")
     
@@ -268,12 +257,11 @@ def plot_generation_histogram(deduplicated_log):
 
     generation_counts = Counter(crash_generations)
     
-    # 确保我们至少绘制到第1代
     max_gen = 0
     if generation_counts:
         max_gen = max(generation_counts.keys())
         
-    generations = range(0, max_gen + 2) # 从0开始，多显示一格
+    generations = range(0, max_gen + 2)
     counts = [generation_counts.get(gen, 0) for gen in generations]
     
     print("\n--- 独特崩溃代数统计 ---")
@@ -285,11 +273,11 @@ def plot_generation_histogram(deduplicated_log):
     plt.figure(figsize=(12, 7))
     plt.bar(generations, counts, color='red', alpha=0.7, zorder=3)
     
-    plt.title('Histogram of Unique Crash Generations (by First Appearance)')
-    plt.xlabel('Mutation Generation (Depth from Initial Seed)')
+    plt.title('Histogram of Unique Crash Generations')
+    plt.xlabel('Mutation Generation')
     plt.ylabel('Number of Unique Crashing Inputs')
     
-    step = max(1, (max_gen // 20)) # 动态调整x轴刻度
+    step = max(1, (max_gen // 20))
     plt.xticks(np.arange(0, max_gen + 2, step=step))
     plt.grid(axis='y', linestyle='--', alpha=0.6, zorder=0)
     
@@ -298,62 +286,59 @@ def plot_generation_histogram(deduplicated_log):
         print(f"[图表 3] 已保存到: {PLOT_3_FILE}")
     except Exception as e:
         print(f"[图表 3] 保存图表时出错: {e}")
-    plt.close() # 释放内存
+    plt.close()
 
 
-# --- 6. 图表4：崩溃随时间变化图 (新增) ---
+# --- 6. 图表4：崩溃随时间变化图 (已修改为小时) ---
 
 def plot_crashes_over_time(deduplicated_log):
     """
-    (新增)
     绘制独特崩溃随时间变化的累积曲线。
-    依赖于日志条目中的 'elapsed_time' 字段。
+    依赖于日志条目中的 'timestamp' 字段。
     """
     print(f"\n[图表 4] 正在分析崩溃随时间的变化...")
     
     crash_times = []
     
     for entry in deduplicated_log:
-        if entry.get('did_crash', False):
-            # 尝试获取时间戳
-            t = entry.get('elapsed_time')
+        if entry.get('crashed', False):
+            t = entry.get('timestamp')
             if t is not None:
                 crash_times.append(t)
             else:
-                # 如果是旧日志没有时间戳，这部分数据将被忽略
                 pass
                 
     if not crash_times:
-        print("[图表 4] 未在崩溃数据中找到 'elapsed_time' 字段。无法绘制时间曲线。")
-        print("提示：请确保您运行的是更新后的 enjoy_cure.py。")
+        print("[图表 4] 未在崩溃数据中找到 'timestamp' 字段。无法绘制时间曲线。")
         return
 
-    # 确保按时间排序（理论上日志是顺序的，但去重后顺序可能取决于保留的是哪一个，通常是第一个）
-    # 但去重逻辑保留的是原列表中的顺序，所以 sort 是为了保险
+    # 排序时间戳
     crash_times.sort()
     
-    # 构造累积数量
+    # 转换时间单位：秒 -> 小时
+    crash_times_hours = [t / 3600.0 for t in crash_times]
+    
+    # 构造累积数量 (1, 2, 3, ...)
     cumulative_counts = list(range(1, len(crash_times) + 1))
     
-    # 打印一些统计信息
     print(f"  共找到 {len(crash_times)} 个带有时间戳的独特崩溃。")
-    print(f"  首次崩溃时间: {crash_times[0]:.2f} 秒")
-    print(f"  最后崩溃时间: {crash_times[-1]:.2f} 秒")
+    print(f"  首次崩溃时间: {crash_times_hours[0]:.4f} 小时 ({crash_times[0]:.2f} 秒)")
+    print(f"  最后崩溃时间: {crash_times_hours[-1]:.4f} 小时 ({crash_times[-1]:.2f} 秒)")
     
     plt.figure(figsize=(12, 7))
     
-    # 使用 step 图可以更清晰地显示离散的发现过程
-    plt.step(crash_times, cumulative_counts, where='post', color='darkorange', linewidth=2, label='Cumulative Crashes')
-    plt.fill_between(crash_times, cumulative_counts, step='post', color='darkorange', alpha=0.1)
+    # 使用 step 图，传入小时数据
+    plt.step(crash_times_hours, cumulative_counts, where='post', color='darkorange', linewidth=2, label='Cumulative Crashes')
+    plt.fill_between(crash_times_hours, cumulative_counts, step='post', color='darkorange', alpha=0.1)
     
     plt.title('Cumulative Unique Crashes vs. Time')
-    plt.xlabel('Time Elapsed (seconds)')
+    # 修改横坐标标签
+    plt.xlabel('Time Elapsed (hours)')
     plt.ylabel('Cumulative Number of Unique Crashes')
     
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.legend()
     
-    # 设置坐标轴范围更好看一点
     plt.ylim(bottom=0)
     plt.xlim(left=0)
     
@@ -388,7 +373,7 @@ def main():
     # 5. 运行图表 3
     plot_generation_histogram(deduplicated_log)
     
-    # 6. 运行图表 4 (新增)
+    # 6. 运行图表 4 (修改版)
     plot_crashes_over_time(deduplicated_log)
         
     print("\n所有分析和绘图已完成。")

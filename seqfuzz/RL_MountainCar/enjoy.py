@@ -206,7 +206,7 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 10000
+    seeds_num = 100
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     
@@ -317,7 +317,7 @@ def main():
     seedcount = 0
     
     # === 循环 2: Fuzzing Main Loop ===
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0:
+    while current_time - start_fuzz_time < 3600 * 0.05 and len(fuzzer.corpus) > 0:
         is_crash = False
         seedcount+=1
         output_obs = []
@@ -496,10 +496,13 @@ def main():
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
         
+        # --- 修改位置：添加 crash_time ---
+        current_time_log = time.time()
         log_entry = {
             'state': copy.deepcopy(mutate_states),
             'generation': current_gen,
-            'crashed': is_crash
+            'crashed': is_crash,
+            'crash_time': current_time_log - start_fuzz_time # [修改] 添加时间字段
         }
         mutation_log.append(log_entry)
         

@@ -1,6 +1,7 @@
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator  # 新增引用
 from sklearn.manifold import TSNE
 from collections import Counter
 import os
@@ -12,6 +13,7 @@ LOG_FILE = 'all_run_seeds_0.pkl'
 PLOT_1_FILE = 'crashes_over_unique_inputs.png'
 PLOT_2_FILE = 'full_input_space_tsne.png'
 PLOT_3_FILE = 'crash_generation_histogram.png'
+PLOT_4_FILE = '1_crash_discovery_over_time.png' # 新增：随时间变化的崩溃图文件名
 
 # --- 2. 核心辅助函数 (已修改) ---
 
@@ -322,7 +324,78 @@ def plot_generation_histogram(deduplicated_log):
         print(f"[图表 3] 保存图表时出错: {e}")
     plt.close() # 释放内存
 
-# --- 6. 主函数 (保持不变) ---
+# --- 6. 图表4：崩溃随时间变化图 (新增) ---
+
+def plot_crashes_over_time(deduplicated_log, total_samples_count):
+    """
+    (新增)
+    绘制随时间（小时）变化的独特崩溃数量。
+    依赖于日志条目中的 'crash_time' 字段。
+    """
+    print(f"\n[图表 4] 正在计算崩溃随时间的变化...")
+    
+    dedup_samples_count = len(deduplicated_log)
+    
+    # 提取 crash_time
+    crash_times = []
+    for entry in deduplicated_log:
+        if entry.get('crashed', False):
+            # 假设日志中有 'crash_time' 字段（单位通常为秒）
+            t = entry.get('crash_time')
+            if t is not None:
+                crash_times.append(t)
+            else:
+                # 如果找不到时间，这里可以选择跳过或者记录警告
+                # print("警告: 发现崩溃条目缺少 'crash_time'。")
+                pass
+                
+    unique_crashes_count = len(crash_times)
+    
+    if not crash_times:
+        print("[图表 4] 未找到包含 'crash_time' 的崩溃数据，跳过绘制。")
+        return
+
+    # 排序
+    crash_times.sort()
+    
+    # 转换为小时
+    times_in_hours = [t / 3600.0 for t in crash_times]
+    counts = range(1, len(crash_times) + 1)
+
+    plt.figure(figsize=(12, 7))
+    plt.plot(times_in_hours, counts, color='#E64A19', linewidth=3, label='Unique Crashes')
+    plt.fill_between(times_in_hours, counts, color='#E64A19', alpha=0.1)
+    
+    plt.title('Crash Discovery Over Time', fontweight='bold', fontsize=18, pad=20)
+    plt.xlabel('Time (Hours)', fontsize=14, labelpad=10)
+    plt.ylabel('Cumulative Crashes', fontsize=14, labelpad=10)
+    
+    # 设置Y轴为整数刻度
+    plt.gca().yaxis.set_major_locator(MaxNLocator(integer=True)) 
+    plt.grid(True, linestyle='--', alpha=0.6)
+    
+    # 统计信息文本框
+    stats_text = (
+        f"$\\bf{{Statistics}}$\n"
+        f"Total Samples: {total_samples_count}\n"
+        f"Dedup. Samples: {dedup_samples_count}\n"
+        f"Unique Crashes: {unique_crashes_count}"
+    )
+    
+    # 文本框样式
+    props = dict(boxstyle='round,pad=0.6', facecolor='white', alpha=0.9, edgecolor='#B0BEC5')
+    plt.gca().text(0.05, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=13,
+                   verticalalignment='top', horizontalalignment='left', bbox=props)
+    
+    try:
+        plt.savefig(PLOT_4_FILE, dpi=300)
+        print(f"[图表 4] 已保存到: {PLOT_4_FILE}")
+    except Exception as e:
+        print(f"[图表 4] 保存图表时出错: {e}")
+    plt.close()
+
+
+# --- 7. 主函数 (已更新) ---
 
 def main():
     # 1. 加载原始数据
@@ -344,6 +417,10 @@ def main():
     
     # 5. 运行图表 3
     plot_generation_histogram(deduplicated_log)
+    
+    # 6. 运行图表 4 (新增)
+    # 注意：这里我们传入原始日志的长度用于统计展示
+    plot_crashes_over_time(deduplicated_log, len(original_log_data))
         
     print("\n所有分析和绘图已完成。")
 

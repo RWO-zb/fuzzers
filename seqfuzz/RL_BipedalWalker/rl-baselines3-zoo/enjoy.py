@@ -201,7 +201,7 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 500
+    seeds_num = 1000
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     while i < seeds_num:
@@ -427,7 +427,8 @@ def main():
         log_entry = {
             'state': copy.deepcopy(mutate_states), # 记录变异的 state
             'generation': current_gen,             # 记录它是第几代
-            'crashed': is_crash                    # 记录是否导致 crash
+            'crashed': is_crash,                   # 记录是否导致 crash
+            'timestamp': time.time() - start_fuzz_time # <--- 新增：记录相对时间戳
         }
         mutation_log.append(log_entry)
         # --- 日志记录结束 ---

@@ -9,12 +9,13 @@ import time
 import ast # 用于安全地将字符串 '[1,2,3]' 转换为列表 [1,2,3]
 
 # --- 1. 配置 ---
-LOG_FILE = 'rt_10_0.01_0.01_1022_logs.txt' 
+LOG_FILE = 'rt_10_0.01_0.01_0_logs.txt' 
 PLOT_1_FILE = 'rt_crashes_over_unique_inputs.png'
 PLOT_2_FILE = 'rt_full_input_space_tsne.png'
 PLOT_3_FILE = 'rt_crash_generation_histogram.png'
+PLOT_4_FILE = 'rt_crashes_over_time.png' # <--- 新增：图表 4 的文件名
 
-# --- 2. 核心辅助函数 (已修改) ---
+# --- 2. 核心辅助函数 ---
 
 def load_and_prepare_data(file_path):
     """
@@ -35,36 +36,35 @@ def load_and_prepare_data(file_path):
         )
         
         print(f"原始日志加载完成，总共 {len(df)} 条记录。")
-        print(f"检测到的列名: {df.columns.tolist()}")
+        # print(f"检测到的列名: {df.columns.tolist()}")
 
         # --- 关键假设 ---
         if df['Oracle'].dtype == 'object':
-            print("  'Oracle' 列是 object 类型, 正在映射 'True' -> True, 'False' -> False")
+            # print("  'Oracle' 列是 object 类型, 正在映射 'True' -> True, 'False' -> False")
             df['Oracle'] = df['Oracle'].map({'True': True, 'False': False, 'None': None})
         
-        # --- *** 已修改：假设 Oracle == True 是崩溃 *** ---
+        # --- 假设 Oracle == True 是崩溃 ---
         df['is_crash'] = (df['Oracle'] == True)
         
         # --- 转换 object 类型的列 ---
-        # 确保 'Sensitivity', 'Coverage', 'CoverageTime' 是数字类型
-        for col in ['Sensitivity', 'Coverage', 'CoverageTime']:
-            if col in df.columns and df[col].dtype == 'object':
-                print(f"  正在转换 {col} 列: 将 'None' 字符串替换为 NaN 并转换为 float...")
+        # 确保 'Sensitivity', 'Coverage', 'CoverageTime', 'RunTime' 是数字类型
+        # 新增 'RunTime' 以支持基于时间的绘图
+        for col in ['Sensitivity', 'Coverage', 'CoverageTime', 'RunTime']:
+            if col in df.columns:
+                # print(f"  正在处理 {col} 列: 确保为数值类型...")
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
         
         print("\n--- 数据初步检查 ---")
-        df.info() # 打印 df.info() 的输出以进行验证
+        # df.info() 
         print(df.head())
         
         crash_counts = df['is_crash'].value_counts()
         
-        # --- *** 已修改：更新日志消息 *** ---
         print(f"\n--- 崩溃分析 (基于 'Oracle == True' 假设) ---")
         print(crash_counts)
         
         if True not in crash_counts or crash_counts[True] == 0:
-            # --- *** 已修改：更新日志消息 *** ---
             print("警告: 根据当前假设 (Oracle == True)，未找到任何崩溃。")
         else:
             print(f"根据假设，共找到 {crash_counts[True]} 条崩溃记录。")
@@ -92,6 +92,7 @@ def deduplicate_log(original_data_df):
         
     print(f"\n正在对 {len(original_data_df)} 条记录进行去重 (基于 'Input' 列)...")
     try:
+        # keep='first' 保留第一次出现的记录，这对于基于时间的分析很重要
         unique_df = original_data_df.drop_duplicates(subset=['Input'], keep='first')
         unique_df = unique_df.reset_index(drop=True) # 重置索引
         print(f"去重后，剩余 {len(unique_df)} 条独特记录。")
@@ -103,7 +104,7 @@ def deduplicate_log(original_data_df):
         print(f"去重时出错: {e}")
         return None
 
-# --- 3. 绘图函数 (改编自 plotmax.py) ---
+# --- 3. 绘图函数 ---
 
 def plot_crashes_over_time(unique_log_df):
     """
@@ -140,8 +141,6 @@ def plot_tsne_all(unique_log_df):
         return
         
     print("\n[图表 2] 正在生成 't-SNE 输入空间' 图...")
-    
-    # 添加版本检查
     print(f"  使用 scikit-learn version: {sklearn.__version__}")
 
     try:
@@ -169,12 +168,8 @@ def plot_tsne_all(unique_log_df):
              
         print(f"  正在运行 t-SNE (n_samples={n_samples}, perplexity={perplexity_value})...")
         
-        # --- *** 错误修复 (第 3 轮) *** ---
-        # 错误 "unexpected keyword argument 'max_iter'" (来自 Run 2)
-        # 错误 "unexpected keyword argument 'n_iter'" (来自 Run 1)
-        # 这表明 VM 的 sklearn 版本不接受 'n_iter' 或 'max_iter' 作为构造函数参数。
-        # 我们将移除此参数，使用默认的迭代次数。
-        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity_value, init='pca') # <--- 修正行
+        # 兼容不同版本的 sklearn，不传入 max_iter 或 n_iter
+        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity_value, init='pca')
         
         X_2d = tsne.fit_transform(X)
         print("  t-SNE 完成。")
@@ -229,15 +224,11 @@ def plot_crash_generation_histogram(unique_log_df):
     try:
         crash_generations = crash_data['Generation'].astype(int)
         
-        # --- *** 新增功能：计算平均值和中位数 *** ---
         if not crash_generations.empty:
             mean_gen = crash_generations.mean()
             median_gen = crash_generations.median()
             print(f"  [统计] 导致独特崩溃的平均代数: {mean_gen:.2f}")
             print(f"  [统计] 导致独特崩溃的代数中位数: {median_gen:.2f}")
-        else:
-            print("  [统计] 'Generation' 列为空或无效，无法计算统计数据。")
-        # --- *** 新增功能结束 *** ---
         
         generation_counts = Counter(crash_generations)
         
@@ -275,6 +266,74 @@ def plot_crash_generation_histogram(unique_log_df):
     except Exception as e:
         print(f"[图表 3] 绘制直方图时出错: {e}")
 
+def plot_crashes_over_wallclock_time(unique_log_df):
+    """
+    图 4: 绘制独特崩溃随时间 (小时) 的变化曲线 (仿照 curefuzzplot.py)
+    """
+    if unique_log_df is None:
+        print("[图表 4] 跳过：无数据。")
+        return
+
+    print("\n[图表 4] 正在生成 '独特崩溃 vs 时间' 图...")
+    
+    # 检查是否有 'RunTime' 列
+    if 'RunTime' not in unique_log_df.columns:
+        print("[图表 4] 错误: 数据中未找到 'RunTime' 列，无法计算时间。")
+        return
+
+    # 提取崩溃数据
+    crash_df = unique_log_df[unique_log_df['is_crash'] == True].copy()
+    
+    if crash_df.empty:
+        print("[图表 4] 未找到独特的崩溃记录，跳过绘图。")
+        return
+
+    # 计算相对时间 (小时)
+    # 我们使用日志中的最小时间戳作为实验开始时间
+    # 注意：为了准确性，最好是使用整个日志的开始时间，但这里我们使用去重后数据的最早时间作为近似
+    # 如果数据是按时间顺序记录的，这通常是准确的。
+    start_time = unique_log_df['RunTime'].min()
+    
+    # 计算崩溃发生时相对于开始时间的秒数
+    crash_times = crash_df['RunTime'] - start_time
+    
+    # 转换为小时
+    crash_times_hours = crash_times / 3600.0
+    
+    # 排序 (确保时间单调递增)
+    crash_times_hours = crash_times_hours.sort_values()
+    
+    # 累积计数 (1, 2, 3...)
+    cumulative_counts = np.arange(1, len(crash_times_hours) + 1)
+    
+    print(f"  共找到 {len(crash_times_hours)} 个独特崩溃。")
+    if not crash_times_hours.empty:
+        print(f"  首次崩溃时间: {crash_times_hours.iloc[0]:.4f} 小时")
+        print(f"  最后崩溃时间: {crash_times_hours.iloc[-1]:.4f} 小时")
+
+    plt.figure(figsize=(12, 7))
+    
+    # 使用 step 图可以更清晰地显示离散的发现过程
+    plt.step(crash_times_hours, cumulative_counts, where='post', color='darkorange', linewidth=2, label='Cumulative Crashes')
+    plt.fill_between(crash_times_hours, cumulative_counts, step='post', color='darkorange', alpha=0.1)
+    
+    plt.title('Cumulative Unique Crashes vs. Time')
+    plt.xlabel('Time Elapsed (hours)')
+    plt.ylabel('Cumulative Number of Unique Crashes')
+    
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend()
+    
+    # 设置坐标轴范围
+    plt.ylim(bottom=0)
+    plt.xlim(left=0)
+    
+    try:
+        plt.savefig(PLOT_4_FILE)
+        print(f"[图表 4] 已保存到: {PLOT_4_FILE}")
+    except Exception as e:
+        print(f"[图表 4] 保存图表时出错: {e}")
+    plt.close()
 
 # --- 4. 主函数 ---
 
@@ -298,6 +357,7 @@ def main():
     plot_crashes_over_time(unique_log_df)
     plot_tsne_all(unique_log_df)
     plot_crash_generation_histogram(unique_log_df)
+    plot_crashes_over_wallclock_time(unique_log_df) # <--- 新增调用
 
     end_time = time.time()
     print(f"\n--- 脚本执行完毕，总耗时: {end_time - start_time:.2f} 秒 ---")

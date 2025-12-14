@@ -9,14 +9,15 @@ import ast # 用于安全地将字符串 '[3, 2, 1]' 转换为列表 [3, 2, 1]
 
 # --- 1. 配置 ---
 # !!! 关键: 请将 'your_data_file.csv' 替换为您实际的文件名 !!!
-# 假设您的 Excel 文件已另存为 CSV 格式
-LOG_FILE = '1763135173.1744554_data.csv' 
+# 对应 bw_framework.py 生成的 {timestamp}_data.csv
+LOG_FILE = '1765639810.5339673_data.csv' 
 
 PLOT_1_FILE = 'faults_over_unique_inputs.png'
 PLOT_2_FILE = 'full_input_space_tsne.png'
 PLOT_3_FILE = 'fault_generation_histogram.png'
+PLOT_4_FILE = 'faults_over_time.png'  # <--- [新增] 随时间变化的图表文件名
 
-# --- 2. 核心辅助函数 (已修改为 Pandas 和 CSV) ---
+# --- 2. 核心辅助函数 ---
 
 def parse_input_string(input_str):
     """
@@ -45,8 +46,9 @@ def load_and_deduplicate(file_path):
         df = pd.read_csv(file_path)
         print(f"原始 CSV 加载完成，总共 {len(df)} 条记录。")
 
-        # 确保列名正确 (根据您的图片)
-        required_cols = ['input', 'is_faulty', 'mutation_count']
+        # 确保列名正确
+        # [修改]: 添加了 'elapsed_time'
+        required_cols = ['input', 'is_faulty', 'mutation_count', 'elapsed_time']
         if not all(col in df.columns for col in required_cols):
             print(f"错误: CSV 文件缺少必要的列。")
             print(f"需要: {required_cols}, 实际有: {df.columns.tolist()}")
@@ -85,27 +87,28 @@ def load_and_deduplicate(file_path):
         # 否则假定它是 0/1 或布尔值
         deduplicated_df['is_faulty'] = deduplicated_df['is_faulty'].astype(bool)
 
+    # 确保 elapsed_time 是数值类型
+    deduplicated_df['elapsed_time'] = pd.to_numeric(deduplicated_df['elapsed_time'], errors='coerce').fillna(0.0)
+
     print("数据准备完毕。")
     return deduplicated_df
 
 
-# --- 3. 图表1：故障趋势图 (已修改) ---
+# --- 3. 图表1：故障趋势图 ---
 
 def plot_fault_trend(deduplicated_df):
     """
     绘制随发现的“独特输入”数量而变化的“独特故障”累积数量。
-    (仿照 plot_crash_trend)
     """
-    print(f"\n[图表 1] 正在计算故障趋势...")
+    print(f"\n[图表 1] 正在计算故障趋势(按输入数量)...")
     
     if deduplicated_df.empty:
-        print("[图表 1] 未找到可绘制的故障趋势数据。")
+        print("[图表 1] 未找到可绘制的数据。")
         return
 
     # 'is_faulty' 是布尔值，cumsum() 会自动将其视为 1 (True) 和 0 (False)
+    # 这里的顺序是按 CSV 中的顺序（即发现顺序）
     cumulative_faults_list = deduplicated_df['is_faulty'].cumsum()
-    
-    print(f"正在绘制 {len(cumulative_faults_list)} 个独特输入...")
     
     iterations = range(1, len(cumulative_faults_list) + 1)
     
@@ -114,7 +117,7 @@ def plot_fault_trend(deduplicated_df):
     plt.fill_between(iterations, cumulative_faults_list, color='red', alpha=0.1)
     
     plt.title('Unique Faults Found vs. Unique Inputs Discovered')
-    plt.xlabel('Number of Unique Inputs Discovered (by First Appearance)')
+    plt.xlabel('Number of Unique Inputs Discovered')
     plt.ylabel('Cumulative Number of Unique Faulty Inputs')
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
@@ -126,14 +129,13 @@ def plot_fault_trend(deduplicated_df):
         print(f"[图表 1] 已保存到: {PLOT_1_FILE}")
     except Exception as e:
         print(f"[图表 1] 保存图表时出错: {e}")
-    plt.close() # 释放内存
+    plt.close()
 
 
-# --- 4. 图表2：t-SNE 空间图 (已修改) ---
+# --- 4. 图表2：t-SNE 空间图 ---
 
 def run_tsne(data, n_samples, n_dimensions):
     """
-    (基本不变)
     对 (N, D) 的数据运行 t-SNE 降维到 2 维
     """
     if n_samples < 50:
@@ -149,7 +151,7 @@ def run_tsne(data, n_samples, n_dimensions):
         n_components=2,
         verbose=1,
         perplexity=perplexity_value,
-        max_iter=1000, # 增加迭代次数以获得更好的收敛
+        max_iter=1000, 
         random_state=42
     )
     tsne_results = tsne.fit_transform(data)
@@ -160,9 +162,7 @@ def run_tsne(data, n_samples, n_dimensions):
 
 def plot_full_space(deduplicated_df):
     """
-    (已修改)
-    绘制 t-SNE 结果的 2D 散点图，用两种颜色区分
-    (仿照 plot_full_space)
+    绘制 t-SNE 结果的 2D 散点图
     """
     print(f"\n[图表 2] 正在准备 t-SNE 数据...")
     
@@ -176,7 +176,7 @@ def plot_full_space(deduplicated_df):
 
     # vstack 将列表中的所有 (N,) 数组堆叠成 (N, D) 矩阵
     all_data = np.vstack(all_data_list)
-    labels = np.array(labels_list) # 已是布尔值
+    labels = np.array(labels_list) 
     
     # 运行 t-SNE
     tsne_results = run_tsne(all_data, all_data.shape[0], all_data.shape[1])
@@ -185,9 +185,6 @@ def plot_full_space(deduplicated_df):
     print(f"正在绘制 {tsne_results.shape[0]} 个数据点...")
     faulty_points = tsne_results[labels == True]
     non_faulty_points = tsne_results[labels == False]
-    
-    print(f"  非故障点: {non_faulty_points.shape[0]}")
-    print(f"  故障点: {faulty_points.shape[0]}")
     
     plt.figure(figsize=(12, 10))
     plt.scatter(
@@ -202,7 +199,7 @@ def plot_full_space(deduplicated_df):
             label=f'Faulty Inputs ({faulty_points.shape[0]})'
         )
     
-    plt.title('t-SNE Visualization of Unique Explored Inputs (by First Appearance)')
+    plt.title('t-SNE Visualization of Unique Explored Inputs')
     plt.xlabel('t-SNE Component 1')
     plt.ylabel('t-SNE Component 2')
     plt.legend()
@@ -213,24 +210,21 @@ def plot_full_space(deduplicated_df):
         print(f"[图表 2] 已保存到: {PLOT_2_FILE}")
     except Exception as e:
         print(f"[图表 2] 保存图表时出错: {e}")
-    plt.close() # 释放内存
+    plt.close()
 
 
-# --- 5. 图表3：故障代数直方图 (已修改) ---
+# --- 5. 图表3：故障代数直方图 ---
 
 def plot_generation_histogram(deduplicated_df):
     """
-    (已修改)
     绘制 *独特故障输入* 的代数直方图。
-    (仿照 plot_generation_histogram，使用 'mutation_count')
     """
     print(f"\n[图表 3] 正在分析故障代数...")
     
-    # 1. 筛选出所有 'is_faulty' 为 True 的独特输入
+    # 筛选出所有 'is_faulty' 为 True 的独特输入
     faulty_df = deduplicated_df[deduplicated_df['is_faulty'] == True]
     
-    # 2. 获取这些故障的 'mutation_count'
-    # .values 将其转换为 Numpy 数组，如果为空则为空数组
+    # 获取这些故障的 'mutation_count'
     fault_generations = faulty_df['mutation_count'].values.astype(int) 
             
     print(f"分析完成。总共找到 {len(fault_generations)} 个独特的故障事件。")
@@ -241,27 +235,21 @@ def plot_generation_histogram(deduplicated_df):
 
     generation_counts = Counter(fault_generations)
     
-    # 找出最大代数
     max_gen = 0
     if generation_counts:
         max_gen = max(generation_counts.keys())
         
-    generations = range(0, max_gen + 2) # 从0开始，多显示一格
+    generations = range(0, max_gen + 2) 
     counts = [generation_counts.get(gen, 0) for gen in generations]
     
-    print("\n--- 独特故障代数统计 ---")
-    print(f"  平均故障代数: {np.mean(fault_generations):.2f}")
-    print(f"  中位故障代数: {np.median(fault_generations)}")
-    print(f"  最大故障代数: {np.max(fault_generations)}")
-
     plt.figure(figsize=(12, 7))
     plt.bar(generations, counts, color='red', alpha=0.7, zorder=3)
     
-    plt.title('Histogram of Unique Fault Generations (by First Appearance)')
-    plt.xlabel('Mutation Generation (Depth from Initial Seed)') # 假设 mutation_count 从 0 开始
+    plt.title('Histogram of Unique Fault Generations')
+    plt.xlabel('Mutation Generation (Depth)') 
     plt.ylabel('Number of Unique Faulty Inputs')
     
-    step = max(1, (max_gen // 20)) # 动态调整x轴刻度
+    step = max(1, (max_gen // 20)) 
     plt.xticks(np.arange(0, max_gen + 2, step=step))
     plt.grid(axis='y', linestyle='--', alpha=0.6, zorder=0)
     
@@ -270,27 +258,81 @@ def plot_generation_histogram(deduplicated_df):
         print(f"[图表 3] 已保存到: {PLOT_3_FILE}")
     except Exception as e:
         print(f"[图表 3] 保存图表时出错: {e}")
-    plt.close() # 释放内存
+    plt.close()
 
-# --- 6. 主函数 (已修改) ---
+
+# --- [新增] 6. 图表4：故障随时间变化图 ---
+
+def plot_faults_over_time(deduplicated_df):
+    """
+    绘制发现的独特故障数量随时间(小时)的变化曲线。
+    """
+    print(f"\n[图表 4] 正在计算故障随时间变化趋势...")
+    
+    # 1. 筛选出故障数据
+    faulty_df = deduplicated_df[deduplicated_df['is_faulty'] == True].copy()
+    
+    if faulty_df.empty:
+        print("[图表 4] 未找到故障数据，跳过绘图。")
+        return
+
+    # 2. 确保按时间排序 (elapsed_time 应该是秒)
+    faulty_df = faulty_df.sort_values(by='elapsed_time')
+    
+    # 3. 准备数据
+    # 将秒转换为小时 (如果您更喜欢分钟，除以 60 即可)
+    times_hours = faulty_df['elapsed_time'] / 3600.0
+    
+    # 累积计数: 第1个故障是1，第2个是2...
+    cumulative_counts = range(1, len(faulty_df) + 1)
+    
+    # 4. 绘图
+    plt.figure(figsize=(12, 7))
+    
+    # 使用 step 图可以更清晰地显示离散的发现过程 ('post' 表示阶梯在点之后变化)
+    plt.step(times_hours, cumulative_counts, where='post', color='darkorange', linewidth=2, label='Cumulative Crashes')
+    plt.fill_between(times_hours, cumulative_counts, step='post', color='darkorange', alpha=0.1)
+    
+    plt.title('Cumulative Unique Faults Found vs. Time')
+    plt.xlabel('Time Elapsed (Hours)') 
+    plt.ylabel('Cumulative Number of Unique Faults')
+    
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend()
+    
+    # 设置坐标轴范围
+    plt.ylim(bottom=0)
+    plt.xlim(left=0)
+    
+    try:
+        plt.savefig(PLOT_4_FILE)
+        print(f"[图表 4] 已保存到: {PLOT_4_FILE}")
+    except Exception as e:
+        print(f"[图表 4] 保存图表时出错: {e}")
+    plt.close()
+
+
+# --- 7. 主函数 ---
 
 def main():
     # 1. 加载并去重数据
-    # 这一步现在合并了加载、去重和 t-SNE 数据准备
     deduplicated_df = load_and_deduplicate(LOG_FILE)
     
     if deduplicated_df is None or deduplicated_df.empty:
         print("未能从日志中提取任何有效数据。退出。")
         return
         
-    # 2. 运行图表 1
+    # 2. 运行图表 1 (按输入数量)
     plot_fault_trend(deduplicated_df)
     
-    # 3. 运行图表 2
+    # 3. 运行图表 2 (t-SNE)
     plot_full_space(deduplicated_df)
     
-    # 4. 运行图表 3
+    # 4. 运行图表 3 (直方图)
     plot_generation_histogram(deduplicated_df)
+    
+    # 5. [新增] 运行图表 4 (按时间)
+    plot_faults_over_time(deduplicated_df)
         
     print("\n所有分析和绘图已完成。")
 
