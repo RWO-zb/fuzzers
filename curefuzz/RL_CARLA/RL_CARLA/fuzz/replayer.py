@@ -22,6 +22,7 @@ class replayer:
         self.current_index = None
         self.current_nvsetting = None
         self.replay_list = None
+        self.current_vehicle_info = None
 
     def get_pose(self):
         if self.replay_list == None:
@@ -77,3 +78,70 @@ class replayer:
             self.coverage.pop(choose_index)
             self.envsetting.pop(choose_index)
             self.current_index = None
+
+    # --- 新增序列化支持方法 ---
+
+    def __getstate__(self):
+        """
+        序列化时调用：将 CARLA 对象转换为字典。
+        """
+        state = self.__dict__.copy()
+
+        def serialize_data(data):
+            if isinstance(data, list):
+                return [serialize_data(item) for item in data]
+            elif isinstance(data, tuple):
+                return tuple(serialize_data(item) for item in data)
+            elif isinstance(data, carla.Transform):
+                return {
+                    '__carla_type__': 'Transform',
+                    'x': data.location.x, 'y': data.location.y, 'z': data.location.z,
+                    'pitch': data.rotation.pitch, 'yaw': data.rotation.yaw, 'roll': data.rotation.roll
+                }
+            elif isinstance(data, carla.Location):
+                return {
+                    '__carla_type__': 'Location',
+                    'x': data.x, 'y': data.y, 'z': data.z
+                }
+            elif isinstance(data, carla.Rotation):
+                return {
+                    '__carla_type__': 'Rotation',
+                    'pitch': data.pitch, 'yaw': data.yaw, 'roll': data.roll
+                }
+            # 处理 corpus 中可能的嵌套结构
+            return data
+
+        # 对关键数据字段进行转换
+        keys_to_process = ['corpus', 'original', 'current_pose', 'current_vehicle_info']
+        for key in keys_to_process:
+            if key in state and state[key] is not None:
+                state[key] = serialize_data(state[key])
+        
+        return state
+
+    def __setstate__(self, state):
+        """
+        反序列化时调用：将字典恢复为 CARLA 对象。
+        """
+        def deserialize_data(data):
+            if isinstance(data, list):
+                return [deserialize_data(item) for item in data]
+            elif isinstance(data, tuple):
+                return tuple(deserialize_data(item) for item in data)
+            elif isinstance(data, dict) and '__carla_type__' in data:
+                if data['__carla_type__'] == 'Transform':
+                    return carla.Transform(
+                        carla.Location(x=data['x'], y=data['y'], z=data['z']),
+                        carla.Rotation(pitch=data['pitch'], yaw=data['yaw'], roll=data['roll'])
+                    )
+                elif data['__carla_type__'] == 'Location':
+                    return carla.Location(x=data['x'], y=data['y'], z=data['z'])
+                elif data['__carla_type__'] == 'Rotation':
+                    return carla.Rotation(pitch=data['pitch'], yaw=data['yaw'], roll=data['roll'])
+            return data
+
+        # 恢复数据
+        for key, value in state.items():
+            state[key] = deserialize_data(value)
+        
+        self.__dict__.update(state)
