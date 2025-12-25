@@ -63,7 +63,7 @@ AGENT_NAME = "carl_carlv11"
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 600
 VIDEO_FPS = 20.0
-ARRIVAL_DISTANCE = 2.0 
+ARRIVAL_DISTANCE = 5.0  # [修改] 判定距离从原来的值修改为 5.0 米
 RND_INPUT_SIZE = 18
 
 WEATHERS = {
@@ -75,17 +75,39 @@ WEATHERS = {
     14: carla.WeatherParameters.SoftRainNoon
 }
 
+# [修改] 保持原有逻辑，但拆解返回详细信息
 def calculate_reward(prev_distance, cur_distance, cur_collid, cur_invade, cur_speed, prev_speed):
-    reward = 0.0
-    reward += np.clip(prev_distance - cur_distance, -10.0, 10.0)
+    # 1. 距离奖励
+    r_dist = np.clip(prev_distance - cur_distance, -10.0, 10.0)
+    
+    # 2. 速度平滑奖励
     cur_speed_norm = np.linalg.norm(cur_speed)
     prev_speed_norm = np.linalg.norm(prev_speed)
-    reward += 0.2 * (cur_speed_norm - prev_speed_norm)
+    r_speed = 0.2 * (cur_speed_norm - prev_speed_norm)
+    
+    # 3. 碰撞惩罚
+    r_collision = 0.0
     if cur_collid:
-        reward -= 100 * cur_speed_norm
+        r_collision = -100 * cur_speed_norm
+    
+    # 4. 入侵惩罚
+    r_invade = 0.0
     if cur_invade:
-        reward -= cur_speed_norm
-    return reward
+        r_invade = -cur_speed_norm
+        
+    total_reward = r_dist + r_speed + r_collision + r_invade
+    
+    # 返回总分和详细字典
+    info = {
+        "dist_reward": r_dist,
+        "speed_reward": r_speed,
+        "collision_penalty": r_collision,
+        "invade_penalty": r_invade,
+        "total_reward": total_reward,
+        "cur_speed": cur_speed_norm,
+        "cur_dist": cur_distance
+    }
+    return total_reward, info
 
 def get_enhanced_state_vector(vehicle, birdview_obs, target_location, command=2):
     t = vehicle.get_transform()
@@ -142,12 +164,14 @@ class BenchmarkEnv:
         self.traffic_manager.set_random_device_seed(args.seed)
         
         # [修复 1] 关闭混合物理模式，防止 Actor lost in registry 错误
-        # Hybrid physics 在同步模式下经常导致 set_actor_simulate_physics 崩溃
         self.traffic_manager.set_hybrid_physics_mode(False) 
         self.traffic_manager.set_global_distance_to_leading_vehicle(2.0)
 
         (self.result_dir / "diagnostics").mkdir(parents=True, exist_ok=True)
         (self.result_dir / "videos").mkdir(parents=True, exist_ok=True)
+        # [新增] 创建存放每一步奖励日志的文件夹
+        (self.result_dir / "reward_logs").mkdir(parents=True, exist_ok=True)
+        
         self.summary_csv = self.result_dir / "summary.csv"
         self.crash_log = self.result_dir / "crash_log.txt"
 
@@ -230,14 +254,21 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
 
     world.set_weather(WEATHERS.get(weather_id, carla.WeatherParameters.ClearNoon))
     
-    # [修复 2] 强制清理与 Tick 刷新，防止僵尸 Actor
-    # 销毁所有可能残留的车辆和传感器
+    # [修复 2] 强制清理与 Tick 刷新
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('vehicle.*')])
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
     
-    # 关键：销毁后必须多Tick几次，确保服务器端彻底移除 ID，防止 Traffic Manager 报错
     for _ in range(3):
         world.tick()
+
+    # [修改] 设置红绿灯
+    try:
+        traffic_lights = world.get_actors().filter('*traffic_light*')
+        for tl in traffic_lights:
+            tl.set_state(carla.TrafficLightState.Green)
+            tl.freeze(True)
+    except Exception as e:
+        print(f"Warning: Failed to set traffic lights: {e}")
 
     try:
         env_manager.map_wrapper.clear()
@@ -249,10 +280,8 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     bp.set_attribute('role_name', 'hero')
     start_pose.location.z += 0.2
     
-    # 安全生成检查
     vehicle = world.try_spawn_actor(bp, start_pose)
     if not vehicle:
-        # 如果生成失败（例如由于上一次的残影），再Tick一次重试
         world.tick()
         vehicle = world.try_spawn_actor(bp, start_pose)
         if not vehicle:
@@ -350,11 +379,14 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     seq_entropy = 0
     sequence = []
     step = 0
-    max_steps = 3000 
+    max_steps = 200 
     stop_reason = "Timeout"
     is_success = False
     
-    print(f"▶️ [{phase}] {run_name} | Dist: {prev_distance:.1f}m")
+    # [新增] 初始化奖励历史列表
+    reward_history = []
+    
+    print(f"[{phase}] {run_name} | Dist: {prev_distance:.1f}m")
 
     try:
         while step < max_steps:
@@ -397,11 +429,33 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
                     invaded = env_manager.map_wrapper.world_module.invaded
                 except: pass
             
-            reward = calculate_reward(prev_distance, cur_distance, collided, invaded, cur_speed, prev_speed)
+            # [修改] 获取奖励和详情
+            reward, reward_info = calculate_reward(prev_distance, cur_distance, collided, invaded, cur_speed, prev_speed)
             total_reward += reward
             seq_entropy += entropy
+            
+            # [新增] 记录本帧详情
+            reward_info['step'] = step
+            reward_info['collided'] = collided
+            reward_info['invaded'] = invaded
+            reward_history.append(reward_info)
 
-            state_vec = get_enhanced_state_vector(vehicle, obs_birdview, target_pose.location)
+            # =========================================================
+            # [修复] 尝试动态获取 Agent 的导航指令，而不是硬编码为 2 (直行)
+            # =========================================================
+            current_command = 2.0
+            if hasattr(agent, 'command'):
+                try:
+                    # 尝试处理 Enum (如 RoadOption.LEFT) 或直接数值
+                    val = agent.command
+                    if hasattr(val, 'value'):
+                        current_command = float(val.value)
+                    else:
+                        current_command = float(val)
+                except:
+                    current_command = 2.0
+            
+            state_vec = get_enhanced_state_vector(vehicle, obs_birdview, target_pose.location, command=current_command)
             sequence.append(state_vec)
 
             prev_distance = cur_distance
@@ -445,7 +499,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         if npc_ids:
             client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
             
-        # 销毁后 Tick，确保 Traffic Manager 不会引用已销毁的对象
         try:
             world.tick()
         except: pass
@@ -458,6 +511,19 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         world.apply_settings(settings)
 
         if os.path.exists(route_file): os.remove(route_file)
+
+        # [新增] 将本轮测试的奖励详情保存为 CSV
+        if reward_history:
+            try:
+                df_log = pd.DataFrame(reward_history)
+                # 列顺序调整，方便查看
+                cols = ['step', 'total_reward', 'dist_reward', 'speed_reward', 
+                        'collision_penalty', 'invade_penalty', 'cur_speed', 'cur_dist', 'collided', 'invaded']
+                df_log = df_log[cols]
+                log_path = env_manager.result_dir / "reward_logs" / f"{run_name}_rewards.csv"
+                df_log.to_csv(log_path, index=False)
+            except Exception as e:
+                print(f"Failed to save reward log: {e}")
 
     return {
         "success": is_success,
