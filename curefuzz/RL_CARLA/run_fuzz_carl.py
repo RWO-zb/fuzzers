@@ -15,16 +15,19 @@ from pathlib import Path
 import carla
 import pygame
 
-# 设置 SDL 视频驱动为 dummy，防止无头环境崩溃
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
-# 路径配置
-sys.path.append(os.path.abspath('./RL_CARLA'))
+# --- 路径导入逻辑 ---
+rl_carla_path = os.path.abspath('./RL_CARLA')
+if rl_carla_path not in sys.path:
+    sys.path.insert(0, rl_carla_path)
+    print(f"[INFO] Added {rl_carla_path} to sys.path at index 0")
+
 pcla_folder = os.path.join(os.getcwd(), 'PCLA')
 if os.path.exists(pcla_folder) and os.path.isdir(pcla_folder):
-    sys.path.append(pcla_folder)
+    if pcla_folder not in sys.path:
+        sys.path.append(pcla_folder)
 
-# 模块导入
 try:
     from bird_view.utils import map_utils
 except ImportError:
@@ -44,7 +47,13 @@ try:
 except ImportError:
     sys.exit(1)
 
+# --- [修改核心] 强化版随机数设置函数 ---
 def set_global_seed(seed):
+    """
+    重置所有可能的随机数生成器状态。
+    这确保了后续的代码执行（包括 Agent 初始化、Torch 网络权重、Numpy 操作）
+    都从一个确定的起点开始。
+    """
     random.seed(seed)
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -56,14 +65,12 @@ def set_global_seed(seed):
         torch.backends.cudnn.benchmark = False
     except ImportError:
         pass
-    print(f"Global Seed: {seed}")
 
-# 配置常量
 AGENT_NAME = "carl_carlv11"
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 600
 VIDEO_FPS = 20.0
-ARRIVAL_DISTANCE = 5.0  # [修改] 判定距离从原来的值修改为 5.0 米
+ARRIVAL_DISTANCE = 5.0
 RND_INPUT_SIZE = 18
 
 WEATHERS = {
@@ -75,29 +82,23 @@ WEATHERS = {
     14: carla.WeatherParameters.SoftRainNoon
 }
 
-# [修改] 保持原有逻辑，但拆解返回详细信息
 def calculate_reward(prev_distance, cur_distance, cur_collid, cur_invade, cur_speed, prev_speed):
-    # 1. 距离奖励
     r_dist = np.clip(prev_distance - cur_distance, -10.0, 10.0)
     
-    # 2. 速度平滑奖励
     cur_speed_norm = np.linalg.norm(cur_speed)
     prev_speed_norm = np.linalg.norm(prev_speed)
     r_speed = 0.2 * (cur_speed_norm - prev_speed_norm)
     
-    # 3. 碰撞惩罚
     r_collision = 0.0
     if cur_collid:
         r_collision = -100 * cur_speed_norm
     
-    # 4. 入侵惩罚
     r_invade = 0.0
     if cur_invade:
         r_invade = -cur_speed_norm
         
     total_reward = r_dist + r_speed + r_collision + r_invade
     
-    # 返回总分和详细字典
     info = {
         "dist_reward": r_dist,
         "speed_reward": r_speed,
@@ -161,15 +162,14 @@ class BenchmarkEnv:
         self.tm_port = args.port + 8000
         self.traffic_manager = self.client.get_trafficmanager(self.tm_port)
         self.traffic_manager.set_synchronous_mode(True)
+        # 初始设置，后续会在 run_single 中每次重置
         self.traffic_manager.set_random_device_seed(args.seed)
         
-        # [修复 1] 关闭混合物理模式，防止 Actor lost in registry 错误
         self.traffic_manager.set_hybrid_physics_mode(False) 
         self.traffic_manager.set_global_distance_to_leading_vehicle(2.0)
 
         (self.result_dir / "diagnostics").mkdir(parents=True, exist_ok=True)
         (self.result_dir / "videos").mkdir(parents=True, exist_ok=True)
-        # [新增] 创建存放每一步奖励日志的文件夹
         (self.result_dir / "reward_logs").mkdir(parents=True, exist_ok=True)
         
         self.summary_csv = self.result_dir / "summary.csv"
@@ -181,7 +181,6 @@ class BenchmarkEnv:
         self.init_vehicles = [] 
 
         if not self.summary_csv.exists():
-            # 定义表头
             columns = [
                 "task_id", "phase", "weather_id", "start_id", "target_id",
                 "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
@@ -208,27 +207,30 @@ class BenchmarkEnv:
                         continue
         return tasks
 
-    def init_traffic(self, num_vehicles, hero_transform):
-        # 清理旧的车辆
+    def init_traffic(self, num_vehicles, hero_transform, seed=None):
         self.client.apply_batch([carla.command.DestroyActor(x) for x in self.world.get_actors().filter('vehicle.*')])
         self.init_vehicles = [] 
         if num_vehicles <= 0: return []
+
+        # 使用局部随机实例，确保交通流生成不受全局随机状态重置的影响，且只由传入的 seed 决定
+        rng = random.Random(seed) if seed is not None else random
 
         blueprints = self.world.get_blueprint_library().filter("vehicle.*")
         blueprints = [x for x in blueprints if int(x.get_attribute('number_of_wheels')) == 4]
         
         spawn_points = self.map.get_spawn_points()
-        random.shuffle(spawn_points)
+        rng.shuffle(spawn_points)
         
         batch = []
         count = 0
         for transform in spawn_points:
             if count >= num_vehicles: break
             if transform.location.distance(hero_transform.location) < 10.0: continue
-            blueprint = random.choice(blueprints)
+            
+            blueprint = rng.choice(blueprints)
             color_val = None 
             if blueprint.has_attribute('color'):
-                color_val = random.choice(blueprint.get_attribute('color').recommended_values)
+                color_val = rng.choice(blueprint.get_attribute('color').recommended_values)
                 blueprint.set_attribute('color', color_val)
             blueprint.set_attribute('role_name', 'autopilot')
             
@@ -242,7 +244,15 @@ class BenchmarkEnv:
         spawned_ids = [r.actor_id for r in results if not r.error]
         return spawned_ids
 
-def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase, npc_count=0, npc_mutate_info=None):
+# --- [修改核心] run_single 增加 seed 参数并进行强制重置 ---
+def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase, npc_count=0, npc_mutate_info=None, seed=None):
+    # 1. 强制重置全局随机数种子。
+    #    这确保了 Agent(PCLA) 的初始化、策略网络随机性等在每次运行中都是一致的。
+    if seed is not None:
+        set_global_seed(seed)
+        # 同时重置 Traffic Manager 的种子
+        env_manager.traffic_manager.set_random_device_seed(seed)
+
     client = env_manager.client
     world = env_manager.world
     
@@ -254,28 +264,27 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
 
     world.set_weather(WEATHERS.get(weather_id, carla.WeatherParameters.ClearNoon))
     
-    # [修复 2] 强制清理与 Tick 刷新
+    # 清理现场
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('vehicle.*')])
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
     
-    for _ in range(3):
+    # 增加等待 tick 数，确保清理完成
+    for _ in range(5):
         world.tick()
 
-    # [修改] 设置红绿灯
     try:
         traffic_lights = world.get_actors().filter('*traffic_light*')
         for tl in traffic_lights:
             tl.set_state(carla.TrafficLightState.Green)
             tl.freeze(True)
     except Exception as e:
-        print(f"Warning: Failed to set traffic lights: {e}")
+        pass
 
     try:
         env_manager.map_wrapper.clear()
     except:
         pass
     
-    # 生成主车
     bp = world.get_blueprint_library().find('vehicle.lincoln.mkz_2017')
     bp.set_attribute('role_name', 'hero')
     start_pose.location.z += 0.2
@@ -287,7 +296,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         if not vehicle:
             return None
 
-    # 生成交通流
     npc_ids = []
     current_npc_info = [] 
     
@@ -310,12 +318,12 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         results = client.apply_batch_sync(batch, True)
         npc_ids = [r.actor_id for r in results if not r.error]
     else:
-        npc_ids = env_manager.init_traffic(npc_count, start_pose)
+        # 传入 seed 确保交通流一致
+        npc_ids = env_manager.init_traffic(npc_count, start_pose, seed=seed)
         current_npc_info = env_manager.init_vehicles
 
     world.tick()
 
-    # 初始化传感器
     collision_bp = world.get_blueprint_library().find('sensor.other.collision')
     collision_sensor = world.spawn_actor(collision_bp, carla.Transform(), attach_to=vehicle)
     collision_queue = queue.Queue()
@@ -328,7 +336,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     except Exception:
         wrapper_initialized = False
 
-    # 初始碰撞检测
     initial_collision = False
     try:
         for _ in range(5):
@@ -347,11 +354,11 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         return "INITIAL_CRASH" 
 
-    # Agent 初始化
     route_file = f"route_{run_name}.xml"
     try:
         waypoints = location_to_waypoint(client, start_pose.location, target_pose.location)
         route_maker(waypoints, route_file)
+        # 初始化 Agent (PCLA 可能依赖全局 torch/numpy 种子，这里已经重置过)
         agent = PCLA(AGENT_NAME, vehicle, route_file, client)
     except Exception:
         if wrapper_initialized: env_manager.map_wrapper.clear()
@@ -359,7 +366,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         if vehicle: vehicle.destroy()
         return None
 
-    # 相机传感器
     camera_bp = world.get_blueprint_library().find('sensor.camera.rgb')
     camera_bp.set_attribute('image_size_x', str(VIDEO_WIDTH))
     camera_bp.set_attribute('image_size_y', str(VIDEO_HEIGHT))
@@ -383,11 +389,8 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     stop_reason = "Timeout"
     is_success = False
     
-    # [新增] 初始化奖励历史列表
     reward_history = []
     
-    print(f"[{phase}] {run_name} | Dist: {prev_distance:.1f}m")
-
     try:
         while step < max_steps:
             world.tick()
@@ -416,6 +419,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
                 break
             
             control, entropy = agent.get_action_with_entropy()
+            
             if control: vehicle.apply_control(control)
             
             v = vehicle.get_velocity()
@@ -429,31 +433,37 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
                     invaded = env_manager.map_wrapper.world_module.invaded
                 except: pass
             
-            # [修改] 获取奖励和详情
             reward, reward_info = calculate_reward(prev_distance, cur_distance, collided, invaded, cur_speed, prev_speed)
             total_reward += reward
             seq_entropy += entropy
             
-            # [新增] 记录本帧详情
             reward_info['step'] = step
             reward_info['collided'] = collided
             reward_info['invaded'] = invaded
             reward_history.append(reward_info)
 
-            # =========================================================
-            # [修复] 尝试动态获取 Agent 的导航指令，而不是硬编码为 2 (直行)
-            # =========================================================
-            current_command = 2.0
-            if hasattr(agent, 'command'):
-                try:
-                    # 尝试处理 Enum (如 RoadOption.LEFT) 或直接数值
-                    val = agent.command
-                    if hasattr(val, 'value'):
-                        current_command = float(val.value)
-                    else:
-                        current_command = float(val)
-                except:
-                    current_command = 2.0
+            current_command = 2.0 
+            found_command = False
+            
+            real_agent = agent
+            if hasattr(agent, 'agent_instance') and agent.agent_instance is not None:
+                real_agent = agent.agent_instance
+
+            if hasattr(real_agent, 'route_planner'):
+                planner = real_agent.route_planner
+                if hasattr(planner, 'route') and hasattr(planner, 'index'):
+                    if planner.route and planner.index < len(planner.route):
+                        current_waypoint = planner.route[planner.index]
+                        if isinstance(current_waypoint, tuple) and len(current_waypoint) >= 2:
+                            cmd = current_waypoint[1]
+                            try:
+                                if hasattr(cmd, 'value'): 
+                                    current_command = float(cmd.value)
+                                else:
+                                    current_command = float(cmd)
+                                found_command = True
+                            except:
+                                pass
             
             state_vec = get_enhanced_state_vector(vehicle, obs_birdview, target_pose.location, command=current_command)
             sequence.append(state_vec)
@@ -481,7 +491,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         traceback.print_exc()
     
     finally:
-        # [修复 3] 严格的资源清理顺序
         if camera_sensor and camera_sensor.is_alive:
             camera_sensor.stop()
         if collision_sensor and collision_sensor.is_alive:
@@ -512,18 +521,16 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
 
         if os.path.exists(route_file): os.remove(route_file)
 
-        # [新增] 将本轮测试的奖励详情保存为 CSV
         if reward_history:
             try:
                 df_log = pd.DataFrame(reward_history)
-                # 列顺序调整，方便查看
                 cols = ['step', 'total_reward', 'dist_reward', 'speed_reward', 
                         'collision_penalty', 'invade_penalty', 'cur_speed', 'cur_dist', 'collided', 'invaded']
                 df_log = df_log[cols]
                 log_path = env_manager.result_dir / "reward_logs" / f"{run_name}_rewards.csv"
                 df_log.to_csv(log_path, index=False)
             except Exception as e:
-                print(f"Failed to save reward log: {e}")
+                pass
 
     return {
         "success": is_success,
@@ -544,6 +551,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     }
 
 def run_benchmark_suite(args):
+    # 初始全局种子（主要影响文件命名、初始目录等非关键随机性）
     set_global_seed(args.seed)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -559,7 +567,6 @@ def run_benchmark_suite(args):
     total_spawns = len(env_manager.spawn_points)
     tasks = env_manager.load_suite_tasks(args.town, args.suite)
     
-    print("\n[Phase 1] Collecting Corpus...")
     weather_list = [1, 3, 6, 8]
     
     for i, (start_id, target_id) in enumerate(tasks):
@@ -568,10 +575,20 @@ def run_benchmark_suite(args):
         
         start_pose = env_manager.spawn_points[start_id]
         target_pose = env_manager.spawn_points[target_id]
-        weather_id = random.choice(weather_list)
+        
+        # --- [Phase 1 修改] ---
+        # 1. 计算当前任务的确定性种子
+        current_task_seed = args.seed + i
+        
+        # 2. 使用独立的 RNG 选择天气，确保即使跳过某个任务，后续随机序列也不变（实际上因为 run_single 内部重置，这里更多是逻辑隔离）
+        task_rng = random.Random(current_task_seed)
+        weather_id = task_rng.choice(weather_list)
+        
         run_name = f"seed_{i:03d}"
         
-        res = run_single(env_manager, start_pose, target_pose, weather_id, run_name, "Phase1", npc_count=args.num_vehicles)
+        # 3. 传入 seed，run_single 内部会调用 set_global_seed(current_task_seed)
+        res = run_single(env_manager, start_pose, target_pose, weather_id, run_name, "Phase1", 
+                         npc_count=args.num_vehicles, seed=current_task_seed)
         
         if res == "INITIAL_CRASH" or not res:
             continue
@@ -592,18 +609,25 @@ def run_benchmark_suite(args):
             [start_id, target_id, weather_id] 
         )
         log_result(env_manager, run_name, "Phase1", weather_id, start_id, target_id, res, intrinsic_reward)
-        print(f"   Seed {i}: {res['stop_reason']} (R={res['total_reward']:.1f}, Intr={intrinsic_reward:.4f})")
 
-    print(f"\n[Phase 2] Fuzzing Loop ({args.fuzz_hours}h)...")
     start_time = time.time()
     fuzz_idx = 0
     
     while True:
         if (time.time() - start_time) > (args.fuzz_hours * 3600): break
         if len(env_manager.fuzzer.corpus) == 0:
-            print("Corpus Empty. Waiting..."); break
+            break
             
         fuzz_idx += 1
+        
+        # --- [Phase 2 修改] ---
+        # 1. 计算 Phase 2 的确定性种子
+        #    使用较大的偏移量防止与 Phase 1 种子重叠
+        current_fuzz_seed = args.seed + 100000 + fuzz_idx
+        
+        # 2. 重要：在调用 Fuzzer 逻辑（get_pose, mutation）之前重置全局种子！
+        #    因为 cure_fuzz.py 内部使用了全局的 np.random
+        set_global_seed(current_fuzz_seed)
         
         seed_pose = env_manager.fuzzer.get_pose() 
         mutated_start_pose = env_manager.fuzzer.mutation(seed_pose)
@@ -614,10 +638,12 @@ def run_benchmark_suite(args):
         target_pose = env_manager.spawn_points[target_id] if target_id < total_spawns else env_manager.spawn_points[0]
         run_name = f"fuzz_{fuzz_idx:04d}"
         
+        # 3. 传入相同的 seed 给 run_single，确保仿真环境与 Fuzzer 选择保持一致的随机上下文
         res_fuzz = run_single(
             env_manager, mutated_start_pose, target_pose, weather_id, 
             run_name, "Phase2", 
-            npc_count=args.num_vehicles, npc_mutate_info=mutated_vehicles
+            npc_count=args.num_vehicles, npc_mutate_info=mutated_vehicles,
+            seed=current_fuzz_seed 
         )
         
         if res_fuzz == "INITIAL_CRASH" or not res_fuzz:
@@ -633,7 +659,6 @@ def run_benchmark_suite(args):
         new_entropy = np.linalg.norm(res_fuzz['final_state'] - env_manager.fuzzer.current_final_state) + res_fuzz['seq_entropy']
         
         if res_fuzz['collision']:
-            print(f"CRASH FOUND! Vid: {res_fuzz['video_path']}")
             
             env_manager.replayer.store(
                 (env_manager.fuzzer.current_pose, env_manager.fuzzer.current_vehicle_info),
@@ -651,7 +676,6 @@ def run_benchmark_suite(args):
                intrinsic_fuzz > args.threshold_intrinsic or \
                new_entropy > args.threshold_entropy:
                 
-                print(f"Mutating further... (I={intrinsic_fuzz:.4f}, E={new_entropy:.2f})")
                 env_manager.fuzzer.further_mutation(
                     (env_manager.fuzzer.current_pose, env_manager.fuzzer.current_vehicle_info),
                     res_fuzz['total_reward'],
@@ -699,6 +723,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if not hasattr(PCLA, 'get_action_with_entropy'):
+        
         def patched_get_action(self):
             return self.get_action(), 0.0
         PCLA.get_action_with_entropy = patched_get_action
