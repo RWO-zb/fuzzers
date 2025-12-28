@@ -171,21 +171,10 @@ class Fuzzer():
     def fuzzing(self, n: int, policy: Any = None, **kwargs):
         '''
         Conducts fuzzing to generate test cases for the system under test (SUT).
-
-        Args:
-        - n (int): Number of iterations for fuzzing.
-        - policy (tt.TestAgent): The testing policy or agent guiding the fuzzing process.
-        - saving_path (str, optional): Path to save logs and results (default: None).
-        - local_sensitivity (bool, optional): Flag indicating whether to compute local sensitivity (default: False).
-        - test_budget_in_seconds (int, optional): Time budget for fuzzing in seconds (default: None).
-        - test_budget (int, optional): Number of iterations if time budget is not specified (default: None).
-        - exp_name (str, optional): Name of the experiment to overwrite the key "use_case" of the configuration dictionary.
-        - save_logs_only (bool, optional): Flag indicating whether to only save the configuration of the execution (default: False).
-        - light_pool (bool, optional): Flag indicating whether to use the LightPool class for the pool (default: False).
-
-        Returns:
-        None. The function conducts the fuzzing process and stores generated test cases.
         '''
+        # [修改点 1] 全局计时开始：包含初始化时间，符合 RL_CARLA 的 Total Wall Clock Time 逻辑
+        start_time = time.time()
+
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
         path = kwargs.get('saving_path', None)
@@ -207,11 +196,12 @@ class Fuzzer():
         # initializes the coverage model by running the policy on a randomly generated input to sample states of the MDP
         num_initial_executions = self.initialize_coverage_model(policy=policy)
         self.config['num_initial_executions'] = num_initial_executions
-        pbar = tqdm.tqdm(total=n)
+        
+        # 初始化阶段进度条 (Iterations)
+        pbar_init = tqdm.tqdm(total=n, desc="Initializing")
         for state in initial_inputs:
             sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, **kwargs)
             state_sequence_conc = self._concatenate_state_sequence(state_sequence)
-            # computes the coverage and adds test case in the pool
             t0 = time.time()
             coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
             coverage_time = time.time() - t0
@@ -234,31 +224,48 @@ class Fuzzer():
             if oracle:
                 pool.add_crash(state)
 
-            pbar.update(1)
-        pbar.close()
+            pbar_init.update(1)
+        pbar_init.close()
 
         test_budget_in_seconds = kwargs.get('test_budget_in_seconds', None)
+        
+        # [修改点 2] 主循环的预算设置与进度条
         if test_budget_in_seconds is None:
+            # 次数预算逻辑
             test_budget = kwargs.get('test_budget', None)
             assert test_budget is not None
             # accounts for the cost of the initialization
             test_budget -=  (2 * n) + num_initial_executions
-            pbar = tqdm.tqdm(total=test_budget)
+            pbar = tqdm.tqdm(total=test_budget, desc="Fuzzing (Iter)")
             self.config['test_budget'] = test_budget
             num_iterations = 0
         else:
-            start_time = time.time()
-            current_time = time.time()
-            seconds = 0
-            pbar = tqdm.tqdm(total=test_budget_in_seconds)
+            # [关键逻辑] 时间预算：基于全局 start_time 计算
             self.config['test_budget_in_seconds'] = test_budget_in_seconds
+            
+            # 计算初始化已经消耗的时间
+            elapsed_init = int(time.time() - start_time)
+            
+            # 如果初始化已经超时，直接退出
+            if elapsed_init >= test_budget_in_seconds:
+                print(f"[Warning] Initialization took {elapsed_init}s, exceeding budget {test_budget_in_seconds}s.")
+                if path is not None:
+                    self.save_configuration(path)
+                return
+
+            # 创建时间进度条，total 为总预算，初始位置为已消耗的初始化时间
+            pbar = tqdm.tqdm(total=test_budget_in_seconds, initial=elapsed_init, unit='s', desc="Fuzzing (Time)")
+            
         try:
             while True:
+                # 检查预算
                 if test_budget_in_seconds is None:
-                    if num_iterations == test_budget:
+                    if num_iterations >= test_budget:
                         break
                 else:
-                    if (current_time - start_time) > test_budget_in_seconds:
+                    # 检查总运行时间
+                    current_elapsed = time.time() - start_time
+                    if current_elapsed > test_budget_in_seconds:
                         break
 
                 input, acc_reward_input = pool.select(self.rng)
@@ -292,16 +299,21 @@ class Fuzzer():
                         run_time=time.time()
                     )
 
+                # 更新进度条
                 if test_budget_in_seconds is None:
                     num_iterations += 1
                     pbar.update(1)
                 else:
-                    current_time = time.time()
-                    if int(current_time - start_time) > seconds:
-                        seconds += 1
-                        pbar.update(1)
+                    # 更新时间进度：当前总耗时 - 进度条当前位置
+                    current_elapsed_int = int(time.time() - start_time)
+                    increment = current_elapsed_int - pbar.n
+                    if increment > 0:
+                        pbar.update(increment)
+                        
         except Exception as e:
-            print(e)
+            print(f"[Error in Fuzzing Loop] {e}")
+            import traceback
+            traceback.print_exc()
 
         pbar.close()
         # saves at least the configuration and the history of the input selection (if Pool allows)
@@ -320,6 +332,9 @@ class Fuzzer():
         '''
         Works similarly as fuzzing but coverages are not computed.
         '''
+        # [修改点] 同样加入全局计时
+        start_time = time.time()
+
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
         self.config['name'] = 'Fuzzer'
@@ -338,7 +353,8 @@ class Fuzzer():
             pool = LightPool() # type: Pool
         else:
             pool = IndexedPool(is_integer=np.issubdtype(initial_inputs.dtype, np.integer)) # type: Pool
-        pbar = tqdm.tqdm(total=n)
+        
+        pbar_init = tqdm.tqdm(total=n, desc="Initializing")
         for state in initial_inputs:
             sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, **kwargs)
             pool.add(state, acc_reward, 0, sensitivity, oracle)
@@ -358,30 +374,33 @@ class Fuzzer():
             if oracle:
                 pool.add_crash(state)
 
-            pbar.update(1)
-        pbar.close()
+            pbar_init.update(1)
+        pbar_init.close()
 
         test_budget_in_seconds = kwargs.get('test_budget_in_seconds', None)
         if test_budget_in_seconds is None:
             test_budget = kwargs.get('test_budget', None)
             assert test_budget is not None
             test_budget -=  (2 * n)
-            pbar = tqdm.tqdm(total=test_budget)
+            pbar = tqdm.tqdm(total=test_budget, desc="Fuzzing (Iter)")
             self.config['test_budget'] = test_budget
             num_iterations = 0
         else:
-            start_time = time.time()
-            current_time = time.time()
-            seconds = 0
-            pbar = tqdm.tqdm(total=test_budget_in_seconds)
             self.config['test_budget_in_seconds'] = test_budget_in_seconds
+            elapsed_init = int(time.time() - start_time)
+            if elapsed_init >= test_budget_in_seconds:
+                 print(f"[Warning] Initialization took {elapsed_init}s, exceeding budget.")
+                 if path is not None: self.save_configuration(path)
+                 return
+            pbar = tqdm.tqdm(total=test_budget_in_seconds, initial=elapsed_init, unit='s', desc="Fuzzing (Time)")
 
         while True:
             if test_budget_in_seconds is None:
-                if num_iterations == test_budget:
+                if num_iterations >= test_budget:
                     break
             else:
-                if (current_time - start_time) > test_budget_in_seconds:
+                current_elapsed = time.time() - start_time
+                if current_elapsed > test_budget_in_seconds:
                     break
 
             input, acc_reward_input = pool.select(self.rng)
@@ -413,10 +432,10 @@ class Fuzzer():
                 num_iterations += 1
                 pbar.update(1)
             else:
-                current_time = time.time()
-                if int(current_time - start_time) > seconds:
-                    seconds += 1
-                    pbar.update(1)
+                current_elapsed_int = int(time.time() - start_time)
+                increment = current_elapsed_int - pbar.n
+                if increment > 0:
+                    pbar.update(increment)
 
         pbar.close()
         if path is not None:
