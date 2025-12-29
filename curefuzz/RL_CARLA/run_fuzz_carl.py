@@ -225,7 +225,8 @@ class BenchmarkEnv:
         count = 0
         for transform in spawn_points:
             if count >= num_vehicles: break
-            if transform.location.distance(hero_transform.location) < 10.0: continue
+            # [修改] 移除了 Phase 1 初始生成的 10m 安全距离限制，对齐老代码逻辑
+            # if transform.location.distance(hero_transform.location) < 10.0: continue
             
             blueprint = rng.choice(blueprints)
             color_val = None 
@@ -310,8 +311,11 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
                  npc_bp = npc_data[0] 
             npc_trans = npc_data[1] 
             npc_bp.set_attribute('role_name', 'autopilot')
-            if npc_trans.location.distance(start_pose.location) < 2.0:
+            
+            # [修改] Phase 2 安全距离改为 1.9m，与老代码 carla_utils.py 保持一致
+            if npc_trans.location.distance(start_pose.location) < 1.9:
                 continue
+                
             cmd = carla.command.SpawnActor(npc_bp, npc_trans).then(
                 carla.command.SetAutopilot(carla.command.FutureActor, True, env_manager.tm_port))
             batch.append(cmd)

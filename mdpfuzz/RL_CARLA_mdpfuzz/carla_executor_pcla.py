@@ -8,7 +8,6 @@ import carla
 import queue
 import cv2
 import pandas as pd
-import uuid  # [新增] 恢复 uuid 引用
 from pathlib import Path
 from typing import Any
 import traceback
@@ -149,11 +148,13 @@ class PCLAEnv:
 
 # --- Executor 实现 ---
 class PCLAExecutor(Executor):
-    def __init__(self, sim_steps: int, env: PCLAEnv, num_vehicles: int = 10, out_dir: str = "./results") -> None:
+    def __init__(self, sim_steps: int, env: PCLAEnv, num_vehicles: int = 10, out_dir: str = "./results", init_budget: int = 10) -> None:
         super().__init__(sim_steps, 0)
         self.env = env
         self.num_vehicles = num_vehicles + 1 
         self.env_seed = env.seed
+        self.init_budget = init_budget # 用于判断 Phase1 (Seed) 和 Phase2 (Fuzz)
+        self.execution_count = 0       # 全局执行计数器
         
         self.start_positions = self._init_start_positions()
         self.num_start_positions = len(self.start_positions)
@@ -164,14 +165,13 @@ class PCLAExecutor(Executor):
         else:
             print(f"[Info] Loaded {len(self.benchmark_tasks)} tasks from benchmark file.")
 
-        current_time_str = datetime.datetime.now().strftime('%Y_%m%d_%H%M%S')
-        self.out_dir = Path(out_dir) / current_time_str
-        
+        # [修改] 使用传入的 out_dir，不创建额外子文件夹
+        self.out_dir = Path(out_dir)
         self.video_dir = self.out_dir / "videos"
         self.video_dir.mkdir(parents=True, exist_ok=True)
         self.csv_file = self.out_dir / "summary.csv"
         
-        print(f"[Info] Output directory set to: {self.out_dir}")
+        print(f"[Info] Executor Output directory: {self.out_dir}")
         
         if not self.csv_file.exists():
             self._init_csv()
@@ -284,9 +284,20 @@ class PCLAExecutor(Executor):
         final_dist = 999.0
         start_time = time.time()
         
-        # [修改] 回归 PID_UUID 格式 (RL_CARLA 风格)
-        run_id = f"{os.getpid()}_{uuid.uuid4().hex[:6]}"
-        video_filename = self.video_dir / f"run_{run_id}.mp4"
+        # --- [关键修改] Task ID 命名逻辑 ---
+        # Phase 1: seed_000, seed_001 ... (直到 init_budget - 1)
+        # Phase 2: fuzz_0001, fuzz_0002 ... (从 1 开始计数)
+        if self.execution_count < self.init_budget:
+            phase = "Phase1"
+            task_id = f"seed_{self.execution_count:03d}"
+        else:
+            phase = "Phase2"
+            # Fuzz 计数从 1 开始
+            fuzz_idx = self.execution_count - self.init_budget + 1
+            task_id = f"fuzz_{fuzz_idx:04d}"
+
+        # 视频文件名严格对应 task_id
+        video_filename = self.video_dir / f"{task_id}.mp4"
         
         # 种子计算 (保持行为确定性)
         run_seed = int((start_idx * 1337 + target_idx * 31 + weather_idx) % 1000000)
@@ -329,10 +340,8 @@ class PCLAExecutor(Executor):
                 ego_transform.location.z += 0.5
                 vehicle = self.env.world.try_spawn_actor(ego_bp, ego_transform)
                 if not vehicle:
-                    # 生成失败，直接返回。video_writer 尚未初始化，日志将记录 None
-                    stop_reason = "spawn_fail"
-                    total_reward = -100.0
-                    is_collision = True
+                    # 生成失败，记录失败，增加计数
+                    self.execution_count += 1
                     return -100.0, True, np.zeros((1, 19)), 0.0
 
             # 生成 NPC
@@ -355,11 +364,11 @@ class PCLAExecutor(Executor):
                 self.env.world.tick()
             
             target_transform = self.env.spawn_points[target_idx]
-            route_file = f"route_mdpfuzz_{run_id}.xml"
+            route_file = f"route_mdpfuzz_{task_id}.xml"
             
             waypoints = location_to_waypoint(self.env.client, ego_transform.location, target_transform.location)
             if not waypoints:
-                print(f"[Error] No waypoints found for Task {run_id} (S:{start_idx}->T:{target_idx})")
+                print(f"[Error] No waypoints found for Task {task_id} (S:{start_idx}->T:{target_idx})")
                 raise RuntimeError("Empty Waypoints")
             route_maker(waypoints, route_file)
             
@@ -424,12 +433,12 @@ class PCLAExecutor(Executor):
                 if not collision_queue.empty():
                     _ = collision_queue.get() 
                     if step > 10: 
-                        stop_reason = "collision"
+                        stop_reason = "Collision" # 统一为大写，匹配 RL_CARLA
                         is_collision = True
                         break
                 
                 if not vehicle.is_alive: 
-                    stop_reason = "vehicle_destroyed"
+                    stop_reason = "VehicleDestroyed"
                     break
 
                 try:
@@ -479,20 +488,23 @@ class PCLAExecutor(Executor):
                 final_dist = cur_distance
                 
                 if cur_distance < 5.0:
-                    stop_reason = "success"
+                    stop_reason = "Success"
                     is_success = True
                     break
 
+            # 运行结束，计数器 +1
+            self.execution_count += 1
             return total_reward, is_collision, np.array(sequence), time.time() - start_time
 
         except Exception as e:
             print(f"[Execution Error] {e}")
             traceback.print_exc()
             stop_reason = f"error: {str(e)[:30]}"
+            self.execution_count += 1
             return 0.0, False, np.zeros((1, 19)), 0.0
             
         finally:
-            # [关键修复] 视频写入收尾：Flush 剩余帧
+            # 视频写入收尾
             if video_writer is not None and video_writer.isOpened():
                 try:
                     while not image_queue.empty():
@@ -505,7 +517,6 @@ class PCLAExecutor(Executor):
                     print(f"[Video Flush Error] {e}")
                 video_writer.release()
             
-            # [关键修复] 只有文件真实存在且非空时，才记录路径，否则记为 None
             final_video_path = "None"
             if video_filename.exists():
                 if video_filename.stat().st_size > 0:
@@ -515,7 +526,8 @@ class PCLAExecutor(Executor):
                     except: pass
 
             duration = time.time() - start_time
-            self._log_result(run_id, "fuzz", weather_idx, start_idx, target_idx, is_success, stop_reason, is_collision, total_reward, 0, duration, step, final_dist, final_video_path)
+            # [注意] intrinsic_reward 此处无法获取(由Fuzzer计算)，故记录为0，或后续由Fuzzer日志补全
+            self._log_result(task_id, phase, weather_idx, start_idx, target_idx, is_success, stop_reason, is_collision, total_reward, 0, duration, step, final_dist, final_video_path)
 
             # 资源清理
             for sensor in sensor_list:

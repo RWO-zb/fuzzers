@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import shutil
+import time
 import numpy as np
 from pathlib import Path
 
@@ -13,23 +14,6 @@ if str(CURRENT_DIR) not in sys.path:
 # 导入 carla_executor_pcla
 from carla_executor_pcla import PCLAExecutor, PCLAEnv
 from mdpfuzz.mdpfuzz import Fuzzer
-
-def clean_output_dir(out_dir: Path):
-    """
-    清理输出目录中的 MDPFuzz 状态文件，防止加载旧的输入向量格式。
-    保留 videos 文件夹，只删除 log 和 state。
-    """
-    if not out_dir.exists():
-        return
-        
-    print(f"[Info] Cleaning stale MDPFuzz state files in {out_dir}...")
-    for ext in ['*.txt', '*.json', '*.pkl', 'summary.csv']:
-        for f in out_dir.glob(ext):
-            try:
-                f.unlink()
-                print(f"  - Deleted {f.name}")
-            except Exception as e:
-                print(f"  - Failed to delete {f.name}: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="MDPFuzz with PCLA Agent")
@@ -47,7 +31,8 @@ def main():
     group.add_argument("--test-budget", type=int, default=100, help="Number of fuzzing iterations")
     group.add_argument("--time-budget", type=int, default=None, help="Fuzzing time budget in seconds")
     
-    parser.add_argument("--out-dir", default="./mdpfuzz_results", help="Output directory")
+    # [修改] 移除默认值，改为在该参数为空时自动生成带时间戳的路径
+    parser.add_argument("--out-dir", default=None, help="Optional override for output directory")
     
     # MDPFuzz 参数
     parser.add_argument("--k", type=int, default=10, help="Number of GMM components")
@@ -56,12 +41,18 @@ def main():
 
     args = parser.parse_args()
 
-    # 0. 准备输出目录并清理旧状态
-    out_path = Path(args.out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
+    # --- [关键修改] 生成带时间戳的输出目录 ---
+    # 格式模仿 RL_CARLA: results/YYYYMMDD_HHMMSS_mdpfuzz_seedXXX
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
     
-    # [关键修复] 清理旧数据，防止 StartID 错乱
-    clean_output_dir(out_path)
+    if args.out_dir:
+        out_path = Path(args.out_dir)
+    else:
+        # 自动生成路径
+        folder_name = f"{timestamp}_mdpfuzz_seed{args.seed}"
+        out_path = Path("./results") / folder_name
+        
+    out_path.mkdir(parents=True, exist_ok=True)
     
     print(f"[Info] Results will be saved to: {out_path.resolve()}")
 
@@ -74,11 +65,13 @@ def main():
         return
 
     # 2. 初始化 Executor
+    # [关键] 传入 init_budget 用于判断 Phase 和 命名逻辑
     executor = PCLAExecutor(
         sim_steps=args.sim_steps,
         env=env,
         num_vehicles=args.num_vehicles,
-        out_dir=str(out_path)
+        out_dir=str(out_path),
+        init_budget=args.init_budget
     )
     
     # 3. 初始化 Fuzzer
@@ -98,14 +91,13 @@ def main():
     print(f"MDPFuzz Configuration:")
     print(f"  - Town: {args.town}")
     print(f"  - Init Budget (Random): {args.init_budget} runs")
-    print(f"    (Note: Time Budget starts AFTER these initial runs)")
+    print(f"    (Phase 1: seed_000 to seed_{args.init_budget-1:03d})")
     
     if args.time_budget is not None:
         print(f"  - Fuzzing Mode: TIME BUDGET")
         print(f"  - Budget: {args.time_budget} seconds")
-        # [关键] 传递参数给 mdpfuzz
         kwargs['test_budget_in_seconds'] = args.time_budget
-        budget_arg = 999999999 # 设置一个很大的数字，让时间来控制停止
+        budget_arg = 999999999 # 设置极大值，由时间控制退出
     else:
         print(f"  - Fuzzing Mode: ITERATION BUDGET")
         print(f"  - Budget: {args.test_budget} iterations")
@@ -114,7 +106,8 @@ def main():
     print("="*40)
 
     # 5. 开始 Fuzzing
-    log_path = out_path / f"fuzz_log_{args.town}"
+    # [修改] 日志文件保存到同一个 out_path 下
+    log_path = out_path / f"mdpfuzz_state"
     
     fuzzer.fuzzing(
         n=args.init_budget,
