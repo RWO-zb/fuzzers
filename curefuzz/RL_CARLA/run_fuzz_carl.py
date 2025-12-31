@@ -47,12 +47,9 @@ try:
 except ImportError:
     sys.exit(1)
 
-# --- [修改核心] 强化版随机数设置函数 ---
 def set_global_seed(seed):
     """
     重置所有可能的随机数生成器状态。
-    这确保了后续的代码执行（包括 Agent 初始化、Torch 网络权重、Numpy 操作）
-    都从一个确定的起点开始。
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -66,7 +63,7 @@ def set_global_seed(seed):
     except ImportError:
         pass
 
-AGENT_NAME = "carl_carlv11"
+AGENT_NAME = "carl_roach_0"
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 600
 VIDEO_FPS = 20.0
@@ -162,7 +159,6 @@ class BenchmarkEnv:
         self.tm_port = args.port + 8000
         self.traffic_manager = self.client.get_trafficmanager(self.tm_port)
         self.traffic_manager.set_synchronous_mode(True)
-        # 初始设置，后续会在 run_single 中每次重置
         self.traffic_manager.set_random_device_seed(args.seed)
         
         self.traffic_manager.set_hybrid_physics_mode(False) 
@@ -212,7 +208,6 @@ class BenchmarkEnv:
         self.init_vehicles = [] 
         if num_vehicles <= 0: return []
 
-        # 使用局部随机实例，确保交通流生成不受全局随机状态重置的影响，且只由传入的 seed 决定
         rng = random.Random(seed) if seed is not None else random
 
         blueprints = self.world.get_blueprint_library().filter("vehicle.*")
@@ -225,8 +220,10 @@ class BenchmarkEnv:
         count = 0
         for transform in spawn_points:
             if count >= num_vehicles: break
-            # [修改] 移除了 Phase 1 初始生成的 10m 安全距离限制，对齐老代码逻辑
-            # if transform.location.distance(hero_transform.location) < 10.0: continue
+            
+            # [修改] 恢复 Phase 1 初始生成的 10m 安全距离限制，严格对齐老代码
+            # 这防止了 Agent 一出生就被卡死或直接撞车，从而保证测试的有效性
+            if transform.location.distance(hero_transform.location) < 10.0: continue
             
             blueprint = rng.choice(blueprints)
             color_val = None 
@@ -245,13 +242,9 @@ class BenchmarkEnv:
         spawned_ids = [r.actor_id for r in results if not r.error]
         return spawned_ids
 
-# --- [修改核心] run_single 增加 seed 参数并进行强制重置 ---
 def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase, npc_count=0, npc_mutate_info=None, seed=None):
-    # 1. 强制重置全局随机数种子。
-    #    这确保了 Agent(PCLA) 的初始化、策略网络随机性等在每次运行中都是一致的。
     if seed is not None:
         set_global_seed(seed)
-        # 同时重置 Traffic Manager 的种子
         env_manager.traffic_manager.set_random_device_seed(seed)
 
     client = env_manager.client
@@ -265,11 +258,9 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
 
     world.set_weather(WEATHERS.get(weather_id, carla.WeatherParameters.ClearNoon))
     
-    # 清理现场
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('vehicle.*')])
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
     
-    # 增加等待 tick 数，确保清理完成
     for _ in range(5):
         world.tick()
 
@@ -312,7 +303,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
             npc_trans = npc_data[1] 
             npc_bp.set_attribute('role_name', 'autopilot')
             
-            # [修改] Phase 2 安全距离改为 1.9m，与老代码 carla_utils.py 保持一致
             if npc_trans.location.distance(start_pose.location) < 1.9:
                 continue
                 
@@ -322,7 +312,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         results = client.apply_batch_sync(batch, True)
         npc_ids = [r.actor_id for r in results if not r.error]
     else:
-        # 传入 seed 确保交通流一致
         npc_ids = env_manager.init_traffic(npc_count, start_pose, seed=seed)
         current_npc_info = env_manager.init_vehicles
 
@@ -362,7 +351,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     try:
         waypoints = location_to_waypoint(client, start_pose.location, target_pose.location)
         route_maker(waypoints, route_file)
-        # 初始化 Agent (PCLA 可能依赖全局 torch/numpy 种子，这里已经重置过)
         agent = PCLA(AGENT_NAME, vehicle, route_file, client)
     except Exception:
         if wrapper_initialized: env_manager.map_wrapper.clear()
@@ -555,7 +543,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     }
 
 def run_benchmark_suite(args):
-    # 初始全局种子（主要影响文件命名、初始目录等非关键随机性）
     set_global_seed(args.seed)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -580,17 +567,13 @@ def run_benchmark_suite(args):
         start_pose = env_manager.spawn_points[start_id]
         target_pose = env_manager.spawn_points[target_id]
         
-        # --- [Phase 1 修改] ---
-        # 1. 计算当前任务的确定性种子
         current_task_seed = args.seed + i
         
-        # 2. 使用独立的 RNG 选择天气，确保即使跳过某个任务，后续随机序列也不变（实际上因为 run_single 内部重置，这里更多是逻辑隔离）
         task_rng = random.Random(current_task_seed)
         weather_id = task_rng.choice(weather_list)
         
         run_name = f"seed_{i:03d}"
         
-        # 3. 传入 seed，run_single 内部会调用 set_global_seed(current_task_seed)
         res = run_single(env_manager, start_pose, target_pose, weather_id, run_name, "Phase1", 
                          npc_count=args.num_vehicles, seed=current_task_seed)
         
@@ -624,13 +607,7 @@ def run_benchmark_suite(args):
             
         fuzz_idx += 1
         
-        # --- [Phase 2 修改] ---
-        # 1. 计算 Phase 2 的确定性种子
-        #    使用较大的偏移量防止与 Phase 1 种子重叠
         current_fuzz_seed = args.seed + 100000 + fuzz_idx
-        
-        # 2. 重要：在调用 Fuzzer 逻辑（get_pose, mutation）之前重置全局种子！
-        #    因为 cure_fuzz.py 内部使用了全局的 np.random
         set_global_seed(current_fuzz_seed)
         
         seed_pose = env_manager.fuzzer.get_pose() 
@@ -642,7 +619,6 @@ def run_benchmark_suite(args):
         target_pose = env_manager.spawn_points[target_id] if target_id < total_spawns else env_manager.spawn_points[0]
         run_name = f"fuzz_{fuzz_idx:04d}"
         
-        # 3. 传入相同的 seed 给 run_single，确保仿真环境与 Fuzzer 选择保持一致的随机上下文
         res_fuzz = run_single(
             env_manager, mutated_start_pose, target_pose, weather_id, 
             run_name, "Phase2", 
@@ -727,7 +703,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if not hasattr(PCLA, 'get_action_with_entropy'):
-        
         def patched_get_action(self):
             return self.get_action(), 0.0
         PCLA.get_action_with_entropy = patched_get_action

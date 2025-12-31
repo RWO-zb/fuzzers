@@ -9,7 +9,7 @@ import time
 import ast # 用于安全地将字符串 '[1,2,3]' 转换为列表 [1,2,3]
 
 # --- 1. 配置 ---
-LOG_FILE = 'rt_10_0.01_0.01_0_logs.txt' 
+LOG_FILE = 'rt_10_0.01_0.01_1022_logs.txt' 
 PLOT_1_FILE = 'rt_crashes_over_unique_inputs.png'
 PLOT_2_FILE = 'rt_full_input_space_tsne.png'
 PLOT_3_FILE = 'rt_crash_generation_histogram.png'
@@ -355,7 +355,7 @@ def main():
 
     # --- 3. 调用绘图函数 ---
     plot_crashes_over_time(unique_log_df)
-    plot_tsne_all(unique_log_df)
+    #plot_tsne_all(unique_log_df)
     plot_crash_generation_histogram(unique_log_df)
     plot_crashes_over_wallclock_time(unique_log_df) # <--- 新增调用
 

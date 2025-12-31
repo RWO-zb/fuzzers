@@ -19,10 +19,12 @@ class RND(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(hidden_size, output_size)
         )
+        # Initialize the target network with random weights
         for m in self.target_net.modules():
             if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, 0, 1)
                 nn.init.constant_(m.bias, 0)
+        # Make target network's parameters not trainable
         for param in self.target_net.parameters():
             param.requires_grad = False
             
@@ -66,44 +68,24 @@ class cure:
 
         new_prob = []
         for i in range(len(self.corpus)):
-            # [修复 1] 防止指数溢出
-            try:
-                # 限制 exponent 范围
-                val_reward = -self.rewards[i] * alpha
-                val_reward = max(min(val_reward, 20), -20)
-                term_reward = math.exp(val_reward)
-            except Exception:
-                term_reward = 1e-6 # 默认小值
-
-            try:
-                val_intrinsic = self.intrinsic_reward[i] * beta
-                val_intrinsic = max(min(val_intrinsic, 20), -20)
-                term_intrinsic = math.exp(val_intrinsic)
-            except Exception:
-                term_intrinsic = 1e-6
-
-            # 熵可能为负，直接相加
-            term_entropy = self.entropy[i] * gamma
-            
-            prob = term_reward + term_intrinsic + term_entropy
+            # [修改 1] 恢复老代码的计算逻辑，移除 try-except 和 1e100 溢出保护
+            # 这允许 math.exp 产生较大的值，避免因人为截断导致的种子选择死锁
+            prob = (math.exp(-self.rewards[i]*alpha) + math.exp(self.intrinsic_reward[i]*beta) + self.entropy[i]*gamma)
             new_prob.append(prob)
         
         new_prob = np.array(new_prob)
         
-        # [修复 2] 清洗 NaN/Inf 并强制非负
-        # nan_to_num 处理 NaN 和 Inf
-        new_prob = np.nan_to_num(new_prob, nan=0.0, posinf=100.0, neginf=0.0)
-        # maximum 确保所有概率至少为 1e-6 (解决 "probabilities are not non-negative")
+        # [修改 2] 保留新代码的负概率截断和清洗逻辑 (User Request)
+        # 确保概率非负且无非法值，防止 np.random.choice 崩溃
+        new_prob = np.nan_to_num(new_prob, nan=0.0, posinf=None, neginf=0.0)
         new_prob = np.maximum(new_prob, 1e-6)
         
-        # [修复 3] 安全归一化
         prob_sum = new_prob.sum()
         if prob_sum <= 0:
             final_probs = np.ones(len(self.corpus)) / len(self.corpus)
         else:
             final_probs = new_prob / prob_sum
                     
-        # 使用 final_probs 采样
         choose_index = np.random.choice(range(len(self.corpus)), 1, p=final_probs)[0]
         
         self.count[choose_index] -= 1
@@ -121,10 +103,6 @@ class cure:
             self.drop_current()
             
         return self.current_pose
-
-    # ... (get_vehicle_info, add_crash, further_mutation 等中间函数保持不变) ...
-    # 为节省篇幅，省略中间未修改的函数，请保留你原文件中的内容 
-    # 只需确保以下 train_rnd 函数被替换
 
     def get_vehicle_info(self):
         return self.current_vehicle_info
@@ -228,10 +206,12 @@ class cure:
             l2_reg += torch.norm(param)
         loss = loss + l2_reg_coeff * l2_reg
         
+        # [修改 3] 严格对齐老代码：注释掉/移除 optimizer.zero_grad()
+        # 允许梯度累积，使网络产生漂移，维持较高的内在奖励（好奇心），
+        # 这是老代码能发现更多 Crash 的关键机制。
         if not torch.isnan(loss):
-            self.optimizer.zero_grad()
+            # self.optimizer.zero_grad() 
             loss.backward()
-            # [修复 4] 使用 clip_grad_norm_ (带下划线) 消除 UserWarning
             torch.nn.utils.clip_grad_norm_(self.rnd.predictor_net.parameters(), 5)
             self.optimizer.step()
     
