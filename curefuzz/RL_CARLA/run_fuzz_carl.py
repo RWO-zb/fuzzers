@@ -15,6 +15,7 @@ from pathlib import Path
 import carla
 import pygame
 
+# [关键修复1] 强制使用 dummy 视频驱动，防止弹出窗口冲突，但允许 display 初始化
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 # --- 路径导入逻辑 ---
@@ -31,6 +32,7 @@ if os.path.exists(pcla_folder) and os.path.isdir(pcla_folder):
 try:
     from bird_view.utils import map_utils
 except ImportError:
+    print("[ERROR] Could not import map_utils. Check your python path.")
     sys.exit(1)
 
 try:
@@ -39,18 +41,82 @@ except ImportError:
     try:
         from PCLA import PCLA, route_maker, location_to_waypoint
     except ImportError:
+        print("[ERROR] Could not import PCLA. Check your python path.")
         sys.exit(1)
 
 try:
     from fuzz.cure_fuzz import cure
     from fuzz.replayer import replayer 
 except ImportError:
+    print("[ERROR] Could not import fuzz modules.")
     sys.exit(1)
 
+# ==============================================================================
+# [核心修复2] PyGame 冲突热补丁 (Monkey Patch) - 修正版
+# ==============================================================================
+def patch_map_utils():
+    """
+    修正 map_utils 的初始化逻辑：
+    1. 使用 dummy 驱动初始化 display，确保 convert_alpha() 可用，避免 'No video mode' 错误。
+    2. 拦截 flip()，避免刷新不存在的屏幕或干扰 Agent。
+    """
+    print("[INFO] Applying Robust Off-screen Rendering Patch to map_utils...")
+
+    @classmethod
+    def patched_init(cls, client, world, carla_map, player):
+        # 1. 确保 Pygame 初始化
+        pygame.init()
+        
+        # [关键修改] 即使是离屏渲染，也必须调用 set_mode 一次，否则 convert_alpha 会报错
+        # 使用之前设置的 SDL_VIDEODRIVER=dummy，这里不会弹出真实窗口
+        if pygame.display.get_surface() is None:
+            cls.display = pygame.display.set_mode((320, 320))
+        else:
+            cls.display = pygame.display.get_surface()
+        
+        # 2. 清除并重新注册模块
+        map_utils.module_manager.clear_modules()
+        
+        input_module = map_utils.ModuleInput(map_utils.MODULE_INPUT)
+        hud_module = map_utils.ModuleHUD(map_utils.MODULE_HUD, 320, 320)
+        world_module = map_utils.ModuleWorld(map_utils.MODULE_WORLD, client, world, carla_map, player)
+
+        map_utils.module_manager.register_module(world_module)
+        map_utils.module_manager.register_module(hud_module)
+        map_utils.module_manager.register_module(input_module)
+        map_utils.module_manager.start_modules()
+
+        cls.world_module = world_module
+        cls.clock = pygame.time.Clock()
+
+    @classmethod
+    def patched_get_observations(cls):
+        # 获取渲染结果
+        road, lane, vehicle, pedestrian, traffic = cls.world_module.get_rendered_surfaces()
+
+        result = cls.world_module.get_hero_measurements()
+        result.update(
+            {
+                "road": np.uint8(road),
+                "lane": np.uint8(lane),
+                "vehicle": np.uint8(vehicle),
+                "pedestrian": np.uint8(pedestrian),
+                "traffic": np.uint8(traffic),
+            }
+        )
+        
+        # [关键] 移除 pygame.display.flip()，只在内存中处理
+        return result
+
+    # 将补丁应用到原始类上
+    map_utils.Wrapper.init = patched_init
+    map_utils.Wrapper.get_observations = patched_get_observations
+
+# 立即运行补丁
+patch_map_utils()
+# ==============================================================================
+
 def set_global_seed(seed):
-    """
-    重置所有可能的随机数生成器状态。
-    """
     random.seed(seed)
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -63,7 +129,8 @@ def set_global_seed(seed):
     except ImportError:
         pass
 
-AGENT_NAME = "carl_roach_0"
+# [配置] 请确认模型名称正确
+AGENT_NAME = "carl_roach_0" 
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 600
 VIDEO_FPS = 20.0
@@ -123,6 +190,7 @@ def get_enhanced_state_vector(vehicle, birdview_obs, target_location, command=2)
 
     target_info = np.array([target_location.x, target_location.y])
     
+    # 增加鲁棒性检查，防止 None
     if birdview_obs is not None and 'vehicle' in birdview_obs:
         vehicle_pixels = birdview_obs['vehicle']
         vehicle_index = np.nonzero(vehicle_pixels)
@@ -186,11 +254,22 @@ class BenchmarkEnv:
             df.to_csv(self.summary_csv, index=False)
 
     def load_suite_tasks(self, town_name, suite_type="straight"):
-        task_file = Path(f"./RL_CARLA/benchmark/corl2017/0915/{suite_type}_{town_name}.txt")
-        if not task_file.exists():
-            task_file = Path(f"./RL_CARLA/benchmark/carla100/0915/{suite_type}_{town_name}.txt")
-        if not task_file.exists():
-            raise FileNotFoundError(f"Task file not found: {task_file}")
+        # 增加路径容错
+        possible_paths = [
+            Path(f"./RL_CARLA/benchmark/corl2017/0915/{suite_type}_{town_name}.txt"),
+            Path(f"./RL_CARLA/benchmark/carla100/0915/{suite_type}_{town_name}.txt"),
+            Path(f"benchmark/corl2017/0915/{suite_type}_{town_name}.txt") 
+        ]
+        
+        task_file = None
+        for p in possible_paths:
+            if p.exists():
+                task_file = p
+                break
+                
+        if not task_file:
+            print(f"[WARNING] Task file not found for {town_name}. Returning empty list.")
+            return []
         
         tasks = []
         with open(task_file, 'r') as f:
@@ -221,8 +300,7 @@ class BenchmarkEnv:
         for transform in spawn_points:
             if count >= num_vehicles: break
             
-            # [修改] 恢复 Phase 1 初始生成的 10m 安全距离限制，严格对齐老代码
-            # 这防止了 Agent 一出生就被卡死或直接撞车，从而保证测试的有效性
+            # 10m 安全距离
             if transform.location.distance(hero_transform.location) < 10.0: continue
             
             blueprint = rng.choice(blueprints)
@@ -258,6 +336,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
 
     world.set_weather(WEATHERS.get(weather_id, carla.WeatherParameters.ClearNoon))
     
+    # 清理现场
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('vehicle.*')])
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
     
@@ -324,9 +403,12 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
 
     wrapper_initialized = False
     try:
+        # 使用我们 Patch 过的 init，现在它是安全的
         env_manager.map_wrapper.init(client, world, env_manager.map, vehicle)
         wrapper_initialized = True
-    except Exception:
+    except Exception as e:
+        print(f"Wrapper Init Error: {e}")
+        # traceback.print_exc()
         wrapper_initialized = False
 
     initial_collision = False
@@ -348,48 +430,49 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         return "INITIAL_CRASH" 
 
     route_file = f"route_{run_name}.xml"
+    camera_sensor = None
+    video_writer = None
+
     try:
         waypoints = location_to_waypoint(client, start_pose.location, target_pose.location)
         route_maker(waypoints, route_file)
+        
+        # 初始化 Agent (ROACH)
+        # 注意：如果这里抛出 FileNotFoundError，请参考上文关于创建软链接的解决方案
         agent = PCLA(AGENT_NAME, vehicle, route_file, client)
-    except Exception:
-        if wrapper_initialized: env_manager.map_wrapper.clear()
-        if collision_sensor: collision_sensor.destroy()
-        if vehicle: vehicle.destroy()
-        return None
 
-    camera_bp = world.get_blueprint_library().find('sensor.camera.rgb')
-    camera_bp.set_attribute('image_size_x', str(VIDEO_WIDTH))
-    camera_bp.set_attribute('image_size_y', str(VIDEO_HEIGHT))
-    camera_bp.set_attribute('sensor_tick', str(1.0 / VIDEO_FPS))
-    camera_transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-15))
-    camera_sensor = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
-    image_queue = queue.Queue()
-    camera_sensor.listen(image_queue.put)
-    
-    video_path = Path(env_manager.result_dir / "videos" / f"{run_name}.mp4")
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video_writer = cv2.VideoWriter(str(video_path), fourcc, VIDEO_FPS, (VIDEO_WIDTH, VIDEO_HEIGHT))
+        camera_bp = world.get_blueprint_library().find('sensor.camera.rgb')
+        camera_bp.set_attribute('image_size_x', str(VIDEO_WIDTH))
+        camera_bp.set_attribute('image_size_y', str(VIDEO_HEIGHT))
+        camera_bp.set_attribute('sensor_tick', str(1.0 / VIDEO_FPS))
+        camera_transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-15))
+        camera_sensor = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
+        image_queue = queue.Queue()
+        camera_sensor.listen(image_queue.put)
+        
+        video_path = Path(env_manager.result_dir / "videos" / f"{run_name}.mp4")
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(str(video_path), fourcc, VIDEO_FPS, (VIDEO_WIDTH, VIDEO_HEIGHT))
 
-    prev_distance = start_pose.location.distance(target_pose.location)
-    prev_speed = np.array([0,0,0])
-    total_reward = 0
-    seq_entropy = 0
-    sequence = []
-    step = 0
-    max_steps = 200 
-    stop_reason = "Timeout"
-    is_success = False
-    
-    reward_history = []
-    
-    try:
+        prev_distance = start_pose.location.distance(target_pose.location)
+        prev_speed = np.array([0,0,0])
+        total_reward = 0
+        seq_entropy = 0
+        sequence = []
+        step = 0
+        max_steps = 200 
+        stop_reason = "Timeout"
+        is_success = False
+        
+        reward_history = []
+        
         while step < max_steps:
             world.tick()
             
             obs_birdview = None
             if wrapper_initialized:
                 try:
+                    # 这里的 render 现在写入离屏 surface，不干扰主屏幕
                     env_manager.map_wrapper.tick()
                     obs_birdview = env_manager.map_wrapper.get_observations()
                 except Exception:
@@ -410,6 +493,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
                 stop_reason = "Collision"
                 break
             
+            # Agent 获取动作
             control, entropy = agent.get_action_with_entropy()
             
             if control: vehicle.apply_control(control)
@@ -435,7 +519,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
             reward_history.append(reward_info)
 
             current_command = 2.0 
-            found_command = False
             
             real_agent = agent
             if hasattr(agent, 'agent_instance') and agent.agent_instance is not None:
@@ -453,7 +536,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
                                     current_command = float(cmd.value)
                                 else:
                                     current_command = float(cmd)
-                                found_command = True
                             except:
                                 pass
             
@@ -481,6 +563,9 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     except Exception:
         stop_reason = "Exception"
         traceback.print_exc()
+        if wrapper_initialized: env_manager.map_wrapper.clear()
+        if collision_sensor: collision_sensor.destroy()
+        if vehicle: vehicle.destroy()
     
     finally:
         if camera_sensor and camera_sensor.is_alive:
@@ -511,7 +596,12 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         settings.fixed_delta_seconds = None
         world.apply_settings(settings)
 
-        if os.path.exists(route_file): os.remove(route_file)
+        # [重要] 确保这里删除了生成的 XML 文件
+        if os.path.exists(route_file): 
+            try:
+                os.remove(route_file)
+            except:
+                pass
 
         if reward_history:
             try:
