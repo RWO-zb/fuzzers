@@ -36,6 +36,9 @@ class Fuzzer():
         self.coverage_model = CoverageModel(random_seed, k, gamma)
         # used to track uniqueness of solutions
         self.evaluated_solutions = []
+        
+        # 初始化变异历史记录列表
+        self.mutation_history = [] 
 
         self.executor = executor
         self.sim_steps = self.executor.sim_steps
@@ -96,12 +99,9 @@ class Fuzzer():
         return episode_reward, done, obs_seq, exec_time
 
 
-    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None,generation: int = None ,**kwargs) -> Tuple[float, float, bool, List[np.ndarray], float]:
+    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, generation: int = None ,**kwargs) -> Tuple[float, float, bool, List[np.ndarray], float]:
         '''
         Computes the sensitivity of the state @state.
-        It first perturbs the state and computes the perturbation quantity.
-        Then, the two states are executed and the sensitivity is computed.
-        It returns the latter, as well as the results of the execution for the state (acc. reward, sequence, oracle and execution time).
         '''
         # perturbs the state and computes the perturbation
         perturbed_state = self.mutate_validate(state, **kwargs)
@@ -123,7 +123,7 @@ class Fuzzer():
                 oracle=crash_perturbed,
                 reward=acc_reward_perturbed,
                 episode_length=episode_length,
-                Generation=generation, # <--- 添加此行
+                Generation=generation,
                 test_exec_time=exec_time_perturbed,
                 run_time=time.time()
             )
@@ -155,7 +155,7 @@ class Fuzzer():
                     oracle=crash,
                     reward=reward,
                     episode_length=episode_length,
-                    Generation=0, # <--- 添加此行
+                    Generation=0,
                     test_exec_time=exec_time,
                     run_time=time.time()
                     )
@@ -173,20 +173,6 @@ class Fuzzer():
     def fuzzing(self, n: int, policy: Any = None, **kwargs):
         '''
         Conducts fuzzing to generate test cases for the system under test (SUT).
-
-        Args:
-        - n (int): Number of iterations for fuzzing.
-        - policy (tt.TestAgent): The testing policy or agent guiding the fuzzing process.
-        - saving_path (str, optional): Path to save logs and results (default: None).
-        - local_sensitivity (bool, optional): Flag indicating whether to compute local sensitivity (default: False).
-        - test_budget_in_seconds (int, optional): Time budget for fuzzing in seconds (default: None).
-        - test_budget (int, optional): Number of iterations if time budget is not specified (default: None).
-        - exp_name (str, optional): Name of the experiment to overwrite the key "use_case" of the configuration dictionary.
-        - save_logs_only (bool, optional): Flag indicating whether to only save the configuration of the execution (default: False).
-        - light_pool (bool, optional): Flag indicating whether to use the LightPool class for the pool (default: False).
-
-        Returns:
-        None. The function conducts the fuzzing process and stores generated test cases.
         '''
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
@@ -206,14 +192,15 @@ class Fuzzer():
         else:
             pool = IndexedPool(is_integer=np.issubdtype(initial_inputs.dtype, np.integer)) # type: Pool
 
-        # initializes the coverage model by running the policy on a randomly generated input to sample states of the MDP
+        # initializes the coverage model
         num_initial_executions = self.initialize_coverage_model(policy=policy)
         self.config['num_initial_executions'] = num_initial_executions
         pbar = tqdm.tqdm(total=n)
+        
+        # Initial sampling phase
         for state in initial_inputs:
             sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, **kwargs)
             state_sequence_conc = self._concatenate_state_sequence(state_sequence)
-            # computes the coverage and adds test case in the pool
             t0 = time.time()
             coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
             coverage_time = time.time() - t0
@@ -228,7 +215,7 @@ class Fuzzer():
                     episode_length=episode_length,
                     sensitivity=sensitivity,
                     coverage=coverage,
-                    Generation=0, # <--- 添加此行
+                    Generation=0,
                     test_exec_time=exec_time,
                     coverage_time=coverage_time,
                     run_time=time.time()
@@ -240,6 +227,7 @@ class Fuzzer():
             pbar.update(1)
         pbar.close()
 
+        # Fuzzing Loop Setup
         test_budget_in_seconds = kwargs.get('test_budget_in_seconds', None)
         if test_budget_in_seconds is None:
             test_budget = kwargs.get('test_budget', None)
@@ -255,8 +243,10 @@ class Fuzzer():
             seconds = 0
             pbar = tqdm.tqdm(total=test_budget_in_seconds)
             self.config['test_budget_in_seconds'] = test_budget_in_seconds
+        
         try:
             while True:
+                # Budget check
                 if test_budget_in_seconds is None:
                     if num_iterations == test_budget:
                         break
@@ -264,15 +254,26 @@ class Fuzzer():
                     if (current_time - start_time) > test_budget_in_seconds:
                         break
 
+                # Selection
                 input, acc_reward_input, generation = pool.select(self.rng)
                 new_generation = generation + 1
+                
+                # Mutation
                 mutant = self.mutate_validate(input, **kwargs)
+                
+                # Execution
                 acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
+
+                # 记录 [父代, 子代, Oracle]
+                record = np.concatenate([input, mutant, np.array([int(oracle)])])
+                self.mutation_history.append(record)
+
                 state_sequence_conc = self._concatenate_state_sequence(state_sequence)
                 t0 = time.time()
                 coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
                 coverage_time = time.time() - t0
                 sensitivity = None
+                
                 if oracle:
                     pool.add_crash(mutant)
                 elif (acc_reward_mutant < acc_reward_input) or (coverage < self.tau):
@@ -291,7 +292,7 @@ class Fuzzer():
                         episode_length=episode_length,
                         sensitivity=sensitivity,
                         coverage=coverage,
-                        Generation=new_generation, # <--- 添加此行
+                        Generation=new_generation,
                         test_exec_time=exec_time,
                         coverage_time=coverage_time,
                         run_time=time.time()
@@ -307,16 +308,26 @@ class Fuzzer():
                         pbar.update(1)
         except Exception as e:
             print(e)
+            import traceback
+            traceback.print_exc()
 
         pbar.close()
-        # saves at least the configuration and the history of the input selection (if Pool allows)
+        
+        # --- 修改后的保存逻辑 ---
         if path is not None:
+            # 1. 总是保存配置和 select 记录
             self.save_configuration(path)
             np.savetxt(path + '_selected.txt', pool.selected, fmt='%1.0f', delimiter=',')
+            
+            # 2. 关键修改：无论 save_logs_only 状态如何，都保存 Mutation History
+            #    并且会使用自定义的格式化方法
+            self.save_mutation_history(path)
+
+            # 3. 其他重型文件只有在 save_logs_only=False 时才保存
             if not kwargs.get('save_logs_only', False):
                 self.coverage_model.save(path)
                 self.save_evaluated_solutions(path)
-                # saves pool only if not LightPool
+                
                 if not kwargs.get('light_pool', False):
                     pool.save(path)
 
@@ -356,7 +367,7 @@ class Fuzzer():
                     reward=acc_reward,
                     episode_length=episode_length,
                     sensitivity=sensitivity,
-                    Generation=0, # <--- 添加此行
+                    Generation=0,
                     test_exec_time=exec_time,
                     run_time=time.time()
                 )
@@ -394,6 +405,10 @@ class Fuzzer():
             new_generation = generation + 1
             mutant = self.mutate_validate(input, **kwargs)
             acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
+            
+            record = np.concatenate([input, mutant, np.array([int(oracle)])])
+            self.mutation_history.append(record)
+            
             sensitivity = None
             if oracle:
                 pool.add_crash(mutant)
@@ -412,7 +427,7 @@ class Fuzzer():
                     reward=acc_reward_mutant,
                     episode_length=episode_length,
                     sensitivity=sensitivity,
-                    Generation=new_generation, # <--- 添加此行
+                    Generation=new_generation,
                     test_exec_time=exec_time,
                     run_time=time.time()
                 )
@@ -427,12 +442,17 @@ class Fuzzer():
                     pbar.update(1)
 
         pbar.close()
+        
+        # --- 修改后的保存逻辑 ---
         if path is not None:
             self.save_configuration(path)
             np.savetxt(path + '_selected.txt', pool.selected, fmt='%1.0f', delimiter=',')
+            
+            # 关键修改：无论 save_logs_only 状态如何，都保存 Mutation History
+            self.save_mutation_history(path)
+
             if not kwargs.get('save_logs_only', False):
                 self.save_evaluated_solutions(path)
-                # saves pool only if not LightPool
                 if not kwargs.get('light_pool', False):
                     pool.save(path)
 
@@ -446,10 +466,44 @@ class Fuzzer():
 
     def save_evaluated_solutions(self, path: str):
         evaluations = np.array(self.evaluated_solutions)
-        if np.issubdtype(evaluations.dtype, np.integer):
-            np.savetxt(path + '_evaluations.txt', evaluations, fmt='%1.0f', delimiter=',')
+        if len(evaluations) > 0:
+            if np.issubdtype(evaluations.dtype, np.integer):
+                np.savetxt(path + '_evaluations.txt', evaluations, fmt='%1.0f', delimiter=',')
+            else:
+                np.savetxt(path + '_evaluations.txt', evaluations, delimiter=',')
+
+    # <--- 修改点: 完全重写保存变异历史的方法，匹配 logs.txt 格式
+    def save_mutation_history(self, path: str):
+        '''
+        保存变异历史记录。
+        格式: ParentInputStr; MutantInputStr; Oracle
+        例如: [1.2, 0.5, ...]; [1.3, 0.4, ...]; 0
+        '''
+        if len(self.mutation_history) > 0:
+            print(f"Saving mutation history ({len(self.mutation_history)} entries) to {path}_mutations.txt")
+            with open(path + '_mutations.txt', 'w') as f:
+                # 写入表头 (可选)
+                f.write("ParentState; MutantState; Oracle\n")
+                
+                for record in self.mutation_history:
+                    # 1. 计算 State 的维度。record 结构是 [Parent(N), Mutant(N), Oracle(1)]
+                    # 因此 N = (TotalLength - 1) / 2
+                    state_dim = (len(record) - 1) // 2
+                    
+                    # 2. 切片提取数据
+                    parent = record[:state_dim]
+                    mutant = record[state_dim : 2*state_dim]
+                    oracle = int(record[-1])
+                    
+                    # 3. 格式化为 logs.txt 中的字符串格式: [x, y, z...]
+                    # replace('\n', '') 是为了防止 numpy 对过长的数组自动换行
+                    parent_str = np.array2string(parent, separator=',').replace('\n', '')
+                    mutant_str = np.array2string(mutant, separator=',').replace('\n', '')
+                    
+                    # 4. 写入文件，使用分号分隔 (与 logs.txt 风格保持一致)
+                    f.write(f"{parent_str}; {mutant_str}; {oracle}\n")
         else:
-            np.savetxt(path + '_evaluations.txt', evaluations, delimiter=',')
+            print("No mutation history to save.")
 
 
     def load(self, path: str):
@@ -482,8 +536,6 @@ class Fuzzer():
     def random_testing(self, n: int, policy: Any = None, path: str = 'logs', **kwargs):
         '''
         RT baseline that generates an input at each iteration.
-        By default, the method checks at the inputs don't have been tested before.
-        Such redundant testing guard can be disabled with the argument 'check_redundant_input'.
         '''
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
@@ -514,7 +566,7 @@ class Fuzzer():
                     oracle=oracle,
                     reward=acc_reward,
                     episode_length=episode_length,
-                    Generation=0, # <--- 添加此行
+                    Generation=0,
                     test_exec_time=exec_time,
                     run_time=time.time()
                 )

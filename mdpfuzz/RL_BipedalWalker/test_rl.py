@@ -19,7 +19,7 @@ Args:
     3. The RL key (bw, ll or tt).
 '''
 
-EXPERIMENT_SEEDS = [1022,42,723,1022,0]
+EXPERIMENT_SEEDS = [0,1,42,723,1022]
 RL_KEYS = ['bw']
 RL_NAMES = ['Bipedal Walker']
 
@@ -30,8 +30,8 @@ if __name__ == '__main__':
     print(f"--- 脚本开始运行时间: {start_time_str} ---")
     torch.set_num_threads(1)
     test_budget = 500
-    test_budget_in_seconds=60
-    init_budget = 100
+    test_budget_in_seconds=43200
+    init_budget = 10000
     k = 10
     tau = 0.01
     gamma = 0.01
