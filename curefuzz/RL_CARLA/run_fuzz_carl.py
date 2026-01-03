@@ -224,6 +224,9 @@ class BenchmarkEnv:
         self.spawn_points = self.map.get_spawn_points()
         self.result_dir = Path(result_dir)
         
+        # [修改] 记录开始时间，用于后续计算 elapsed_time
+        self.start_time = time.time()
+        
         self.tm_port = args.port + 8000
         self.traffic_manager = self.client.get_trafficmanager(self.tm_port)
         self.traffic_manager.set_synchronous_mode(True)
@@ -245,10 +248,12 @@ class BenchmarkEnv:
         self.init_vehicles = [] 
 
         if not self.summary_csv.exists():
+            # [修改] 增加 elapsed_time 和 current_timestamp 列
             columns = [
                 "task_id", "phase", "weather_id", "start_id", "target_id",
                 "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
-                "duration", "steps", "final_dist", "video_path"
+                "duration", "steps", "final_dist", "video_path",
+                "elapsed_time", "current_timestamp"
             ]
             df = pd.DataFrame(columns=columns)
             df.to_csv(self.summary_csv, index=False)
@@ -656,6 +661,7 @@ def run_benchmark_suite(args):
     
     weather_list = [1, 3, 6, 8]
     
+    # Phase 1: 初始种子生成阶段
     for i, (start_id, target_id) in enumerate(tasks):
         if i >= args.num_tasks: break
         if start_id >= total_spawns or target_id >= total_spawns: continue
@@ -674,6 +680,13 @@ def run_benchmark_suite(args):
                          npc_count=args.num_vehicles, seed=current_task_seed)
         
         if res == "INITIAL_CRASH" or not res:
+            continue
+        
+        # [新增逻辑] 初始种子筛选
+        # 如果没有抵达终点 (success=False) 或者 发生了碰撞 (collision=True)，
+        # 则跳过：不加入种子库、不写入日志
+        if not res['success'] or res['collision']:
+            print(f"[Phase1] Skipping unsuccessful seed {run_name}: success={res['success']}, collision={res['collision']}")
             continue
 
         intrinsic_reward = 0
@@ -696,6 +709,7 @@ def run_benchmark_suite(args):
     start_time = time.time()
     fuzz_idx = 0
     
+    # Phase 2: Fuzzing 阶段 (逻辑不变)
     while True:
         if (time.time() - start_time) > (args.fuzz_hours * 3600): break
         if len(env_manager.fuzzer.corpus) == 0:
@@ -765,11 +779,17 @@ def run_benchmark_suite(args):
     save_replayer_pickle(env_manager.replayer, result_folder)
 
 def log_result(env_manager, task_id, phase, weather, start, target, res, intrinsic):
+    # [修改] 增加 elapsed_time 和 current_timestamp 列，与 BenchmarkEnv 初始化时保持一致
     columns = [
         "task_id", "phase", "weather_id", "start_id", "target_id",
         "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
-        "duration", "steps", "final_dist", "video_path"
+        "duration", "steps", "final_dist", "video_path",
+        "elapsed_time", "current_timestamp"
     ]
+    
+    # [修改] 计算相对时间和绝对时间戳
+    current_time = time.time()
+    elapsed_time = current_time - env_manager.start_time
     
     row_data = {
         "task_id": task_id, "phase": phase, "weather_id": weather,
@@ -779,7 +799,10 @@ def log_result(env_manager, task_id, phase, weather, start, target, res, intrins
         "total_reward": res['total_reward'], "intrinsic_reward": intrinsic,
         "duration": res['duration'],
         "steps": res['steps'], "final_dist": res['final_dist'],
-        "video_path": res['video_path']
+        "video_path": res['video_path'],
+        # [修改] 写入时间数据
+        "elapsed_time": elapsed_time,
+        "current_timestamp": current_time
     }
     pd.DataFrame([row_data], columns=columns).to_csv(env_manager.summary_csv, mode='a', header=False, index=False)
 

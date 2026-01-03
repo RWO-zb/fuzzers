@@ -31,7 +31,7 @@ def main():
     group.add_argument("--test-budget", type=int, default=100, help="Number of fuzzing iterations")
     group.add_argument("--time-budget", type=int, default=None, help="Fuzzing time budget in seconds")
     
-    # [修改] 移除默认值，改为在该参数为空时自动生成带时间戳的路径
+    # 移除默认值，改为在该参数为空时自动生成带时间戳的路径
     parser.add_argument("--out-dir", default=None, help="Optional override for output directory")
     
     # MDPFuzz 参数
@@ -41,7 +41,7 @@ def main():
 
     args = parser.parse_args()
 
-    # --- [关键修改] 生成带时间戳的输出目录 ---
+    # --- 生成带时间戳的输出目录 ---
     # 格式模仿 RL_CARLA: results/YYYYMMDD_HHMMSS_mdpfuzz_seedXXX
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     
@@ -65,7 +65,7 @@ def main():
         return
 
     # 2. 初始化 Executor
-    # [关键] 传入 init_budget 用于判断 Phase 和 命名逻辑
+    # 传入 init_budget 用于判断 Phase 和 命名逻辑
     executor = PCLAExecutor(
         sim_steps=args.sim_steps,
         env=env,
@@ -83,9 +83,12 @@ def main():
         executor=executor
     )
     
-    # 4. 配置预算模式
+    # 4. 配置预算模式和 Fuzzing 参数
     kwargs = {}
     budget_arg = args.test_budget  # 默认使用次数
+
+    # [关键修改 1] 硬编码开启 Local Sensitivity
+    kwargs['local_sensitivity'] = True
 
     print("="*40)
     print(f"MDPFuzz Configuration:")
@@ -103,13 +106,18 @@ def main():
         print(f"  - Budget: {args.test_budget} iterations")
         budget_arg = args.test_budget
 
+    # 打印当前配置状态
+    print(f"  - Method: Fuzzer (No Coverage, Reward Guided Only)")
+    print(f"  - Sensitivity: Local (Math-based, No Extra Sim)")
+
     print("="*40)
 
     # 5. 开始 Fuzzing
-    # [修改] 日志文件保存到同一个 out_path 下
+    # 日志文件保存到同一个 out_path 下
     log_path = out_path / f"mdpfuzz_state"
     
-    fuzzer.fuzzing(
+    # [关键修改 2] 使用 fuzzing_no_coverage 替代 fuzzing
+    fuzzer.fuzzing_no_coverage(
         n=args.init_budget,
         policy=None,
         test_budget=budget_arg,
