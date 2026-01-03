@@ -40,7 +40,7 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=2, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=1000, type=int)
     
     args = parser.parse_args()
     

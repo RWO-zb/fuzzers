@@ -38,9 +38,20 @@ def deduplicate_data(selection_log, obs_sequences=None):
 
 def plot_1_crashes_over_time(selection_log, total_samples_count):
     dedup_samples_count = len(selection_log)
-    crash_times = [e.get('crash_time') for e in selection_log if e.get('did_crash', False) and e.get('crash_time') is not None]
+    
+    # Filter for crashes
+    crash_entries = [e for e in selection_log if e.get('did_crash', False)]
+    
+    # Get crash times for plotting
+    crash_times = [e.get('crash_time') for e in crash_entries if e.get('crash_time') is not None]
     unique_crashes_count = len(crash_times)
     
+    crash_seed_states = set()
+    for e in crash_entries:
+        seed = e.get('seed_state')
+        if seed is not None:
+            crash_seed_states.add(seed.tobytes())
+    unique_seeds_count = len(crash_seed_states)
     if not crash_times: return
 
     crash_times.sort()
@@ -61,7 +72,8 @@ def plot_1_crashes_over_time(selection_log, total_samples_count):
         f"$\\bf{{Statistics}}$\n"
         f"Total Samples: {total_samples_count}\n"
         f"Dedup. Samples: {dedup_samples_count}\n"
-        f"Unique Crashes: {unique_crashes_count}"
+        f"Unique Crashes: {unique_crashes_count}\n"
+        f"Unique Seed States: {unique_seeds_count}"
     )
     props = dict(boxstyle='round,pad=0.6', facecolor='white', alpha=0.9, edgecolor='#B0BEC5')
     plt.gca().text(0.05, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=13,

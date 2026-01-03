@@ -59,7 +59,6 @@ def main():
     parser.add_argument("--seed_number", help="Number of seeds", default=10, type=int)
     args = parser.parse_args()
     
-    # --- 创建基于种子和时间戳的唯一文件夹 ---
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
     if not os.path.exists('./results'):
@@ -174,10 +173,8 @@ def main():
     pbar = tqdm.tqdm(total=seeds_num)
     start_corpus_time = time.time()
     
-    print("--- 正在生成初始语料库 (Corpus) ---")
     while i < seeds_num and (time.time() - start_corpus_time) <= (3600*2):
         
-        # 生成 MountainCar 的初始状态
         pos = np.random.uniform(-0.6, -0.4)
         vel = 0.0
         states = np.array([pos, vel])
@@ -185,7 +182,6 @@ def main():
         state = None
         episode_reward = 0.0
         
-        # 自定义状态重置 (env.reset)
         obs = env.reset()
         env.envs[0].unwrapped.state = states
         obs = np.array([states]) 
@@ -200,16 +196,13 @@ def main():
                 # print(infos[0]['terminal_observation'][0])
                 break
         
-        # final_state 逻辑
         final_state = sequences[-1] if len(sequences) > 1 else sequences[0]
 
         state = None
         episode_reward_mutate = 0.0
 
-        # 使用 Fuzzer 的变异逻辑
         mutate_states = fuzzer.mutation(states)
 
-        # 自定义状态重置
         obs = env.reset()
         env.envs[0].unwrapped.state = mutate_states
         obs = np.array([mutate_states])
@@ -230,12 +223,6 @@ def main():
     fuzzer.count = [5] * len(fuzzer.corpus)
     fuzzer.original = copy.deepcopy(fuzzer.corpus)
 
-    print(f"--- 初始语料库生成完毕，数量：{len(fuzzer.corpus)} ---")
-    print("--- 开始 Fuzzing 循环 ---")
-
-    # =========================================================================
-    # [新增] 初始化 Trace 数据列表，用于存储所有 episodes 的 Action Gap 等信息
-    # =========================================================================
     all_traces = []
 
     start_fuzz_time = time.time()
@@ -244,7 +231,7 @@ def main():
     seedcount = 0
     
     fuzz_selection_log = []
-    all_obs_sequences = [] # 用于保存所有 observation 序列
+    all_obs_sequences = [] 
 
     while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
         seedcount += 1
@@ -263,9 +250,6 @@ def main():
 
         sequences = [obs[0]]
         
-        # =========================================================================
-        # [新增] 初始化单次 Trace 记录器
-        # =========================================================================
         trace_record = {
             "steps": [],
             "positions": [],
@@ -278,59 +262,43 @@ def main():
         }
         
         reached_goal = False
-        is_crash_condition = False  # 初始化 crash 标志
+        is_crash_condition = False 
 
         for step_idx in range(args.n_timesteps):
-            # =========================================================================
-            # [新增] 归因数据采集逻辑：提取 Q 值并计算 Gap
-            # =========================================================================
-            # 1. 转换观测值为 Tensor
             obs_tensor, _ = model.q_net.obs_to_tensor(obs)
-            # 2. 提取 Q 值 (不计算梯度)
             with th.no_grad():
                 q_values = model.q_net(obs_tensor).cpu().numpy()[0]
             
-            # 3. 计算 Action Gap
             sorted_q = np.sort(q_values)
             gap = sorted_q[-1] - sorted_q[-2]
-            
-            # 4. 预测动作 (使用模型)
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             
-            # 5. 存储这一步的数据
             trace_record["steps"].append(step_idx)
             trace_record["positions"].append(obs[0][0])
             trace_record["velocities"].append(obs[0][1])
             trace_record["action_gaps"].append(gap)
             trace_record["q_values"].append(q_values)
             trace_record["actions"].append(action[0])
-            # =========================================================================
 
             obs, reward, done, infos = env.step(action)
-            trace_record["rewards"].append(reward[0]) # 记录奖励
+            trace_record["rewards"].append(reward[0]) 
             
-            episode_reward += reward[0] # 累计奖励
+            episode_reward += reward[0]
 
             if done:
-                # 使用 terminal_observation 替代被重置的 obs
                 terminal_obs = infos[0]['terminal_observation']
                 sequences.append(terminal_obs)
-                
-                # 检查 Crash 条件 (位置 < 0.5)
                 if terminal_obs[0] < 0.5:
                     is_crash_condition = True
                 break
             else:
-                # 正常步骤记录 obs
                 sequences.append(obs[0])
         
         all_obs_sequences.append(sequences)
 
-        # 标记 Trace 结果
         trace_record["did_crash"] = is_crash_condition
         trace_record["total_reward"] = episode_reward
         
-        # 将本条 Trace 加入总列表
         all_traces.append(trace_record)
 
         intrinsic_reward = fuzzer.train_rnd(sequences)
@@ -389,13 +357,9 @@ def main():
         pickle.dump(all_obs_sequences, handle, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"Observation sequences saved to {obs_seq_file_name}")
 
-    # =========================================================================
-    # [新增] 保存详细的 Trace 归因数据 (Q值、Action Gap等)
-    # =========================================================================
     trace_data_file = os.path.join(result_path, 'trace_data.pkl')
     with open(trace_data_file, 'wb') as f:
         pickle.dump(all_traces, f)
-    print(f"详细归因数据已保存至: {trace_data_file}")
 
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")
