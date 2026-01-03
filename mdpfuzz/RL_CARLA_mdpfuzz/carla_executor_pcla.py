@@ -11,8 +11,9 @@ import pandas as pd
 from pathlib import Path
 from typing import Any
 import traceback
+import pygame # 需要导入 pygame 以支持补丁
 
-# 强制设置无头模式
+# [关键修复1] 强制使用 dummy 视频驱动，防止弹出窗口冲突
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 # --- 路径设置 ---
@@ -44,6 +45,77 @@ except ImportError as e:
     sys.exit(1)
 
 from mdpfuzz.executor import Executor
+
+# ==============================================================================
+# [关键修复2] PyGame 冲突热补丁 (Monkey Patch) - 移植自 RL_CARLA
+# ==============================================================================
+def patch_map_utils():
+    """
+    修正 map_utils 的初始化逻辑：
+    1. 使用 dummy 驱动初始化 display，确保 convert_alpha() 可用。
+    2. 拦截 flip()，避免刷新不存在的屏幕。
+    """
+    print("[INFO] Applying Robust Off-screen Rendering Patch to map_utils...")
+
+    @classmethod
+    def patched_init(cls, client, world, carla_map, player):
+        # 1. 确保 Pygame 初始化
+        pygame.init()
+        
+        # [关键修改] 即使是离屏渲染，也必须调用 set_mode 一次
+        if pygame.display.get_surface() is None:
+            cls.display = pygame.display.set_mode((320, 320))
+        else:
+            cls.display = pygame.display.get_surface()
+        
+        # 2. 清除并重新注册模块
+        map_utils.module_manager.clear_modules()
+        
+        input_module = map_utils.ModuleInput(map_utils.MODULE_INPUT)
+        hud_module = map_utils.ModuleHUD(map_utils.MODULE_HUD, 320, 320)
+        world_module = map_utils.ModuleWorld(map_utils.MODULE_WORLD, client, world, carla_map, player)
+
+        map_utils.module_manager.register_module(world_module)
+        map_utils.module_manager.register_module(hud_module)
+        map_utils.module_manager.register_module(input_module)
+        map_utils.module_manager.start_modules()
+
+        cls.world_module = world_module
+        cls.clock = pygame.time.Clock()
+
+    @classmethod
+    def patched_get_observations(cls):
+        # 获取渲染结果
+        road, lane, vehicle, pedestrian, traffic = cls.world_module.get_rendered_surfaces()
+
+        result = cls.world_module.get_hero_measurements()
+        result.update(
+            {
+                "road": np.uint8(road),
+                "lane": np.uint8(lane),
+                "vehicle": np.uint8(vehicle),
+                "pedestrian": np.uint8(pedestrian),
+                "traffic": np.uint8(traffic),
+            }
+        )
+        # [关键] 移除 pygame.display.flip()
+        return result
+
+    # 将补丁应用到原始类上
+    map_utils.Wrapper.init = patched_init
+    map_utils.Wrapper.get_observations = patched_get_observations
+
+# 立即应用补丁
+patch_map_utils()
+
+# [关键修复3] PCLA 方法补丁 (如果 PCLA 缺少 get_action_with_entropy)
+if not hasattr(PCLA, 'get_action_with_entropy'):
+    print("[INFO] Patching PCLA with get_action_with_entropy...")
+    def patched_get_action(self):
+        return self.get_action(), 0.0
+    PCLA.get_action_with_entropy = patched_get_action
+
+# ==============================================================================
 
 # --- 全局种子设置函数 ---
 def set_global_seed(seed):
@@ -155,6 +227,7 @@ class PCLAExecutor(Executor):
         self.env_seed = env.seed
         self.init_budget = init_budget # 用于判断 Phase1 (Seed) 和 Phase2 (Fuzz)
         self.execution_count = 0       # 全局执行计数器
+        self.next_benchmark_idx = 0    # [新增] 用于Phase 1按顺序遍历任务
         
         self.start_positions = self._init_start_positions()
         self.num_start_positions = len(self.start_positions)
@@ -165,7 +238,6 @@ class PCLAExecutor(Executor):
         else:
             print(f"[Info] Loaded {len(self.benchmark_tasks)} tasks from benchmark file.")
 
-        # [修改] 使用传入的 out_dir，不创建额外子文件夹
         self.out_dir = Path(out_dir)
         self.video_dir = self.out_dir / "videos"
         self.video_dir.mkdir(parents=True, exist_ok=True)
@@ -211,18 +283,33 @@ class PCLAExecutor(Executor):
         return tasks
 
     def generate_input(self, rng: np.random.Generator) -> np.ndarray:
-        if self.benchmark_tasks:
-            task_idx = rng.choice(len(self.benchmark_tasks))
-            s_idx, t_idx = self.benchmark_tasks[task_idx]
-            if s_idx >= self.num_start_positions or t_idx >= self.num_start_positions:
-                 s_idx = rng.choice(self.num_start_positions)
-                 t_idx = rng.choice(self.num_start_positions)
-                 while t_idx == s_idx: t_idx = rng.choice(self.num_start_positions)
-        else:
-            s_idx = rng.choice(self.num_start_positions)
-            t_idx = rng.choice(self.num_start_positions)
-            while t_idx == s_idx:
+        # [修改] 模拟 RL_CARLA 的任务选取逻辑
+        # 1. 如果在 Init Budget 内（Phase 1），且有Benchmark任务，按顺序取
+        # 2. 否则，随机采样
+        
+        s_idx, t_idx = 0, 0
+        is_sequential = False
+        
+        if self.benchmark_tasks and self.next_benchmark_idx < self.init_budget:
+            if self.next_benchmark_idx < len(self.benchmark_tasks):
+                s_idx, t_idx = self.benchmark_tasks[self.next_benchmark_idx]
+                self.next_benchmark_idx += 1
+                is_sequential = True
+        
+        if not is_sequential:
+            # 随机采样逻辑 (原逻辑)
+            if self.benchmark_tasks:
+                task_idx = rng.choice(len(self.benchmark_tasks))
+                s_idx, t_idx = self.benchmark_tasks[task_idx]
+                if s_idx >= self.num_start_positions or t_idx >= self.num_start_positions:
+                     s_idx = rng.choice(self.num_start_positions)
+                     t_idx = rng.choice(self.num_start_positions)
+                     while t_idx == s_idx: t_idx = rng.choice(self.num_start_positions)
+            else:
+                s_idx = rng.choice(self.num_start_positions)
                 t_idx = rng.choice(self.num_start_positions)
+                while t_idx == s_idx:
+                    t_idx = rng.choice(self.num_start_positions)
             
         weather_idx = rng.integers(0, 4)
         
@@ -284,23 +371,29 @@ class PCLAExecutor(Executor):
         final_dist = 999.0
         start_time = time.time()
         
-        # --- [关键修改] Task ID 命名逻辑 ---
-        # Phase 1: seed_000, seed_001 ... (直到 init_budget - 1)
-        # Phase 2: fuzz_0001, fuzz_0002 ... (从 1 开始计数)
+        # --- [关键修改] 种子与Task ID 生成逻辑 (严格对齐 RL_CARLA) ---
+        # RL_CARLA Phase 1: seed = args.seed + task_index
+        # RL_CARLA Phase 2: seed = args.seed + 100000 + fuzz_idx (从1开始)
+        
         if self.execution_count < self.init_budget:
             phase = "Phase1"
-            task_id = f"seed_{self.execution_count:03d}"
+            # Phase 1: 种子严格等于 env_seed + 执行次数
+            current_idx = self.execution_count
+            task_id = f"seed_{current_idx:03d}"
+            run_seed = self.env_seed + current_idx
         else:
             phase = "Phase2"
-            # Fuzz 计数从 1 开始
+            # Phase 2: fuzz_idx 从 1 开始计数
             fuzz_idx = self.execution_count - self.init_budget + 1
             task_id = f"fuzz_{fuzz_idx:04d}"
+            run_seed = self.env_seed + 100000 + fuzz_idx
 
         # 视频文件名严格对应 task_id
         video_filename = self.video_dir / f"{task_id}.mp4"
         
-        # 种子计算 (保持行为确定性)
-        run_seed = int((start_idx * 1337 + target_idx * 31 + weather_idx) % 1000000)
+        # 移除旧的 Hash 种子逻辑，使用基于序列的 run_seed
+        # set_global_seed(run_seed) 将保证该次运行的所有随机行为（光照、NPC蓝图等）
+        # 与 RL_CARLA 在相同运行次序下的行为一致。
 
         try:
             self.env.reset_world()
@@ -351,6 +444,7 @@ class PCLAExecutor(Executor):
                     carla.Location(x=npc_loc[0], y=npc_loc[1], z=npc_loc[2] + 0.3),
                     carla.Rotation(pitch=0, yaw=npc_loc[3], roll=0)
                 )
+                # 这里的 random.choice 受到 set_global_seed(run_seed) 影响，确保复现性
                 npc_bp = random.choice(bp_lib.filter('vehicle.*'))
                 npc_bp.set_attribute('role_name', 'autopilot')
                 if int(npc_bp.get_attribute('number_of_wheels')) != 4: continue
@@ -372,7 +466,8 @@ class PCLAExecutor(Executor):
                 raise RuntimeError("Empty Waypoints")
             route_maker(waypoints, route_file)
             
-            agent = PCLA("carl_carlv11", vehicle, route_file, self.env.client)
+            # [关键] 使用 Roach Agent
+            agent = PCLA("carl_roach_0", vehicle, route_file, self.env.client)
 
             # 传感器
             collision_queue = queue.Queue()
@@ -398,6 +493,7 @@ class PCLAExecutor(Executor):
             
             wrapper_initialized = False
             try:
+                # 使用补丁后的 init
                 self.env.map_wrapper.init(self.env.client, self.env.world, self.env.map, vehicle)
                 wrapper_initialized = True
             except Exception as e:
@@ -433,7 +529,7 @@ class PCLAExecutor(Executor):
                 if not collision_queue.empty():
                     _ = collision_queue.get() 
                     if step > 10: 
-                        stop_reason = "Collision" # 统一为大写，匹配 RL_CARLA
+                        stop_reason = "Collision" 
                         is_collision = True
                         break
                 
@@ -526,12 +622,14 @@ class PCLAExecutor(Executor):
                     except: pass
 
             duration = time.time() - start_time
-            # [注意] intrinsic_reward 此处无法获取(由Fuzzer计算)，故记录为0，或后续由Fuzzer日志补全
             self._log_result(task_id, phase, weather_idx, start_idx, target_idx, is_success, stop_reason, is_collision, total_reward, 0, duration, step, final_dist, final_video_path)
 
-            # 资源清理
+            # 资源清理 (增强安全性)
             for sensor in sensor_list:
-                if sensor and sensor.is_alive: sensor.destroy()
+                if sensor and sensor.is_alive: 
+                    sensor.stop()
+                    sensor.destroy()
+            
             if vehicle and vehicle.is_alive: vehicle.destroy()
             self.env.client.apply_batch([carla.command.DestroyActor(x) for x in npc_actors])
             

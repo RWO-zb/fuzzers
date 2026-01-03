@@ -11,7 +11,7 @@ LOG_FILE = 'selection_log.pkl'
 PLOT_1_FILE = 'crashes_over_unique_inputs.png'
 PLOT_2_FILE = 'full_input_space_tsne.png'
 PLOT_3_FILE = 'crash_generation_histogram.png'
-PLOT_4_FILE = 'crashes_over_time.png'  # <--- 新增配置
+PLOT_4_FILE = 'crashes_over_time.png'
 
 # --- 2. 核心辅助函数 (保持不变) ---
 
@@ -301,14 +301,12 @@ def plot_generation_histogram(deduplicated_log):
     plt.close() # 释放内存
 
 
-# --- 6. 图表4：崩溃随时间变化图 (已修改为小时) ---
+# --- 6. 图表4：崩溃随时间变化图 (保持不变) ---
 
 def plot_crashes_over_time(deduplicated_log):
     """
-    (已修改)
+    (保持不变)
     绘制独特崩溃随时间变化的累积曲线。
-    依赖于日志条目中的 'elapsed_time' 字段。
-    横坐标已转换为小时。
     """
     print(f"\n[图表 4] 正在分析崩溃随时间的变化...")
     
@@ -321,20 +319,17 @@ def plot_crashes_over_time(deduplicated_log):
             if t is not None:
                 crash_times.append(t)
             else:
-                # 如果是旧日志没有时间戳，这部分数据将被忽略
                 pass
                 
     if not crash_times:
         print("[图表 4] 未在崩溃数据中找到 'elapsed_time' 字段。无法绘制时间曲线。")
-        print("提示：请确保您运行的是更新后的 enjoy_cure.py。")
         return
 
     # 确保按时间排序
     crash_times.sort()
     
-    # --- 修改：转换为小时 ---
+    # 转换为小时
     crash_times_hours = [t / 3600.0 for t in crash_times]
-    # -----------------------
 
     # 构造累积数量
     cumulative_counts = list(range(1, len(crash_times) + 1))
@@ -346,18 +341,17 @@ def plot_crashes_over_time(deduplicated_log):
     
     plt.figure(figsize=(12, 7))
     
-    # 使用 step 图可以更清晰地显示离散的发现过程
+    # 使用 step 图
     plt.step(crash_times_hours, cumulative_counts, where='post', color='darkorange', linewidth=2, label='Cumulative Crashes')
     plt.fill_between(crash_times_hours, cumulative_counts, step='post', color='darkorange', alpha=0.1)
     
     plt.title('Cumulative Unique Crashes vs. Time')
-    plt.xlabel('Time Elapsed (hours)')  # <-- 标签已更新
+    plt.xlabel('Time Elapsed (hours)')
     plt.ylabel('Cumulative Number of Unique Crashes')
     
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.legend()
     
-    # 设置坐标轴范围更好看一点
     plt.ylim(bottom=0)
     plt.xlim(left=0)
     
@@ -369,7 +363,52 @@ def plot_crashes_over_time(deduplicated_log):
     plt.close()
 
 
-# --- 7. 主函数 ---
+# --- 7. 新增功能：统计崩溃种子 ---
+
+def analyze_crash_statistics(deduplicated_log):
+    """
+    <新增逻辑>
+    统计并打印：
+    1. 独特的崩溃输入 (mutate_state) 数量。
+    2. 导致崩溃的独特父种子 (seed_state) 数量。
+    """
+    print(f"\n[统计] 正在分析导致崩溃的种子数据...")
+    
+    unique_crash_inputs = 0
+    unique_causing_seeds = set()
+    
+    for entry in deduplicated_log:
+        if entry.get('did_crash', False):
+            unique_crash_inputs += 1
+            
+            # 获取 'seed_state' (这是导致本次变异的父种子)
+            parent_seed = entry.get('seed_state')
+            
+            if parent_seed is not None:
+                try:
+                    # 转换为 bytes 以便存入 set 去重
+                    # seed_state 可能是 numpy array 或 list
+                    if hasattr(parent_seed, 'tobytes'):
+                        seed_bytes = parent_seed.tobytes()
+                    else:
+                        seed_bytes = np.array(parent_seed).tobytes()
+                        
+                    unique_causing_seeds.add(seed_bytes)
+                except Exception as e:
+                    # 忽略无法处理的种子
+                    pass
+
+    print(f"\n" + "="*40)
+    print(f"       崩溃详细统计结果")
+    print(f"="*40)
+    print(f"  独特的崩溃输入 (Unique Mutate States): {unique_crash_inputs}")
+    print(f"  不同的导致崩溃的来源种子 (Unique Seed States): {len(unique_causing_seeds)}")
+    print(f"="*40 + "\n")
+    
+    return unique_crash_inputs, len(unique_causing_seeds)
+
+
+# --- 8. 主函数 ---
 
 def main():
     # 1. 加载原始数据
@@ -392,8 +431,11 @@ def main():
     # 5. 运行图表 3
     plot_generation_histogram(deduplicated_log)
     
-    # 6. 运行图表 4 (新增，修改为小时)
+    # 6. 运行图表 4 (修改为小时)
     plot_crashes_over_time(deduplicated_log)
+    
+    # 7. <新增> 运行统计分析
+    analyze_crash_statistics(deduplicated_log)
         
     print("\n所有分析和绘图已完成。")
 

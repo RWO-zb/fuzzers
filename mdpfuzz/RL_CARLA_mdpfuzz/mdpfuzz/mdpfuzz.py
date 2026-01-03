@@ -139,42 +139,20 @@ class Fuzzer():
 
 
     def initialize_coverage_model(self, **kwargs) -> int:
-        '''Initializes the coverage model and returns the number of executions that have been done.'''
-        exec_counter = kwargs.get('exec_counter', 0)
-        state_sequence = kwargs.pop('state_sequence', None)
-        if state_sequence is None:
-            policy = kwargs.get('policy', None)
-            random_input = kwargs.get('input', self.sampling())
-            reward, crash, state_sequence, exec_time = self.mdp(random_input, policy)
-            exec_counter += 1
-            if self.logger is not None:
-                episode_length = len(state_sequence)
-                self.logger.log(
-                    input=random_input,
-                    oracle=crash,
-                    reward=reward,
-                    episode_length=episode_length,
-                    test_exec_time=exec_time,
-                    run_time=time.time()
-                    )
-
-        # it needs at least k + 1 states (for gmm_c)
-        if len(state_sequence) < self.k + 1:
-            kwargs['exec_counter'] = exec_counter
-            return self.initialize_coverage_model(**kwargs)
-        else:
-            self.coverage_model.initialize(state_sequence)
-        print('Coverage model initialized')
-        return exec_counter
+        '''
+        [Deprecated usage] 
+        This function is kept for compatibility but logic is moved to fuzzing loop 
+        to avoid extra random executions.
+        '''
+        return 0
 
 
     def fuzzing(self, n: int, policy: Any = None, **kwargs):
         '''
         Conducts fuzzing to generate test cases for the system under test (SUT).
         '''
-        # [修改点 1] 全局计时开始：包含初始化时间，符合 RL_CARLA 的 Total Wall Clock Time 逻辑
-        start_time = time.time()
-
+        # Phase 1: Initialization / Benchmark
+        
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
         path = kwargs.get('saving_path', None)
@@ -186,26 +164,47 @@ class Fuzzer():
 
         local_sensitivity = kwargs.get('local_sensitivity', False)
 
+        # 1. 生成初始种子 (Task 0 到 Task n-1)
         initial_inputs = self.sampling(n)
         self.config['init_budget'] = n
         if kwargs.get('light_pool', False):
             pool = LightPool() # type: Pool
         else:
             pool = IndexedPool(is_integer=np.issubdtype(initial_inputs.dtype, np.integer)) # type: Pool
-
-        # initializes the coverage model by running the policy on a randomly generated input to sample states of the MDP
-        num_initial_executions = self.initialize_coverage_model(policy=policy)
-        self.config['num_initial_executions'] = num_initial_executions
         
         # 初始化阶段进度条 (Iterations)
-        pbar_init = tqdm.tqdm(total=n, desc="Initializing")
+        pbar_init = tqdm.tqdm(total=n, desc="Initializing (Phase 1)")
+        
+        model_initialized = False
+
         for state in initial_inputs:
+            # 运行测试用例 (Phase 1 Execution)
             sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, **kwargs)
-            state_sequence_conc = self._concatenate_state_sequence(state_sequence)
-            t0 = time.time()
-            coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
-            coverage_time = time.time() - t0
+            
+            # [关键修改] 在第一次获得有效数据时初始化覆盖率模型
+            if not model_initialized:
+                # 只有当序列长度满足 GMM 要求时才初始化
+                if len(state_sequence) > self.k + 1:
+                    self.coverage_model.initialize(state_sequence)
+                    model_initialized = True
+                    print('[Info] Coverage model initialized with first valid run.')
+                else:
+                    print('[Warning] Run too short to initialize coverage model, waiting for next...')
+
+            # 计算覆盖率 (如果模型已初始化)
+            coverage = 0.0
+            if model_initialized:
+                state_sequence_conc = self._concatenate_state_sequence(state_sequence)
+                t0 = time.time()
+                coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
+                coverage_time = time.time() - t0
+            else:
+                coverage_time = 0.0
+
             pool.add(state, acc_reward, coverage, sensitivity, oracle)
+            
+            # 【关键修复】将初始种子加入已评估列表，防止 Phase 2 重复执行
+            self.evaluated_solutions.append(state.tolist())
 
             if self.logger is not None:
                 episode_length = len(state_sequence)
@@ -227,54 +226,58 @@ class Fuzzer():
             pbar_init.update(1)
         pbar_init.close()
 
+        # ======================================================================
+        # Phase 2: Fuzzing
+        # ======================================================================
+        fuzz_start_time = time.time()
+
         test_budget_in_seconds = kwargs.get('test_budget_in_seconds', None)
         
-        # [修改点 2] 主循环的预算设置与进度条
         if test_budget_in_seconds is None:
-            # 次数预算逻辑
+            # 1. 迭代次数预算模式 (Iterations)
             test_budget = kwargs.get('test_budget', None)
             assert test_budget is not None
-            # accounts for the cost of the initialization
-            test_budget -=  (2 * n) + num_initial_executions
+            test_budget -= n
             pbar = tqdm.tqdm(total=test_budget, desc="Fuzzing (Iter)")
             self.config['test_budget'] = test_budget
             num_iterations = 0
         else:
-            # [关键逻辑] 时间预算：基于全局 start_time 计算
+            # 2. 时间预算模式 (Time)
             self.config['test_budget_in_seconds'] = test_budget_in_seconds
-            
-            # 计算初始化已经消耗的时间
-            elapsed_init = int(time.time() - start_time)
-            
-            # 如果初始化已经超时，直接退出
-            if elapsed_init >= test_budget_in_seconds:
-                print(f"[Warning] Initialization took {elapsed_init}s, exceeding budget {test_budget_in_seconds}s.")
-                if path is not None:
-                    self.save_configuration(path)
-                return
-
-            # 创建时间进度条，total 为总预算，初始位置为已消耗的初始化时间
-            pbar = tqdm.tqdm(total=test_budget_in_seconds, initial=elapsed_init, unit='s', desc="Fuzzing (Time)")
+            pbar = tqdm.tqdm(total=test_budget_in_seconds, unit='s', desc="Fuzzing (Time)")
             
         try:
             while True:
                 # 检查预算
                 if test_budget_in_seconds is None:
+                    # 迭代次数检查
                     if num_iterations >= test_budget:
                         break
                 else:
-                    # 检查总运行时间
-                    current_elapsed = time.time() - start_time
-                    if current_elapsed > test_budget_in_seconds:
+                    # 时间检查 (只计算 Fuzzing 阶段消耗的时间)
+                    current_fuzz_duration = time.time() - fuzz_start_time
+                    if current_fuzz_duration > test_budget_in_seconds:
+                        print(f"[Info] Time budget reached: {current_fuzz_duration:.2f}s > {test_budget_in_seconds}s")
                         break
 
                 input, acc_reward_input = pool.select(self.rng)
                 mutant = self.mutate_validate(input, **kwargs)
                 acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
-                state_sequence_conc = self._concatenate_state_sequence(state_sequence)
-                t0 = time.time()
-                coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
-                coverage_time = time.time() - t0
+                
+                coverage = 0.0
+                if model_initialized:
+                    state_sequence_conc = self._concatenate_state_sequence(state_sequence)
+                    t0 = time.time()
+                    coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
+                    coverage_time = time.time() - t0
+                else:
+                    # 如果 Phase 1 全都太短没初始化成功，尝试在这里初始化
+                    if len(state_sequence) > self.k + 1:
+                        self.coverage_model.initialize(state_sequence)
+                        model_initialized = True
+                        print('[Info] Coverage model initialized during Fuzzing phase.')
+                    coverage_time = 0.0
+
                 sensitivity = None
                 if oracle:
                     pool.add_crash(mutant)
@@ -304,8 +307,8 @@ class Fuzzer():
                     num_iterations += 1
                     pbar.update(1)
                 else:
-                    # 更新时间进度：当前总耗时 - 进度条当前位置
-                    current_elapsed_int = int(time.time() - start_time)
+                    # 更新时间进度：当前Fuzz耗时 - 进度条已显示耗时
+                    current_elapsed_int = int(time.time() - fuzz_start_time)
                     increment = current_elapsed_int - pbar.n
                     if increment > 0:
                         pbar.update(increment)
@@ -332,9 +335,6 @@ class Fuzzer():
         '''
         Works similarly as fuzzing but coverages are not computed.
         '''
-        # [修改点] 同样加入全局计时
-        start_time = time.time()
-
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
         self.config['name'] = 'Fuzzer'
@@ -354,10 +354,14 @@ class Fuzzer():
         else:
             pool = IndexedPool(is_integer=np.issubdtype(initial_inputs.dtype, np.integer)) # type: Pool
         
-        pbar_init = tqdm.tqdm(total=n, desc="Initializing")
+        # Phase 1: Init
+        pbar_init = tqdm.tqdm(total=n, desc="Initializing (Phase 1)")
         for state in initial_inputs:
             sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, **kwargs)
             pool.add(state, acc_reward, 0, sensitivity, oracle)
+            
+            # 【关键修复】同步修复无覆盖率模式下的相同 Bug
+            self.evaluated_solutions.append(state.tolist())
 
             if self.logger is not None:
                 episode_length = len(state_sequence)
@@ -377,30 +381,28 @@ class Fuzzer():
             pbar_init.update(1)
         pbar_init.close()
 
+        # Phase 2: Fuzzing Timer Start
+        fuzz_start_time = time.time()
+
         test_budget_in_seconds = kwargs.get('test_budget_in_seconds', None)
         if test_budget_in_seconds is None:
             test_budget = kwargs.get('test_budget', None)
             assert test_budget is not None
-            test_budget -=  (2 * n)
+            test_budget -= n
             pbar = tqdm.tqdm(total=test_budget, desc="Fuzzing (Iter)")
             self.config['test_budget'] = test_budget
             num_iterations = 0
         else:
             self.config['test_budget_in_seconds'] = test_budget_in_seconds
-            elapsed_init = int(time.time() - start_time)
-            if elapsed_init >= test_budget_in_seconds:
-                 print(f"[Warning] Initialization took {elapsed_init}s, exceeding budget.")
-                 if path is not None: self.save_configuration(path)
-                 return
-            pbar = tqdm.tqdm(total=test_budget_in_seconds, initial=elapsed_init, unit='s', desc="Fuzzing (Time)")
+            pbar = tqdm.tqdm(total=test_budget_in_seconds, unit='s', desc="Fuzzing (Time)")
 
         while True:
             if test_budget_in_seconds is None:
                 if num_iterations >= test_budget:
                     break
             else:
-                current_elapsed = time.time() - start_time
-                if current_elapsed > test_budget_in_seconds:
+                current_fuzz_duration = time.time() - fuzz_start_time
+                if current_fuzz_duration > test_budget_in_seconds:
                     break
 
             input, acc_reward_input = pool.select(self.rng)
@@ -432,7 +434,7 @@ class Fuzzer():
                 num_iterations += 1
                 pbar.update(1)
             else:
-                current_elapsed_int = int(time.time() - start_time)
+                current_elapsed_int = int(time.time() - fuzz_start_time)
                 increment = current_elapsed_int - pbar.n
                 if increment > 0:
                     pbar.update(increment)

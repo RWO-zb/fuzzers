@@ -358,12 +358,18 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     
     bp = world.get_blueprint_library().find('vehicle.lincoln.mkz_2017')
     bp.set_attribute('role_name', 'hero')
-    start_pose.location.z += 0.2
     
-    vehicle = world.try_spawn_actor(bp, start_pose)
+    # [核心修复3] 避免修改传入的 start_pose 引用
+    # 原代码: start_pose.location.z += 0.2 (这会导致对象污染)
+    spawn_transform = carla.Transform(
+        start_pose.location + carla.Location(z=0.2), 
+        start_pose.rotation
+    )
+    
+    vehicle = world.try_spawn_actor(bp, spawn_transform)
     if not vehicle:
         world.tick()
-        vehicle = world.try_spawn_actor(bp, start_pose)
+        vehicle = world.try_spawn_actor(bp, spawn_transform)
         if not vehicle:
             return None
 

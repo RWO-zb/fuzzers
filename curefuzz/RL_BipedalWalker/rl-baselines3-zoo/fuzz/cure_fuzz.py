@@ -52,12 +52,9 @@ class CureFuzz:
         self.current_intrinsic_reward = None
         self.current_original = None
         self.current_index = None
-
-        # --- 修改：用 'depths' 替换 'id' 和 'parent' ---
-        self.depths = []             # 列表：存储每个种子的变异代数 (generation depth)
-        self.current_depth = None    # 临时变量：存储当前被选中种子的代数
-        # --- 结束修改 ---
-
+        self.depths = []            
+        self.current_depth = None  
+        
         self.rnd = RND(input_size, hidden_size, output_size)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.rnd = self.rnd.to(self.device)
@@ -72,16 +69,12 @@ class CureFuzz:
             new_prob.append(prob)
         choose_index = np.random.choice(range(len(self.corpus)), 1, p=new_prob/np.array(new_prob).sum())[0]
 
-        # --- 修改：设置当前种子的代数 ---
         self.current_depth = self.depths[choose_index]
-        # --- 结束修改 ---
 
-       # --- 修改：捕获要返回的种子信息 ---
         selected_info = {
             'seed_state': self.corpus[choose_index],
-            'depth': self.depths[choose_index] # <--- 返回当前种子的代数
+            'depth': self.depths[choose_index] 
         }
-        # --- 结束修改 ---
 
         self.count[choose_index] -= 1
         self.current_index = choose_index
@@ -99,9 +92,7 @@ class CureFuzz:
             self.intrinsic_reward.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
-            # --- 修改：同步删除 'depths' ---
             self.depths.pop(choose_index)
-            # --- 结束修改 ---
             self.current_index = None
 
         return  selected_info
@@ -119,9 +110,7 @@ class CureFuzz:
             self.original.pop(choose_index)
             self.count.pop(choose_index)
 
-           # --- 修改：同步删除 'depths' ---
             self.depths.pop(choose_index)
-            # --- 结束修改 ---
             self.current_index = None
     
 
@@ -129,14 +118,10 @@ class CureFuzz:
         choose_index = self.current_index
         copy_pose = copy.deepcopy(current_pose)
 
-       # --- 修改：计算新的变异代数 ---
         if self.current_depth is None:
-            # 这是来自初始语料库的种子 (Generation 0)
             new_depth = 0
         else:
-            # 这是来自变异的种子 (Parent's depth + 1)
             new_depth = self.current_depth + 1
-        # --- 结束修改 ---
 
         if choose_index != None:
             self.corpus[choose_index] = copy_pose
@@ -145,9 +130,7 @@ class CureFuzz:
             self.entropy[choose_index] = entropy
             self.intrinsic_reward[choose_index] = intrinsic_reward
             self.count[choose_index] = 5
-            # --- 修改：更新 'depths' (替换) ---
-            self.depths[choose_index] = new_depth # 替换为新的代数
-            # --- 结束修改 ---
+            self.depths[choose_index] = new_depth 
         else:
             self.corpus.append(copy_pose)
             self.final_state.append(final_state)
@@ -156,9 +139,7 @@ class CureFuzz:
             self.intrinsic_reward.append(intrinsic_reward)
             self.original.append(original)
             self.count.append(5)
-            # --- 修改：添加 'depths' (追加) ---
-            self.depths.append(new_depth) # 追加新的代数
-            # --- 结束修改 ---
+            self.depths.append(new_depth)
 
 
     def mutation(self, states):
@@ -181,9 +162,7 @@ class CureFuzz:
             self.intrinsic_reward.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
-            # --- 修改：同步删除 'depths' ---
             self.depths.pop(choose_index)
-            # --- 结束修改 ---
             self.current_index = None
 
     def flatten_states(self, states):

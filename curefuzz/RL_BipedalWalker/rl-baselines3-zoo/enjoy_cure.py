@@ -54,24 +54,21 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=1000, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=2, type=int)
 
     
     args = parser.parse_args()
-    
-    # --- 创建结果目录 ---
+    # --- 新增代码：在这里创建基于种子和时间戳的唯一文件夹 ---
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
-    result_path = './results/' + result_folder + '/'
+    result_path = './results' + result_folder + '/'
     if not os.path.exists(result_path):
-        os.makedirs(result_path, exist_ok=True)
-    
-    # 重定向输出到日志文件
+        os.mkdir(result_path)
     log_file_path = os.path.join(result_path, 'cure_fuzz.txt')
     f = open(log_file_path, 'w', buffering=1)
     sys.stdout = f
     sys.stderr = f 
-    
+    # --- 结束新增 ---
     # Going through custom gym packages to let them register in the global registory
     for env_module in args.gym_packages:
         importlib.import_module(env_module)
@@ -164,7 +161,20 @@ def main():
 
     model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, **kwargs)
     states = np.random.randint(low=1, high=4, size=15)
-    
+    obs = env.reset(states)
+
+    '''
+    # for display
+    video_length = args.n_timesteps
+    env = VecVideoRecorder(
+    env,
+    "./recording/test",
+    record_video_trigger=lambda x: x == 0,
+    video_length=video_length,
+    name_prefix=f"{algo}-{env_id}",
+    )
+    obs = env.reset(states)
+    '''
     stochastic = args.stochastic or is_atari and not args.deterministic
     deterministic = not stochastic
     episode_rewards, episode_lengths = [], []
@@ -174,11 +184,6 @@ def main():
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     start_corpus_time = time.time()
-    
-    # ---------------------------------------------------------
-    # 阶段 1: 初始语料库填充 (Initial Corpus Generation)
-    # ---------------------------------------------------------
-    print("Initializing corpus...")
     while i < seeds_num and (time.time() - start_corpus_time) <= (3600*2):
         states = np.random.randint(low=1, high=4, size=15)
         state = None
@@ -192,10 +197,7 @@ def main():
             episode_reward += reward[0]
             if done:
                 break
-        
-        # 记录本次执行的最终状态
-        final_state = sequences[-2] if len(sequences) > 1 else sequences[-1]
-        
+        final_state = sequences[-2]
         state = None
         episode_reward_mutate = 0.0
         delta_states = np.random.choice(2, 15, p=[0.9, 0.1])
@@ -212,40 +214,31 @@ def main():
             episode_reward_mutate += reward[0]
             if done:
                     break
-        
         entropy = np.linalg.norm(np.asarray(final_state) - np.asarray(obs[0]))
         intrinsic_reward = fuzzer.train_rnd(sequences)    
-        # 这里的 final_state 传递给 mutation 记录
         fuzzer.further_mutation(states, episode_reward, entropy, intrinsic_reward, final_state, states)  
         i += 1
         pbar.update(1)
-
     fuzzer.count = [5] * len(fuzzer.corpus)
     fuzzer.original = copy.deepcopy(fuzzer.corpus)
 
-    # ---------------------------------------------------------
-    # 阶段 2: 模糊测试循环 (Fuzzing Loop)
-    # ---------------------------------------------------------
     start_fuzz_time = time.time()
     current_time = time.time()
     pbar1 = tqdm.tqdm(total=seeds_num)
     seedcount = 0
-    
-    # [修改点 1] 初始化日志列表
+    # --- 新增：初始化日志列表 ---
     fuzz_selection_log = []
-    
-    print("Starting fuzzing loop...")
-    while current_time - start_fuzz_time < (3600 * 0.05) and len(fuzzer.corpus) > 0 :
-        seedcount += 1
+    # --- 结束新增 ---
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
+        seedcount+=1
 
-        # [修改点 2] 获取包含深度信息的种子
+        # --- 修改：接收包含 'depth' 的字典 ---
         selected_info = fuzzer.get_pose()
         states = selected_info['seed_state']
-        current_mutation_depth = selected_info['depth']
+        current_mutation_depth = selected_info['depth'] # <--- 这是父种子的代数
+        # --- 结束修改 ---
 
-        # [修改点 3] 变异
         mutate_states = fuzzer.mutation(states)
-        
         state = None
         episode_reward = 0.0
         obs = env.reset(mutate_states)
@@ -259,78 +252,76 @@ def main():
             episode_reward += reward[0]
             if done:
                 break
-        
-        # 重新获取当前执行的 final_state，防止变量污染
-        final_state = sequences[-2] if len(sequences) > 1 else sequences[-1]
-        
         intrinsic_reward = fuzzer.train_rnd(sequences)
-        
-        # [Bug修复] 使用 fuzzer.current_final_state (父节点的最终状态) 计算距离，而不是整个列表
-        # 如果你的逻辑是计算"当前执行终点"与"父节点终点"的距离：
-        parent_final_state = fuzzer.current_final_state 
-        entropy = np.linalg.norm(np.asarray(obs[0]) - np.asarray(parent_final_state))
-
-        # [修改点 4] 崩溃判定与记录
-        did_crash = False
+        entropy = entropy = np.linalg.norm(np.asarray(obs[0]) - np.asarray(fuzzer.final_state))
+        # --- 新增：记录崩溃状态和日志条目 ---
+        did_crash = False # 默认
         if done or episode_reward < 10:
             pbar1.update(1)
             fuzzer.add_crash(mutate_states)
-            print('Found Crash! Total unique crashes: ', len(fuzzer.result))
-            did_crash = True
+            print('Found: ', len(fuzzer.result))
+            did_crash = True # <--- 标记为崩溃
         elif args.guide:
             if intrinsic_reward > intrins_theta or episode_reward < fuzzer.current_reward or entropy > entropy_theta:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
-                fuzzer.further_mutation(current_pose, episode_reward, entropy, intrinsic_reward, final_state, orig_pose)
+                fuzzer.further_mutation(current_pose, episode_reward,  entropy, intrinsic_reward, final_state, orig_pose)
         else:
             if episode_reward < fuzzer.current_reward or entropy > entropy_theta:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
-                fuzzer.further_mutation(current_pose, episode_reward, entropy, intrinsic_reward, final_state, orig_pose)
+                fuzzer.further_mutation(current_pose, episode_reward,  entropy, intrinsic_reward, final_state, orig_pose)
         
-        # [修改点 5] 记录完整日志条目
+        # --- 修改：记录更简单的日志条目（含时间戳） ---
         log_entry = {
-            'seed_state': copy.deepcopy(states),        # 变异前的父种子状态
-            'mutate_state': copy.deepcopy(mutate_states), # 实际测试的子状态
-            'parent_depth': current_mutation_depth,     # 父种子的代数
-            'did_crash': did_crash,                     # 是否导致崩溃
-            'episode_reward': episode_reward,           # 记录奖励
-            'elapsed_time': time.time() - start_fuzz_time 
+            'seed_state': selected_info['seed_state'], # 原始父种子 state
+            'mutate_state': mutate_states,          # 变异后的 state (可能导致crash)
+            'parent_depth': current_mutation_depth, # 父种子的代数 (e.g., 0)
+            'did_crash': did_crash,                 # 崩溃状态 (bool)
+            'elapsed_time': time.time() - start_fuzz_time # <--- 新增：距离主循环开始的秒数
         }
         fuzz_selection_log.append(log_entry)
+        # --- 结束修改 ---
         
-        print(f'Total seeds tested: {seedcount}, Crashes found: {len(fuzzer.result)}')
+        print(f'Total seeds tested: { seedcount}, Crashes found: {len(fuzzer.result)}')
         current_time = time.time()
-
-    # ---------------------------------------------------------
-    # 阶段 3: 保存结果
-    # ---------------------------------------------------------
     if args.guide:
         file_name = os.path.join(result_path, 'cure_crash.pkl')
     else:
         file_name = os.path.join(result_path, 'ablated_crash.pkl')
-    
     with open(file_name, 'wb') as handle:
         pickle.dump(fuzzer.result, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        
-    # [修改点 6] 保存选择日志
     log_file_name = os.path.join(result_path, 'selection_log.pkl')
     with open(log_file_name, 'wb') as handle:
         pickle.dump(fuzz_selection_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"Selection log saved to {log_file_name}")
 
+
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")
+
     if args.verbose > 0 and len(episode_rewards) > 0:
         print(f"{len(episode_rewards)} Episodes")
         print(f"Mean reward: {np.mean(episode_rewards):.2f} +/- {np.std(episode_rewards):.2f}")
+
     if args.verbose > 0 and len(episode_lengths) > 0:
         print(f"Mean episode length: {np.mean(episode_lengths):.2f} +/- {np.std(episode_lengths):.2f}")
 
     if not args.no_render:
-        env.close()
+        if args.n_envs == 1 and "Bullet" not in env_id and not is_atari and isinstance(env, VecEnv):
+            while isinstance(env, VecEnvWrapper):
+                env = env.venv
+            if isinstance(env, DummyVecEnv):
+                env.envs[0].env.close()
+            else:
+                env.close()
+        else:
+            env.close()
+
 
 if __name__ == "__main__":
+    #f = open('./results'+result_folder+'/cure_fuzz.txt', 'w', buffering=1)
+    #sys.stdout = f
     start_time = datetime.now()
     start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"--- start time: {start_time_str} ---")
