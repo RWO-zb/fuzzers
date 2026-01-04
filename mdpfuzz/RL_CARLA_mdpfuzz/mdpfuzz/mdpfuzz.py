@@ -90,18 +90,17 @@ class Fuzzer():
         return mutate_states
 
 
-    def mdp(self, state: np.ndarray, policy: Any = None) -> Tuple[float, bool, np.ndarray, float]:
-        '''Returns the accumulated reward, whether a crash is detected and the state sequence.'''
-        episode_reward, done, obs_seq, exec_time = self.executor.execute_policy(state, policy)
-        return episode_reward, done, obs_seq, exec_time
+    def mdp(self, state: np.ndarray, policy: Any = None) -> Tuple[float, bool, bool, np.ndarray, float]:
+        '''Returns the accumulated reward, crash, SUCCESS, state sequence and exec time.'''
+        # [修改] 接收 5 个返回值
+        episode_reward, crash, success, obs_seq, exec_time = self.executor.execute_policy(state, policy)
+        return episode_reward, crash, success, obs_seq, exec_time
 
 
-    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, **kwargs) -> Tuple[float, float, bool, List[np.ndarray], float]:
+    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, **kwargs) -> Tuple[float, float, bool, bool, List[np.ndarray], float]:
         '''
         Computes the sensitivity of the state @state.
-        It first perturbs the state and computes the perturbation quantity.
-        Then, the two states are executed and the sensitivity is computed.
-        It returns the latter, as well as the results of the execution for the state (acc. reward, sequence, oracle and execution time).
+        [修改] 更新为处理 success 标志
         '''
         # perturbs the state and computes the perturbation
         perturbed_state = self.mutate_validate(state, **kwargs)
@@ -109,13 +108,14 @@ class Fuzzer():
 
         # runs the two states if no accumulated reward is provided
         if acc_reward is None:
-            acc_reward, crash, state_sequence, exec_time = self.mdp(state, policy)
+            acc_reward, crash, success, state_sequence, exec_time = self.mdp(state, policy)
         else:
             state_sequence = []
             crash = None
+            success = None
             exec_time = None
 
-        acc_reward_perturbed, crash_perturbed, state_sequence_perturbed, exec_time_perturbed = self.mdp(perturbed_state, policy)
+        acc_reward_perturbed, crash_perturbed, success_perturbed, state_sequence_perturbed, exec_time_perturbed = self.mdp(perturbed_state, policy)
         if self.logger is not None:
             episode_length = len(state_sequence_perturbed)
             self.logger.log(
@@ -130,7 +130,7 @@ class Fuzzer():
         # computes the sensitivity, the coverage, and adds test case in the pool
         sensitivity = np.abs(acc_reward - acc_reward_perturbed) / perturbation
 
-        return sensitivity, acc_reward, crash, state_sequence, exec_time
+        return sensitivity, acc_reward, crash, success, state_sequence, exec_time
 
 
     def local_sensitivity(self, state: np.ndarray, state_mutate: np.ndarray, state_reward: float, state_mutate_reward: float):
@@ -164,7 +164,7 @@ class Fuzzer():
 
         local_sensitivity = kwargs.get('local_sensitivity', False)
 
-        # 1. 生成初始种子 (Task 0 到 Task n-1)
+        # 1. 生成初始种子
         initial_inputs = self.sampling(n)
         self.config['init_budget'] = n
         if kwargs.get('light_pool', False):
@@ -172,18 +172,16 @@ class Fuzzer():
         else:
             pool = IndexedPool(is_integer=np.issubdtype(initial_inputs.dtype, np.integer)) # type: Pool
         
-        # 初始化阶段进度条 (Iterations)
+        # 初始化阶段进度条
         pbar_init = tqdm.tqdm(total=n, desc="Initializing (Phase 1)")
         
         model_initialized = False
 
         for state in initial_inputs:
-            # 运行测试用例 (Phase 1 Execution)
-            sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, **kwargs)
+            # [修改] 解包 6 个值
+            sensitivity, acc_reward, oracle, success, state_sequence, exec_time = self.sentivity(state, policy=policy, **kwargs)
             
-            # [关键修改] 在第一次获得有效数据时初始化覆盖率模型
             if not model_initialized:
-                # 只有当序列长度满足 GMM 要求时才初始化
                 if len(state_sequence) > self.k + 1:
                     self.coverage_model.initialize(state_sequence)
                     model_initialized = True
@@ -191,7 +189,6 @@ class Fuzzer():
                 else:
                     print('[Warning] Run too short to initialize coverage model, waiting for next...')
 
-            # 计算覆盖率 (如果模型已初始化)
             coverage = 0.0
             if model_initialized:
                 state_sequence_conc = self._concatenate_state_sequence(state_sequence)
@@ -203,7 +200,6 @@ class Fuzzer():
 
             pool.add(state, acc_reward, coverage, sensitivity, oracle)
             
-            # 【关键修复】将初始种子加入已评估列表，防止 Phase 2 重复执行
             self.evaluated_solutions.append(state.tolist())
 
             if self.logger is not None:
@@ -234,7 +230,6 @@ class Fuzzer():
         test_budget_in_seconds = kwargs.get('test_budget_in_seconds', None)
         
         if test_budget_in_seconds is None:
-            # 1. 迭代次数预算模式 (Iterations)
             test_budget = kwargs.get('test_budget', None)
             assert test_budget is not None
             test_budget -= n
@@ -242,19 +237,15 @@ class Fuzzer():
             self.config['test_budget'] = test_budget
             num_iterations = 0
         else:
-            # 2. 时间预算模式 (Time)
             self.config['test_budget_in_seconds'] = test_budget_in_seconds
             pbar = tqdm.tqdm(total=test_budget_in_seconds, unit='s', desc="Fuzzing (Time)")
             
         try:
             while True:
-                # 检查预算
                 if test_budget_in_seconds is None:
-                    # 迭代次数检查
                     if num_iterations >= test_budget:
                         break
                 else:
-                    # 时间检查 (只计算 Fuzzing 阶段消耗的时间)
                     current_fuzz_duration = time.time() - fuzz_start_time
                     if current_fuzz_duration > test_budget_in_seconds:
                         print(f"[Info] Time budget reached: {current_fuzz_duration:.2f}s > {test_budget_in_seconds}s")
@@ -262,7 +253,8 @@ class Fuzzer():
 
                 input, acc_reward_input = pool.select(self.rng)
                 mutant = self.mutate_validate(input, **kwargs)
-                acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
+                # [修改] 解包 5 个值
+                acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(mutant, policy)
                 
                 coverage = 0.0
                 if model_initialized:
@@ -271,7 +263,6 @@ class Fuzzer():
                     coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
                     coverage_time = time.time() - t0
                 else:
-                    # 如果 Phase 1 全都太短没初始化成功，尝试在这里初始化
                     if len(state_sequence) > self.k + 1:
                         self.coverage_model.initialize(state_sequence)
                         model_initialized = True
@@ -285,7 +276,8 @@ class Fuzzer():
                     if local_sensitivity:
                         sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                     else:
-                        sensitivity, _acc_reward_mutant_copy, _none_oracle, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, **kwargs)
+                        # [修改] 解包 6 个值
+                        sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, **kwargs)
                     pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle)
 
                 if self.logger is not None:
@@ -302,12 +294,10 @@ class Fuzzer():
                         run_time=time.time()
                     )
 
-                # 更新进度条
                 if test_budget_in_seconds is None:
                     num_iterations += 1
                     pbar.update(1)
                 else:
-                    # 更新时间进度：当前Fuzz耗时 - 进度条已显示耗时
                     current_elapsed_int = int(time.time() - fuzz_start_time)
                     increment = current_elapsed_int - pbar.n
                     if increment > 0:
@@ -319,14 +309,12 @@ class Fuzzer():
             traceback.print_exc()
 
         pbar.close()
-        # saves at least the configuration and the history of the input selection (if Pool allows)
         if path is not None:
             self.save_configuration(path)
             np.savetxt(path + '_selected.txt', pool.selected, fmt='%1.0f', delimiter=',')
             if not kwargs.get('save_logs_only', False):
                 self.coverage_model.save(path)
                 self.save_evaluated_solutions(path)
-                # saves pool only if not LightPool
                 if not kwargs.get('light_pool', False):
                     pool.save(path)
 
@@ -347,22 +335,45 @@ class Fuzzer():
 
         local_sensitivity = kwargs.get('local_sensitivity', False)
 
-        initial_inputs = self.sampling(n)
+        # 转换为 list 以便动态添加
+        initial_inputs = self.sampling(n).tolist()
         self.config['init_budget'] = n
         if kwargs.get('light_pool', False):
             pool = LightPool() # type: Pool
         else:
-            pool = IndexedPool(is_integer=np.issubdtype(initial_inputs.dtype, np.integer)) # type: Pool
+            pool = IndexedPool(is_integer=np.issubdtype(np.array(initial_inputs).dtype, np.integer)) # type: Pool
         
-        # Phase 1: Init
+        # ======================================================================
+        # Phase 1: Init (Strict Seed Selection)
+        # ======================================================================
         pbar_init = tqdm.tqdm(total=n, desc="Initializing (Phase 1)")
-        for state in initial_inputs:
-            sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, **kwargs)
-            pool.add(state, acc_reward, 0, sensitivity, oracle)
+        
+        successful_seeds = 0
+        input_idx = 0
+        
+        # [修改] 使用 while 循环直到找到 n 个成功的种子
+        while successful_seeds < n:
+            # 如果预生成的输入用完了，动态补充新种子
+            if input_idx >= len(initial_inputs):
+                # [FIXED] 动态生成种子时不应使用 [0] 索引，而是保留完整向量
+                # initial_inputs.append(self.sampling(1)[0]) # <--- ORIGINAL BUG
+                initial_inputs.append(self.sampling(1).tolist())
             
-            # 【关键修复】同步修复无覆盖率模式下的相同 Bug
-            self.evaluated_solutions.append(state.tolist())
-
+            state = np.array(initial_inputs[input_idx])
+            input_idx += 1
+            
+            # 1. 运行 Seed (不计算敏感度，不跑变异体)
+            # [修改] 解包 5 个值
+            acc_reward, oracle, is_success, state_sequence, exec_time = self.mdp(state, policy)
+            
+            # 2. 只有成功的才加入 Pool
+            if is_success:
+                pool.add(state, acc_reward, 0, 0.0, oracle)
+                self.evaluated_solutions.append(state.tolist())
+                successful_seeds += 1
+                pbar_init.update(1)
+            
+            # 3. 记录日志 (Failed seeds 也会被记录，但不进入 pool)
             if self.logger is not None:
                 episode_length = len(state_sequence)
                 self.logger.log(
@@ -370,15 +381,13 @@ class Fuzzer():
                     oracle=oracle,
                     reward=acc_reward,
                     episode_length=episode_length,
-                    sensitivity=sensitivity,
+                    sensitivity=0.0,
                     test_exec_time=exec_time,
                     run_time=time.time()
                 )
 
-            if oracle:
-                pool.add_crash(state)
+            # 失败的种子在此处被直接丢弃，进入下一次循环
 
-            pbar_init.update(1)
         pbar_init.close()
 
         # Phase 2: Fuzzing Timer Start
@@ -407,7 +416,8 @@ class Fuzzer():
 
             input, acc_reward_input = pool.select(self.rng)
             mutant = self.mutate_validate(input, **kwargs)
-            acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
+            # [修改] 解包 5 个值
+            acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(mutant, policy)
             sensitivity = None
             if oracle:
                 pool.add_crash(mutant)
@@ -415,7 +425,8 @@ class Fuzzer():
                 if local_sensitivity:
                     sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                 else:
-                    sensitivity, _acc_reward_mutant_copy, _none_oracle, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, **kwargs)
+                    # [修改] 解包 6 个值
+                    sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, **kwargs)
                 pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle)
 
             if self.logger is not None:
@@ -520,7 +531,8 @@ class Fuzzer():
                     execute = False
 
             if execute:
-                acc_reward, oracle, state_sequence, exec_time = self.mdp(random_input, policy)
+                # [修改] 解包 5 个值
+                acc_reward, oracle, success, state_sequence, exec_time = self.mdp(random_input, policy)
                 episode_length = len(state_sequence)
                 self.logger.log(
                     input=random_input,

@@ -102,6 +102,73 @@ if not hasattr(PCLA, 'get_action_with_entropy'):
     PCLA.get_action_with_entropy = patched_get_action
 
 # ==============================================================================
+# Diversity Manager 1: Spatial (State Coverage & Crash Location)
+# ==============================================================================
+class DiversityManager:
+    def __init__(self, x_range, y_range, num_bins=100):
+        self.x_min, self.x_max = x_range
+        self.y_min, self.y_max = y_range
+        self.num_bins = num_bins
+        self.visited_states = set()
+        self.crash_states = set()
+        
+    def get_grid_id(self, x, y):
+        norm_x = (x - self.x_min) / (self.x_max - self.x_min + 1e-5)
+        norm_y = (y - self.y_min) / (self.y_max - self.y_min + 1e-5)
+        norm_x = np.clip(norm_x, 0, 1)
+        norm_y = np.clip(norm_y, 0, 1)
+        idx_x = int(norm_x * self.num_bins)
+        idx_y = int(norm_y * self.num_bins)
+        if idx_x == self.num_bins: idx_x -= 1
+        if idx_y == self.num_bins: idx_y -= 1
+        return (idx_x, idx_y)
+
+    def record_step(self, x, y):
+        grid_id = self.get_grid_id(x, y)
+        self.visited_states.add(grid_id)
+
+    def record_crash(self, x, y):
+        grid_id = self.get_grid_id(x, y)
+        self.crash_states.add(grid_id)
+
+    def get_metrics(self):
+        total_grids = self.num_bins * self.num_bins
+        coverage = len(self.visited_states) / total_grids
+        distinct_crashes = len(self.crash_states)
+        return coverage, distinct_crashes
+
+# ==============================================================================
+# Diversity Manager 2: Behavior (QD-Fuzz Logic)
+# ==============================================================================
+class BehaviorDiversityManager:
+    def __init__(self, speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20):
+        self.speed_min, self.speed_max = speed_range
+        self.steer_min, self.steer_max = steer_range
+        self.num_bins = num_bins
+        self.behavior_archive = set()
+        self.fault_archive = set() 
+
+    def get_bin_index(self, value, v_min, v_max):
+        norm = (value - v_min) / (v_max - v_min + 1e-6)
+        norm = np.clip(norm, 0, 1)
+        idx = int(norm * self.num_bins)
+        if idx == self.num_bins: idx -= 1
+        return idx
+
+    def record_episode(self, avg_speed, steer_std, is_failure):
+        idx_speed = self.get_bin_index(avg_speed, self.speed_min, self.speed_max)
+        idx_steer = self.get_bin_index(steer_std, self.steer_min, self.steer_max)
+        behavior_signature = (idx_speed, idx_steer)
+        self.behavior_archive.add(behavior_signature)
+        if is_failure:
+            self.fault_archive.add(behavior_signature)
+
+    def get_metrics(self):
+        behavior_count = len(self.behavior_archive)
+        fault_diversity_count = len(self.fault_archive)
+        return behavior_count, fault_diversity_count
+
+# ==============================================================================
 
 def set_global_seed(seed):
     random.seed(seed)
@@ -122,7 +189,6 @@ def get_enhanced_state_vector(vehicle, birdview_obs, target_location, command=2.
     v = vehicle.get_velocity()
     a = vehicle.get_acceleration()
     fwd = t.get_forward_vector()
-    
     physical_state = np.array([
         t.location.x, t.location.y, t.location.z, 
         fwd.x, fwd.y, fwd.z,                      
@@ -130,9 +196,7 @@ def get_enhanced_state_vector(vehicle, birdview_obs, target_location, command=2.
         a.x, a.y, a.z,                            
         float(command)                            
     ])
-
     target_info = np.array([target_location.x, target_location.y])
-    
     if birdview_obs is not None and 'vehicle' in birdview_obs:
         vehicle_pixels = birdview_obs['vehicle']
         vehicle_index = np.nonzero(vehicle_pixels)
@@ -144,7 +208,6 @@ def get_enhanced_state_vector(vehicle, birdview_obs, target_location, command=2.
         final_state = np.hstack((physical_state, target_info, vehicle_stats))
     else:
         final_state = np.hstack((physical_state, target_info, np.zeros(3)))
-        
     return final_state
 
 def calculate_reward(prev_distance, cur_distance, cur_collid, cur_invade, cur_speed, prev_speed):
@@ -152,15 +215,8 @@ def calculate_reward(prev_distance, cur_distance, cur_collid, cur_invade, cur_sp
     cur_speed_norm = np.linalg.norm(cur_speed)
     prev_speed_norm = np.linalg.norm(prev_speed)
     r_speed = 0.2 * (cur_speed_norm - prev_speed_norm)
-    
-    r_collision = 0.0
-    if cur_collid:
-        r_collision = -100 * cur_speed_norm
-    
-    r_invade = 0.0
-    if cur_invade:
-        r_invade = -cur_speed_norm
-        
+    r_collision = -100 * cur_speed_norm if cur_collid else 0.0
+    r_invade = -cur_speed_norm if cur_invade else 0.0
     total_reward = r_dist + r_speed + r_collision + r_invade
     return total_reward
 
@@ -213,8 +269,21 @@ class PCLAExecutor(Executor):
         self.execution_count = 0       
         self.next_benchmark_idx = 0    
         
-        # [修改] 记录实验开始的绝对时间戳，用于计算累计时间
         self.experiment_start_time = time.time()
+        # 注意：不再需要在 Executor 内部维护 phase1_successful_seeds，该逻辑移至 mdpfuzz.py 控制
+
+        map_bounds = {
+            "Town01": ((-20, 420), (-20, 350)),
+            "Town02": ((-20, 200), (-20, 320)),
+            "Town03": ((-250, 250), (-250, 250)),
+            "Town04": ((-500, 500), (-500, 500))
+        }
+        current_bounds = map_bounds.get(env.town_name, ((-500, 500), (-500, 500)))
+        
+        self.diversity_manager = DiversityManager(current_bounds[0], current_bounds[1], num_bins=100)
+        self.behavior_manager = BehaviorDiversityManager(speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20)
+        
+        print(f"[Info] Diversity Managers initialized for {env.town_name}")
         
         self.start_positions = self._init_start_positions()
         self.num_start_positions = len(self.start_positions)
@@ -238,11 +307,12 @@ class PCLAExecutor(Executor):
         self.rng = np.random.default_rng(seed=int(time.time()))
 
     def _init_csv(self):
-        # [修改] 增加 global_time 列
         columns = [
             "task_id", "phase", "global_time", "weather_id", "start_id", "target_id",
             "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
-            "duration", "steps", "final_dist", "video_path"
+            "duration", "steps", "final_dist", "video_path",
+            "state_coverage", "distinct_crashes", "final_x", "final_y",
+            "behavior_count", "fault_behavior_count", "avg_speed", "steer_std"
         ]
         pd.DataFrame(columns=columns).to_csv(self.csv_file, index=False)
 
@@ -332,280 +402,305 @@ class PCLAExecutor(Executor):
         return None
 
     def execute_policy(self, input: np.ndarray, policy: Any) -> tuple:
-        while True:
-            should_log = True
-            
-            print(f"[Debug] Input Vector Header: Weather={int(input[0])}, Target={int(input[1])}, StartID={int(input[2])}")
+        # [核心修改] 移除 while True，由外部控制循环
+        
+        print(f"[Debug] Input Vector Header: Weather={int(input[0])}, Target={int(input[1])}, StartID={int(input[2])}")
 
-            weather_idx = int(input[0])
-            target_idx = int(input[1])
-            start_idx = int(input[2]) 
-            
-            ego_pose_arr = input[3:7]
-            npc_poses_arr = input[7:]
-            
-            vehicle = None
-            npc_actors = []
-            sensor_list = []
-            route_file = None
-            video_writer = None
-            agent = None
-            
-            stop_reason = "timeout"
-            is_success = False
-            is_collision = False
-            total_reward = 0
-            step = 0
-            final_dist = 999.0
-            start_time = time.time()
-            
-            # --- Phase Logic ---
-            is_phase1 = (self.execution_count < self.init_budget * 2)
-            
-            if is_phase1:
-                phase = "Phase1"
-                current_idx = self.execution_count
-                task_id = f"seed_{current_idx:03d}"
-                run_seed = self.env_seed + current_idx
-            else:
-                phase = "Phase2"
-                fuzz_idx = self.execution_count - (self.init_budget * 2) + 1
-                task_id = f"fuzz_{fuzz_idx:04d}"
-                run_seed = self.env_seed + 100000 + fuzz_idx
+        weather_idx = int(input[0])
+        target_idx = int(input[1])
+        start_idx = int(input[2]) 
+        
+        ego_pose_arr = input[3:7]
+        npc_poses_arr = input[7:]
+        
+        vehicle = None
+        npc_actors = []
+        sensor_list = []
+        route_file = None
+        video_writer = None
+        agent = None
+        
+        stop_reason = "timeout"
+        is_success = False
+        is_collision = False
+        total_reward = 0
+        step = 0
+        final_dist = 999.0
+        start_time = time.time()
 
-            video_filename = self.video_dir / f"{task_id}.mp4"
+        episode_visited_states = []
+        episode_crash_pos = None
+        episode_speeds = []
+        episode_steers = []
+        
+        # 命名逻辑: 依据 execution_count 判断 Phase
+        # 注意: 这里的 init_budget 需要与外部逻辑一致
+        # Phase 1: 0 ~ init_budget*2 (预留空间) -> 但实际现在完全由 mdpfuzz 逻辑决定
+        # 为了兼容文件名，我们简单判断：
+        is_phase1 = (self.execution_count < self.init_budget * 2)
+        
+        if is_phase1:
+            phase = "Phase1"
+            current_idx = self.execution_count
+            task_id = f"seed_{current_idx:03d}"
+            run_seed = self.env_seed + current_idx
+        else:
+            phase = "Phase2"
+            fuzz_idx = self.execution_count - (self.init_budget * 2) + 1
+            task_id = f"fuzz_{fuzz_idx:04d}"
+            run_seed = self.env_seed + 100000 + fuzz_idx
+
+        video_filename = self.video_dir / f"{task_id}.mp4"
+        
+        try:
+            self.env.reset_world()
             
+            set_global_seed(run_seed)
+            self.env.traffic_manager.set_random_device_seed(run_seed)
+
             try:
-                self.env.reset_world()
-                
-                set_global_seed(run_seed)
-                self.env.traffic_manager.set_random_device_seed(run_seed)
+                traffic_lights = self.env.world.get_actors().filter('*traffic_light*')
+                for tl in traffic_lights:
+                    tl.set_state(carla.TrafficLightState.Green)
+                    tl.freeze(True)
+                self.env.world.tick()
+            except Exception as e:
+                print(f"[Warning] Failed to set traffic lights: {e}")
 
-                try:
-                    traffic_lights = self.env.world.get_actors().filter('*traffic_light*')
-                    for tl in traffic_lights:
-                        tl.set_state(carla.TrafficLightState.Green)
-                        tl.freeze(True)
-                    self.env.world.tick()
-                except Exception as e:
-                    print(f"[Warning] Failed to set traffic lights: {e}")
-
-                weathers = {
-                    0: carla.WeatherParameters.ClearNoon,
-                    1: carla.WeatherParameters.WetNoon,
-                    2: carla.WeatherParameters.HardRainNoon,
-                    3: carla.WeatherParameters.ClearSunset,
-                }
-                self.env.world.set_weather(weathers.get(weather_idx, carla.WeatherParameters.ClearNoon))
-                
-                # Ego
-                ego_transform = carla.Transform(
-                    carla.Location(x=ego_pose_arr[0], y=ego_pose_arr[1], z=ego_pose_arr[2] + 0.5), 
-                    carla.Rotation(pitch=0, yaw=ego_pose_arr[3], roll=0)
-                )
-                
-                bp_lib = self.env.world.get_blueprint_library()
-                ego_bp = bp_lib.find('vehicle.lincoln.mkz_2017')
-                ego_bp.set_attribute('role_name', 'hero')
-                
+            weathers = {
+                0: carla.WeatherParameters.ClearNoon,
+                1: carla.WeatherParameters.WetNoon,
+                2: carla.WeatherParameters.HardRainNoon,
+                3: carla.WeatherParameters.ClearSunset,
+            }
+            self.env.world.set_weather(weathers.get(weather_idx, carla.WeatherParameters.ClearNoon))
+            
+            ego_transform = carla.Transform(
+                carla.Location(x=ego_pose_arr[0], y=ego_pose_arr[1], z=ego_pose_arr[2] + 0.5), 
+                carla.Rotation(pitch=0, yaw=ego_pose_arr[3], roll=0)
+            )
+            
+            bp_lib = self.env.world.get_blueprint_library()
+            ego_bp = bp_lib.find('vehicle.lincoln.mkz_2017')
+            ego_bp.set_attribute('role_name', 'hero')
+            
+            vehicle = self.env.world.try_spawn_actor(ego_bp, ego_transform)
+            if not vehicle:
+                ego_transform.location.z += 0.5
                 vehicle = self.env.world.try_spawn_actor(ego_bp, ego_transform)
                 if not vehicle:
-                    ego_transform.location.z += 0.5
-                    vehicle = self.env.world.try_spawn_actor(ego_bp, ego_transform)
-                    if not vehicle:
-                        raise RuntimeError("Failed to spawn ego vehicle")
+                    raise RuntimeError("Failed to spawn ego vehicle")
 
-                # NPC
-                for i in range(0, len(npc_poses_arr), 4):
-                    npc_loc = npc_poses_arr[i:i+4]
-                    npc_trans = carla.Transform(
-                        carla.Location(x=npc_loc[0], y=npc_loc[1], z=npc_loc[2] + 0.3),
-                        carla.Rotation(pitch=0, yaw=npc_loc[3], roll=0)
-                    )
-                    npc_bp = random.choice(bp_lib.filter('vehicle.*'))
-                    npc_bp.set_attribute('role_name', 'autopilot')
-                    if int(npc_bp.get_attribute('number_of_wheels')) != 4: continue
-                    
-                    npc = self.env.world.try_spawn_actor(npc_bp, npc_trans)
-                    if npc:
-                        npc.set_autopilot(True, self.env.tm_port)
-                        npc_actors.append(npc)
-
-                for _ in range(10):
-                    self.env.world.tick()
-                
-                target_transform = self.env.spawn_points[target_idx]
-                route_file = f"route_mdpfuzz_{task_id}.xml"
-                
-                waypoints = location_to_waypoint(self.env.client, ego_transform.location, target_transform.location)
-                if not waypoints:
-                    print(f"[Error] No waypoints found for Task {task_id}")
-                    raise RuntimeError("Empty Waypoints")
-                route_maker(waypoints, route_file)
-                
-                agent = PCLA("carl_roach_0", vehicle, route_file, self.env.client)
-
-                collision_queue = queue.Queue()
-                collision_sensor = self.env.world.spawn_actor(
-                    bp_lib.find('sensor.other.collision'), carla.Transform(), attach_to=vehicle
+            for i in range(0, len(npc_poses_arr), 4):
+                npc_loc = npc_poses_arr[i:i+4]
+                npc_trans = carla.Transform(
+                    carla.Location(x=npc_loc[0], y=npc_loc[1], z=npc_loc[2] + 0.3),
+                    carla.Rotation(pitch=0, yaw=npc_loc[3], roll=0)
                 )
-                collision_sensor.listen(collision_queue.put)
-                sensor_list.append(collision_sensor)
+                npc_bp = random.choice(bp_lib.filter('vehicle.*'))
+                npc_bp.set_attribute('role_name', 'autopilot')
+                if int(npc_bp.get_attribute('number_of_wheels')) != 4: continue
                 
-                camera_bp = bp_lib.find('sensor.camera.rgb')
-                camera_bp.set_attribute('image_size_x', '800')
-                camera_bp.set_attribute('image_size_y', '600')
-                camera_bp.set_attribute('sensor_tick', '0.05')
-                camera_transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-15))
-                camera_sensor = self.env.world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
-                image_queue = queue.Queue()
-                camera_sensor.listen(image_queue.put)
-                
-                video_writer = cv2.VideoWriter(str(video_filename), cv2.VideoWriter_fourcc(*'mp4v'), 20.0, (800, 600))
-                
-                wrapper_initialized = False
-                try:
-                    self.env.map_wrapper.init(self.env.client, self.env.world, self.env.map, vehicle)
-                    wrapper_initialized = True
-                except Exception as e:
-                    print(f"[Warning] Map wrapper init failed: {e}")
+                npc = self.env.world.try_spawn_actor(npc_bp, npc_trans)
+                if npc:
+                    npc.set_autopilot(True, self.env.tm_port)
+                    npc_actors.append(npc)
 
-                sequence = []
-                start_time = time.time()
-                prev_distance = ego_transform.location.distance(target_transform.location)
-                prev_speed = np.array([0, 0, 0])
-                
-                # --- Simulation Loop ---
-                for step in range(self.sim_steps):
-                    self.env.world.tick()
-                    
-                    if video_writer is not None and video_writer.isOpened():
-                        while not image_queue.empty():
-                            image = image_queue.get()
-                            array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-                            array = np.reshape(array, (600, 800, 4))[:, :, :3]
-                            video_writer.write(array)
-                    else:
-                        while not image_queue.empty(): image_queue.get()
-                    
-                    obs_birdview = None
-                    if wrapper_initialized:
-                        try:
-                            self.env.map_wrapper.tick()
-                            obs_birdview = self.env.map_wrapper.get_observations()
-                        except: pass
-                    
-                    if not collision_queue.empty():
-                        _ = collision_queue.get() 
-                        if step > 10: 
-                            stop_reason = "Collision" 
-                            is_collision = True
-                            break
-                    
-                    if not vehicle.is_alive: 
-                        stop_reason = "VehicleDestroyed"
-                        break
-
-                    try:
-                        control, _ = agent.get_action_with_entropy()
-                        vehicle.apply_control(control if control else carla.VehicleControl(brake=1.0))
-                    except Exception as e:
-                        stop_reason = "agent_error"
-                        break
-                    
-                    v = vehicle.get_velocity()
-                    cur_speed = np.array([v.x, v.y, v.z])
-                    cur_loc = vehicle.get_location()
-                    cur_distance = cur_loc.distance(target_transform.location)
-                    
-                    reward = calculate_reward(prev_distance, cur_distance, is_collision, False, cur_speed, prev_speed)
-                    total_reward += reward
-
-                    current_command = 2.0
-                    try:
-                        real_agent = agent.agent_instance if hasattr(agent, 'agent_instance') else agent
-                        if hasattr(real_agent, 'route_planner'):
-                            planner = real_agent.route_planner
-                            if planner.route and planner.index < len(planner.route):
-                                cmd = planner.route[planner.index][1]
-                                current_command = float(cmd.value) if hasattr(cmd, 'value') else float(cmd)
-                    except: pass
-                    
-                    state_vec = get_enhanced_state_vector(vehicle, obs_birdview, target_transform.location, command=current_command)
-                    sequence.append(state_vec)
-                    
-                    prev_distance = cur_distance
-                    prev_speed = cur_speed
-                    final_dist = cur_distance
-                    
-                    if cur_distance < 5.0:
-                        stop_reason = "Success"
-                        is_success = True
-                        break
-
-            except Exception as e:
-                print(f"[Execution Error] {e}")
-                stop_reason = f"error: {str(e)[:30]}"
-                is_collision = True 
+            for _ in range(10):
+                self.env.world.tick()
             
-            finally:
-                # Cleanup
+            target_transform = self.env.spawn_points[target_idx]
+            route_file = f"route_mdpfuzz_{task_id}.xml"
+            
+            waypoints = location_to_waypoint(self.env.client, ego_transform.location, target_transform.location)
+            if not waypoints:
+                print(f"[Error] No waypoints found for Task {task_id}")
+                raise RuntimeError("Empty Waypoints")
+            route_maker(waypoints, route_file)
+            
+            agent = PCLA("carl_roach_0", vehicle, route_file, self.env.client)
+
+            collision_queue = queue.Queue()
+            collision_sensor = self.env.world.spawn_actor(
+                bp_lib.find('sensor.other.collision'), carla.Transform(), attach_to=vehicle
+            )
+            collision_sensor.listen(collision_queue.put)
+            sensor_list.append(collision_sensor)
+            
+            camera_bp = bp_lib.find('sensor.camera.rgb')
+            camera_bp.set_attribute('image_size_x', '800')
+            camera_bp.set_attribute('image_size_y', '600')
+            camera_bp.set_attribute('sensor_tick', '0.05')
+            camera_transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-15))
+            camera_sensor = self.env.world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
+            image_queue = queue.Queue()
+            camera_sensor.listen(image_queue.put)
+            
+            video_writer = cv2.VideoWriter(str(video_filename), cv2.VideoWriter_fourcc(*'mp4v'), 20.0, (800, 600))
+            
+            wrapper_initialized = False
+            try:
+                self.env.map_wrapper.init(self.env.client, self.env.world, self.env.map, vehicle)
+                wrapper_initialized = True
+            except Exception as e:
+                print(f"[Warning] Map wrapper init failed: {e}")
+
+            sequence = []
+            start_time = time.time()
+            prev_distance = ego_transform.location.distance(target_transform.location)
+            prev_speed = np.array([0, 0, 0])
+            
+            for step in range(self.sim_steps):
+                self.env.world.tick()
+                
                 if video_writer is not None and video_writer.isOpened():
-                    try:
-                        while not image_queue.empty(): image_queue.get()
-                    except: pass
-                    video_writer.release()
-                
-                for sensor in sensor_list:
-                    if sensor and sensor.is_alive: sensor.destroy()
-                if vehicle and vehicle.is_alive: vehicle.destroy()
-                self.env.client.apply_batch([carla.command.DestroyActor(x) for x in npc_actors])
-                if agent and hasattr(agent, 'destroy'): agent.destroy()
-                if wrapper_initialized: self.env.map_wrapper.clear()
-                if route_file and os.path.exists(route_file): os.remove(route_file)
-
-                # --- Phase 1 Filter Logic ---
-                if is_phase1:
-                    is_seed_run = (self.execution_count % 2 == 0) 
-                    is_mutant_run = (self.execution_count % 2 != 0)
-                    
-                    if is_seed_run and not is_success:
-                        print(f"[Phase1 Filter] Seed {task_id} Failed ({stop_reason}). Discarding and Retrying...")
-                        if video_filename.exists():
-                            try: os.remove(video_filename)
-                            except: pass
-                        
-                        new_input = self.generate_input(self.rng)
-                        input[:] = new_input[:]
-                        continue 
-                    
-                    elif is_mutant_run and not is_success:
-                        print(f"[Phase1 Filter] Mutant {task_id} Failed. Skipping log.")
-                        should_log = False
-                
-                # [修改] 计算全局累计时间
-                current_global_time = time.time() - self.experiment_start_time
-                duration = time.time() - start_time
-                
-                final_video_path = str(video_filename) if video_filename.exists() and video_filename.stat().st_size > 0 else "None"
-                
-                if should_log:
-                    # [修改] 传入 current_global_time
-                    self._log_result(task_id, phase, current_global_time, weather_idx, start_idx, target_idx, is_success, stop_reason, is_collision, total_reward, 0, duration, step, final_dist, final_video_path)
+                    while not image_queue.empty():
+                        image = image_queue.get()
+                        array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
+                        array = np.reshape(array, (600, 800, 4))[:, :, :3]
+                        video_writer.write(array)
                 else:
-                    if video_filename.exists():
-                        try: os.remove(video_filename)
-                        except: pass
+                    while not image_queue.empty(): image_queue.get()
+                
+                obs_birdview = None
+                if wrapper_initialized:
+                    try:
+                        self.env.map_wrapper.tick()
+                        obs_birdview = self.env.map_wrapper.get_observations()
+                    except Exception: pass
+                
+                if not collision_queue.empty():
+                    _ = collision_queue.get() 
+                    if step > 10: 
+                        stop_reason = "Collision" 
+                        is_collision = True
+                        if vehicle.is_alive:
+                            c_loc = vehicle.get_location()
+                            episode_crash_pos = (c_loc.x, c_loc.y)
+                        break
+                
+                if not vehicle.is_alive: 
+                    stop_reason = "VehicleDestroyed"
+                    break
 
-                self.execution_count += 1
-                return total_reward, is_collision, np.array(sequence) if len(sequence)>0 else np.zeros((1, 19)), duration
+                try:
+                    control, _ = agent.get_action_with_entropy()
+                    if control:
+                        vehicle.apply_control(control)
+                        episode_steers.append(control.steer)
+                    else:
+                        vehicle.apply_control(carla.VehicleControl(brake=1.0))
+                except Exception as e:
+                    stop_reason = "agent_error"
+                    break
+                
+                v = vehicle.get_velocity()
+                cur_speed = np.array([v.x, v.y, v.z])
+                episode_speeds.append(np.linalg.norm(cur_speed))
 
-    def _log_result(self, task_id, phase, global_time, weather, start, target, success, stop_reason, collision, reward, intrinsic, duration, steps, final_dist, video_path):
-        # [修改] 记录 global_time
+                cur_loc = vehicle.get_location()
+                episode_visited_states.append((cur_loc.x, cur_loc.y))
+
+                cur_distance = cur_loc.distance(target_transform.location)
+                
+                reward = calculate_reward(prev_distance, cur_distance, is_collision, False, cur_speed, prev_speed)
+                total_reward += reward
+
+                current_command = 2.0
+                try:
+                    real_agent = agent.agent_instance if hasattr(agent, 'agent_instance') else agent
+                    if hasattr(real_agent, 'route_planner'):
+                        planner = real_agent.route_planner
+                        if planner.route and planner.index < len(planner.route):
+                            cmd = planner.route[planner.index][1]
+                            current_command = float(cmd.value) if hasattr(cmd, 'value') else float(cmd)
+                except Exception: pass
+                
+                state_vec = get_enhanced_state_vector(vehicle, obs_birdview, target_transform.location, command=current_command)
+                sequence.append(state_vec)
+                
+                prev_distance = cur_distance
+                prev_speed = cur_speed
+                final_dist = cur_distance
+                
+                if cur_distance < 5.0:
+                    stop_reason = "Success"
+                    is_success = True
+                    break
+
+            if not is_success and not is_collision:
+                if 'cur_loc' in locals():
+                     episode_crash_pos = (cur_loc.x, cur_loc.y)
+
+        except Exception as e:
+            print(f"[Execution Error] {e}")
+            stop_reason = f"error: {str(e)[:30]}"
+            is_collision = True 
+        
+        finally:
+            if video_writer is not None and video_writer.isOpened():
+                try:
+                    while not image_queue.empty(): image_queue.get()
+                except Exception: pass
+                video_writer.release()
+            
+            for sensor in sensor_list:
+                if sensor and sensor.is_alive: sensor.destroy()
+            if vehicle and vehicle.is_alive: vehicle.destroy()
+            self.env.client.apply_batch([carla.command.DestroyActor(x) for x in npc_actors])
+            if agent and hasattr(agent, 'destroy'): agent.destroy()
+            if wrapper_initialized: self.env.map_wrapper.clear()
+            if route_file and os.path.exists(route_file): os.remove(route_file)
+
+            current_global_time = time.time() - self.experiment_start_time
+            duration = time.time() - start_time
+            final_video_path = str(video_filename) if video_filename.exists() and video_filename.stat().st_size > 0 else "None"
+            
+            # 多样性计算 (仅获取，不一定记录)
+            cov, dist_crashes = self.diversity_manager.get_metrics()
+            b_cnt, fb_cnt = self.behavior_manager.get_metrics()
+            
+            final_x = 0.0
+            final_y = 0.0
+            if 'cur_loc' in locals():
+                final_x = cur_loc.x
+                final_y = cur_loc.y
+            
+            final_avg_speed = avg_speed if 'avg_speed' in locals() else 0.0
+            final_steer_std = steer_std if 'steer_std' in locals() else 0.0
+
+            # 1. 始终记录 Log (Record Every Run)
+            self._log_result(
+                task_id, phase, current_global_time, weather_idx, start_idx, target_idx, 
+                is_success, stop_reason, is_collision, total_reward, 0, 
+                duration, step, final_dist, final_video_path,
+                cov, dist_crashes, final_x, final_y, 
+                b_cnt, fb_cnt, final_avg_speed, final_steer_std
+            )
+
+            # 2. Phase 2 (Fuzzing) 更新多样性
+            # 注意: Phase 1 的更新控制权在外部 (或者说 Phase 1 根本不应该更新)
+            if not is_phase1:
+                for (x, y) in episode_visited_states:
+                    self.diversity_manager.record_step(x, y)
+                if episode_crash_pos:
+                    self.diversity_manager.record_crash(episode_crash_pos[0], episode_crash_pos[1])
+                
+                is_failure = (not is_success)
+                self.behavior_manager.record_episode(final_avg_speed, final_steer_std, is_failure)
+
+            # 3. 计数器递增 (无论成功失败)
+            self.execution_count += 1
+            
+            # [关键修改] 返回 is_success
+            return total_reward, is_collision, is_success, np.array(sequence) if len(sequence)>0 else np.zeros((1, 19)), duration
+
+    def _log_result(self, task_id, phase, global_time, weather, start, target, success, stop_reason, collision, reward, intrinsic, duration, steps, final_dist, video_path,
+                    coverage, distinct_crashes, final_x, final_y, behavior_count, fault_behavior_count, avg_speed, steer_std):
         row_data = {
             "task_id": task_id,
             "phase": phase,
-            "global_time": round(global_time, 2), # 新增字段
+            "global_time": round(global_time, 2),
             "weather_id": weather,
             "start_id": start,
             "target_id": target,
@@ -617,6 +712,14 @@ class PCLAExecutor(Executor):
             "duration": round(duration, 2),
             "steps": steps,
             "final_dist": round(final_dist, 2),
-            "video_path": video_path
+            "video_path": video_path,
+            "state_coverage": coverage,
+            "distinct_crashes": distinct_crashes,
+            "final_x": final_x,
+            "final_y": final_y,
+            "behavior_count": behavior_count,
+            "fault_behavior_count": fault_behavior_count,
+            "avg_speed": avg_speed,
+            "steer_std": steer_std
         }
         pd.DataFrame([row_data]).to_csv(self.csv_file, mode='a', header=False, index=False)

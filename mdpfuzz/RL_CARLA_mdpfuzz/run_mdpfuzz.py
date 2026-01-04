@@ -21,7 +21,8 @@ def main():
     parser.add_argument("--port", type=int, default=2000, help="CARLA port")
     parser.add_argument("--town", default="Town01", help="Map name")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--sim-steps", type=int, default=200, help="Max simulation steps per episode")
+    # [关键优化] 默认步数增加到 400
+    parser.add_argument("--sim-steps", type=int, default=400, help="Max simulation steps per episode")
     
     parser.add_argument("--num-vehicles", type=int, default=10, help="Number of NPC vehicles")
     parser.add_argument("--init-budget", type=int, default=10, help="Number of initial random test cases")
@@ -31,7 +32,6 @@ def main():
     group.add_argument("--test-budget", type=int, default=100, help="Number of fuzzing iterations")
     group.add_argument("--time-budget", type=int, default=None, help="Fuzzing time budget in seconds")
     
-    # 移除默认值，改为在该参数为空时自动生成带时间戳的路径
     parser.add_argument("--out-dir", default=None, help="Optional override for output directory")
     
     # MDPFuzz 参数
@@ -42,7 +42,6 @@ def main():
     args = parser.parse_args()
 
     # --- 生成带时间戳的输出目录 ---
-    # 格式模仿 RL_CARLA: results/YYYYMMDD_HHMMSS_mdpfuzz_seedXXX
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     
     if args.out_dir:
@@ -87,14 +86,13 @@ def main():
     kwargs = {}
     budget_arg = args.test_budget  # 默认使用次数
 
-    # [关键修改 1] 硬编码开启 Local Sensitivity
     kwargs['local_sensitivity'] = True
 
     print("="*40)
     print(f"MDPFuzz Configuration:")
     print(f"  - Town: {args.town}")
-    print(f"  - Init Budget (Random): {args.init_budget} runs")
-    print(f"    (Phase 1: seed_000 to seed_{args.init_budget-1:03d})")
+    print(f"  - Sim Steps: {args.sim_steps}")
+    print(f"  - Init Budget (Successful Seeds): {args.init_budget}")
     
     if args.time_budget is not None:
         print(f"  - Fuzzing Mode: TIME BUDGET")
@@ -106,7 +104,6 @@ def main():
         print(f"  - Budget: {args.test_budget} iterations")
         budget_arg = args.test_budget
 
-    # 打印当前配置状态
     print(f"  - Method: Fuzzer (No Coverage, Reward Guided Only)")
     print(f"  - Sensitivity: Local (Math-based, No Extra Sim)")
 
@@ -116,7 +113,6 @@ def main():
     # 日志文件保存到同一个 out_path 下
     log_path = out_path / f"mdpfuzz_state"
     
-    # [关键修改 2] 使用 fuzzing_no_coverage 替代 fuzzing
     fuzzer.fuzzing_no_coverage(
         n=args.init_budget,
         policy=None,
