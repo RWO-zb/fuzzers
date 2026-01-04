@@ -14,6 +14,7 @@ import copy
 import json
 from pathlib import Path
 import carla
+import pygame # 需要导入 pygame 进行 patch
 
 # --- PCLA Path Setup ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -55,8 +56,117 @@ except ImportError:
     except ImportError:
         pass
 
+# ==============================================================================
+# [PATCH] PyGame Off-screen Rendering Patch (来自 RL_CARLA)
+# ==============================================================================
+os.environ["SDL_VIDEODRIVER"] = "dummy"
+
+def patch_map_utils():
+    if map_utils is None: return
+    print("[INFO] Applying Robust Off-screen Rendering Patch to map_utils...")
+    @classmethod
+    def patched_init(cls, client, world, carla_map, player):
+        pygame.init()
+        if pygame.display.get_surface() is None:
+            cls.display = pygame.display.set_mode((320, 320))
+        else:
+            cls.display = pygame.display.get_surface()
+        map_utils.module_manager.clear_modules()
+        input_module = map_utils.ModuleInput(map_utils.MODULE_INPUT)
+        hud_module = map_utils.ModuleHUD(map_utils.MODULE_HUD, 320, 320)
+        world_module = map_utils.ModuleWorld(map_utils.MODULE_WORLD, client, world, carla_map, player)
+        map_utils.module_manager.register_module(world_module)
+        map_utils.module_manager.register_module(hud_module)
+        map_utils.module_manager.register_module(input_module)
+        map_utils.module_manager.start_modules()
+        cls.world_module = world_module
+        cls.clock = pygame.time.Clock()
+
+    @classmethod
+    def patched_get_observations(cls):
+        road, lane, vehicle, pedestrian, traffic = cls.world_module.get_rendered_surfaces()
+        result = cls.world_module.get_hero_measurements()
+        result.update({
+            "road": np.uint8(road),
+            "lane": np.uint8(lane),
+            "vehicle": np.uint8(vehicle),
+            "pedestrian": np.uint8(pedestrian),
+            "traffic": np.uint8(traffic),
+        })
+        return result
+
+    map_utils.Wrapper.init = patched_init
+    map_utils.Wrapper.get_observations = patched_get_observations
+
+patch_map_utils()
+
+# ==============================================================================
+# [NEW] Diversity Managers (移植自 RL_CARLA)
+# ==============================================================================
+class DiversityManager:
+    def __init__(self, x_range, y_range, num_bins=100):
+        self.x_min, self.x_max = x_range
+        self.y_min, self.y_max = y_range
+        self.num_bins = num_bins
+        self.visited_states = set()
+        self.crash_states = set()
+        
+    def get_grid_id(self, x, y):
+        norm_x = (x - self.x_min) / (self.x_max - self.x_min + 1e-5)
+        norm_y = (y - self.y_min) / (self.y_max - self.y_min + 1e-5)
+        norm_x = np.clip(norm_x, 0, 1)
+        norm_y = np.clip(norm_y, 0, 1)
+        idx_x = int(norm_x * self.num_bins)
+        idx_y = int(norm_y * self.num_bins)
+        if idx_x == self.num_bins: idx_x -= 1
+        if idx_y == self.num_bins: idx_y -= 1
+        return (idx_x, idx_y)
+
+    def record_step(self, x, y):
+        grid_id = self.get_grid_id(x, y)
+        self.visited_states.add(grid_id)
+
+    def record_crash(self, x, y):
+        grid_id = self.get_grid_id(x, y)
+        self.crash_states.add(grid_id)
+
+    def get_metrics(self):
+        total_grids = self.num_bins * self.num_bins
+        coverage = len(self.visited_states) / total_grids
+        distinct_crashes = len(self.crash_states)
+        return coverage, distinct_crashes
+
+class BehaviorDiversityManager:
+    def __init__(self, speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20):
+        self.speed_min, self.speed_max = speed_range
+        self.steer_min, self.steer_max = steer_range
+        self.num_bins = num_bins
+        self.behavior_archive = set()
+        self.fault_archive = set()
+
+    def get_bin_index(self, value, v_min, v_max):
+        norm = (value - v_min) / (v_max - v_min + 1e-6)
+        norm = np.clip(norm, 0, 1)
+        idx = int(norm * self.num_bins)
+        if idx == self.num_bins: idx -= 1
+        return idx
+
+    def record_episode(self, avg_speed, steer_std, is_failure):
+        idx_speed = self.get_bin_index(avg_speed, self.speed_min, self.speed_max)
+        idx_steer = self.get_bin_index(steer_std, self.steer_min, self.steer_max)
+        behavior_signature = (idx_speed, idx_steer)
+        self.behavior_archive.add(behavior_signature)
+        if is_failure:
+            self.fault_archive.add(behavior_signature)
+
+    def get_metrics(self):
+        behavior_count = len(self.behavior_archive)
+        fault_diversity_count = len(self.fault_archive)
+        return behavior_count, fault_diversity_count
+
 # --- Constants & Config ---
-AGENT_NAME = "carl_carlv11"
+# [MODIFIED] Switch to Roach Agent
+AGENT_NAME = "carl_roach_0" 
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 600
 VIDEO_FPS = 20.0
@@ -142,10 +252,11 @@ class BenchmarkEnv:
         self.world = self.client.get_world()
         self.map = self.world.get_map()
         
-        # [Sync Mode] 必须开启同步模式以保证视频录制不丢帧
+        # [Sync Mode] 必须开启同步模式
         settings = self.world.get_settings()
         settings.synchronous_mode = True
         settings.fixed_delta_seconds = 1.0 / VIDEO_FPS 
+        settings.no_rendering_mode = False # Roach通常需要渲染来获取bev，虽然我们在用dummy driver
         self.world.apply_settings(settings)
         
         self.spawn_points = self.map.get_spawn_points()
@@ -162,6 +273,16 @@ class BenchmarkEnv:
             print("[WARNING] Running without map_utils wrapper!")
 
         self.routes = self._load_routes(args.town)
+
+        # [NEW] Initialize Diversity Managers
+        map_bounds = {
+            "Town01": ((-20, 420), (-20, 350)),
+            "Town02": ((-20, 200), (-20, 320)),
+        }
+        current_bounds = map_bounds.get(args.town, ((-500, 500), (-500, 500)))
+        self.diversity_manager = DiversityManager(current_bounds[0], current_bounds[1], num_bins=100)
+        self.behavior_manager = BehaviorDiversityManager(speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20)
+        print(f"[INFO] Diversity Managers initialized for {args.town}")
 
     def _load_routes(self, town_name):
         base_route_path = os.path.join(os.getcwd(), 'benchmark', 'corl2017', '0915')
@@ -262,7 +383,7 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
     for _ in range(5): world.tick()
     
-    # 3. Spawn Ego
+    # 3. Spawn Ego (Robust Spawn Logic)
     bp = world.get_blueprint_library().find('vehicle.lincoln.mkz_2017')
     bp.set_attribute('role_name', 'hero')
     
@@ -273,8 +394,12 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     
     vehicle = world.try_spawn_actor(bp, start_pose)
     if not vehicle:
-        print("[Error] Failed to spawn ego vehicle")
-        return None 
+        # Retry once
+        world.tick()
+        vehicle = world.try_spawn_actor(bp, start_pose)
+        if not vehicle:
+            print("[Error] Failed to spawn ego vehicle")
+            return None 
         
     # 4. Spawn NPCs
     npc_ids = env_manager.init_generated_traffic(generated_config, start_pose, env_manager.args.num_vehicles)
@@ -292,6 +417,7 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     camera_bp.set_attribute('fov', '110')
     camera_bp.set_attribute('sensor_tick', str(1.0 / VIDEO_FPS))
     
+    # Roach usually uses a different camera setup, but we keep this for consistency with visualization
     camera_transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-8.0))
     camera_sensor = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
     image_queue = queue.Queue()
@@ -310,40 +436,52 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             wrapper_initialized = True
         except Exception as e:
             print(f"[Warning] Map wrapper init failed: {e}")
+            wrapper_initialized = False
     
     # Warmup
     initial_collision = False
-    for _ in range(10): 
-        world.tick()
-        if not collision_queue.empty(): 
-            collision_queue.get()
-            initial_collision = True
-        if not image_queue.empty(): image_queue.get()
-        if wrapper_initialized: env_manager.map_wrapper.tick()
+    try:
+        for _ in range(10): 
+            world.tick()
+            if not collision_queue.empty(): 
+                collision_queue.get()
+                initial_collision = True
+            if not image_queue.empty(): image_queue.get()
+            if wrapper_initialized: env_manager.map_wrapper.tick()
+    except Exception:
+        pass
         
     if initial_collision:
         print("[Info] Initial collision detected")
         if wrapper_initialized: env_manager.map_wrapper.clear()
         
-        # Manual cleanup for early exit
-        if collision_sensor and collision_sensor.is_alive: collision_sensor.destroy()
-        if camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
+        # Cleanup
+        if collision_sensor: collision_sensor.destroy()
+        if camera_sensor: camera_sensor.destroy()
         if video_writer: video_writer.release()
         if os.path.exists(video_path): 
             try: os.remove(video_path) 
             except: pass
-        if vehicle and vehicle.is_alive: vehicle.destroy()
+        if vehicle: vehicle.destroy()
         if npc_ids: client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         return "INITIAL_CRASH"
         
     route_file = f"route_{run_name}.xml"
     agent = None
     
+    # [NEW] QD-Fuzz Data Collection
+    episode_speeds = []
+    episode_steers = []
+    final_x = 0.0
+    final_y = 0.0
+    
     try:
         waypoints = location_to_waypoint(client, start_pose.location, target_pose.location)
         route_maker(waypoints, route_file)
+        # Using the same PCLA wrapper class, assuming it handles the new AGENT_NAME internally
         agent = PCLA(AGENT_NAME, vehicle, route_file, client)
         
+        # Patch for entropy if not present (Roach might have it, but safety first)
         if not hasattr(agent, 'get_action_with_entropy'):
             def patched_get_action(self): return self.get_action(), 0.0
             agent.get_action_with_entropy = patched_get_action.__get__(agent)
@@ -351,13 +489,11 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     except Exception as e:
         print(f"[Error] Agent init failed (Faulty Route?): {e}")
         stop_reason = "Agent_Init_Fail"
-        
-        # 触发清理逻辑
         if wrapper_initialized: env_manager.map_wrapper.clear()
-        if collision_sensor and collision_sensor.is_alive: collision_sensor.destroy()
-        if camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
+        if collision_sensor: collision_sensor.destroy()
+        if camera_sensor: camera_sensor.destroy()
         if video_writer: video_writer.release()
-        if vehicle and vehicle.is_alive: vehicle.destroy()
+        if vehicle: vehicle.destroy()
         if npc_ids: client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         return None
 
@@ -395,7 +531,10 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
                 collision_queue.get_nowait()
                 collided = True
             
+            # [NEW] Record Crash Location
+            cur_loc = vehicle.get_location()
             if collided:
+                env_manager.diversity_manager.record_crash(cur_loc.x, cur_loc.y)
                 stop_reason = "Collision"
                 break
                 
@@ -412,7 +551,10 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
 
             try:
                 control, entropy = agent.get_action_with_entropy()
-                if control: vehicle.apply_control(control)
+                if control: 
+                    vehicle.apply_control(control)
+                    # [NEW] Record Steer
+                    episode_steers.append(control.steer)
             except ValueError as ve:
                 print(f"[Warn] Agent distribution error (NaNs): {ve}")
                 stop_reason = "Agent_Crash_NaN"
@@ -424,16 +566,33 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             
             v = vehicle.get_velocity()
             cur_speed = np.array([v.x, v.y, v.z])
-            cur_loc = vehicle.get_location()
+            # [NEW] Record Speed
+            episode_speeds.append(np.linalg.norm(cur_speed))
+            
             cur_distance = cur_loc.distance(target_pose.location)
             
+            # [NEW] Record Spatial Coverage
+            env_manager.diversity_manager.record_step(cur_loc.x, cur_loc.y)
+            final_x = cur_loc.x
+            final_y = cur_loc.y
+
             invaded = False 
             
             reward = calculate_reward(prev_distance, cur_distance, collided, invaded, cur_speed, prev_speed)
             total_reward += reward
             seq_entropy += entropy
             
+            # Robust Command Retrieval
             current_command = 2.0 
+            real_agent = agent.agent_instance if hasattr(agent, 'agent_instance') else agent
+            if hasattr(real_agent, 'route_planner'):
+                planner = real_agent.route_planner
+                if hasattr(planner, 'route') and planner.index < len(planner.route):
+                    current_waypoint = planner.route[planner.index]
+                    cmd = current_waypoint[1]
+                    try: current_command = float(cmd.value if hasattr(cmd, 'value') else cmd)
+                    except: pass
+
             state_vec = get_enhanced_state_vector(vehicle, obs_birdview, target_pose.location, current_command)
             sequence.append(state_vec)
             
@@ -450,47 +609,36 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         stop_reason = "Error"
     
     finally:
+        # [NEW] Behavior Diversity Calculation
+        avg_speed = np.mean(episode_speeds) if episode_speeds else 0.0
+        steer_std = np.std(episode_steers) if episode_steers else 0.0
+        is_failure = (stop_reason != "Success")
+        env_manager.behavior_manager.record_episode(avg_speed, steer_std, is_failure)
+
         # --- SAFE CLEANUP SEQUENCE ---
-        
-        # 1. Close Video Writer first
-        if 'video_writer' in locals() and video_writer:
-            video_writer.release()
-
-        # 2. Destroy Local Sensors (We own them)
-        if 'camera_sensor' in locals() and camera_sensor and camera_sensor.is_alive:
-            camera_sensor.destroy()
-        if 'collision_sensor' in locals() and collision_sensor and collision_sensor.is_alive:
-            collision_sensor.destroy()
-
-        # 3. Clean Wrapper
+        if 'video_writer' in locals() and video_writer: video_writer.release()
+        if 'camera_sensor' in locals() and camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
+        if 'collision_sensor' in locals() and collision_sensor and collision_sensor.is_alive: collision_sensor.destroy()
         if wrapper_initialized: 
             try: env_manager.map_wrapper.clear()
             except: pass
-
-        # 4. Clean Agent (Destroys vehicle internally in PCLA)
         if agent and hasattr(agent, 'cleanup'): 
             try: agent.cleanup()
-            except Exception as e: 
-                # print(f"[Debug] Agent cleanup warning: {e}")
-                pass
-
-        # 5. Fallback Vehicle Destroy (Only if still alive)
-        # Use try-except to swallow "Actor not found" errors if Agent already destroyed it
+            except: pass
         if vehicle:
             try:
-                if vehicle.is_alive:
-                    vehicle.destroy()
-            except RuntimeError: 
-                pass 
-
-        # 6. Destroy NPCs
+                if vehicle.is_alive: vehicle.destroy()
+            except: pass 
         if npc_ids:
             client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
-            
         if os.path.exists(route_file): 
             try: os.remove(route_file)
             except: pass
-        
+    
+    # [NEW] Get Metrics
+    cov, dist_crashes = env_manager.diversity_manager.get_metrics()
+    b_cnt, fb_cnt = env_manager.behavior_manager.get_metrics()
+
     return {
         "sequence": sequence,
         "total_reward": total_reward,
@@ -501,7 +649,14 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         "duration": step / VIDEO_FPS,
         "video_path": str(video_path),
         "start_id": start_id,
-        "target_id": target_id
+        "target_id": target_id,
+        # Extended Metrics
+        "state_coverage": cov,
+        "distinct_crashes": dist_crashes,
+        "behavior_count": b_cnt,
+        "fault_behavior_count": fb_cnt,
+        "final_x": final_x,
+        "final_y": final_y
     }
 
 
@@ -535,12 +690,17 @@ def run_generation_loop(args):
         results_dir.mkdir(parents=True, exist_ok=True)
         summary_csv = results_dir / "summary.csv"
         
+        # [MODIFIED] Added new columns
         columns = [
             "task_id", "method", "success", "collision", "stop_reason", 
             "total_reward", "duration", "steps", 
             "start_id", "target_id", "weather", 
             "start_x_off", "start_y_off", "start_yaw_off",
-            "video_path", "density", "sensitivity", "novelty"
+            "video_path", "density", "sensitivity", "novelty",
+            # New Metrics
+            "state_coverage", "distinct_crashes", 
+            "behavior_count", "fault_behavior_count",
+            "final_x", "final_y", "elapsed_time"
         ]
         
         pd.DataFrame(columns=columns).to_csv(summary_csv, index=False)
@@ -617,7 +777,7 @@ def run_generation_loop(args):
                         metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
                         memory_model.append(generated_vec, density, sensitivity, performance, novelty)
                         
-                        print(f"[{task_id}] Res: {res['stop_reason']} | Rew: {total_reward:.2f} | Den: {density:.2f}")
+                        print(f"[{task_id}] Res: {res['stop_reason']} | Rew: {total_reward:.2f} | Behav: {res['behavior_count']}")
                         
                         row_data = {
                             "task_id": task_id,
@@ -637,7 +797,14 @@ def run_generation_loop(args):
                             "video_path": res['video_path'],
                             "density": density,
                             "sensitivity": sensitivity,
-                            "novelty": novelty
+                            "novelty": novelty,
+                            "state_coverage": res['state_coverage'],
+                            "distinct_crashes": res['distinct_crashes'],
+                            "behavior_count": res['behavior_count'],
+                            "fault_behavior_count": res['fault_behavior_count'],
+                            "final_x": res['final_x'],
+                            "final_y": res['final_y'],
+                            "elapsed_time": time.time() - start_time
                         }
                         pd.DataFrame([row_data]).to_csv(summary_csv, mode='a', header=False, index=False)
                         
@@ -699,7 +866,14 @@ def run_generation_loop(args):
                                 "video_path": res['video_path'],
                                 "density": density,
                                 "sensitivity": sensitivity,
-                                "novelty": novelty
+                                "novelty": novelty,
+                                "state_coverage": res['state_coverage'],
+                                "distinct_crashes": res['distinct_crashes'],
+                                "behavior_count": res['behavior_count'],
+                                "fault_behavior_count": res['fault_behavior_count'],
+                                "final_x": res['final_x'],
+                                "final_y": res['final_y'],
+                                "elapsed_time": time.time() - start_time
                             }
                             pd.DataFrame([row_data]).to_csv(summary_csv, mode='a', header=False, index=False)
 

@@ -40,7 +40,7 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=1000, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=100, type=int)
     
     args = parser.parse_args()
     
@@ -150,7 +150,8 @@ def main():
     start_corpus_time = time.time()
     i = 0
     
-    # Corpus Generation Loop
+    # --- Corpus Generation Loop ---
+    # (Optional: You can add BD tracking here too, but mainly needed for Fuzzing Loop)
     while i < seeds_num and (time.time() - start_corpus_time) <= (3600*2):
         states = np.random.randint(low=1, high=4, size=15)
         state = None
@@ -194,7 +195,7 @@ def main():
     seedcount = 0
     fuzz_selection_log = []
 
-    # Fuzzing Loop
+    # --- Fuzzing Loop ---
     while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0:
         seedcount += 1
         selected_info = fuzzer.get_pose()
@@ -207,13 +208,33 @@ def main():
         obs = env.reset(mutate_states)
         sequences = [obs[0]]
         
+        # [NEW]: Initialize Behavior Descriptor Variables
+        # BipedalWalker Obs: [hull_angle, hull_angular_velocity, x_vel, y_vel, ...]
+        episode_x_vel_sum = 0.0
+        episode_hull_angle_sum = 0.0
+        episode_steps = 0
+        
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, _ = env.step(action)
+            
+            # [NEW]: Accumulate Behavior Features
+            # obs shape is (1, 24) because of VecEnv
+            current_obs = obs[0]
+            episode_x_vel_sum += current_obs[2]       # Index 2 is x_velocity
+            episode_hull_angle_sum += current_obs[0]  # Index 0 is hull_angle
+            episode_steps += 1
+            
             sequences.append(obs[0])
             episode_reward += reward[0]
             if done:
                 break
+        
+        # [NEW]: Calculate Final Behavior Descriptors
+        # Use Sum of X Velocity as proxy for Distance (assuming roughly constant dt)
+        # Use Mean Hull Angle
+        bd_dist = episode_x_vel_sum 
+        bd_mean_angle = episode_hull_angle_sum / max(1, episode_steps)
         
         intrinsic_reward = fuzzer.train_rnd(sequences)
         entropy = np.linalg.norm(np.asarray(obs[0]) - np.asarray(fuzzer.final_state))
@@ -234,12 +255,15 @@ def main():
             if condition:
                 fuzzer.further_mutation(copy.deepcopy(mutate_states), episode_reward, entropy, intrinsic_reward, final_state, fuzzer.current_original)
         
+        # [NEW]: Save BD to log
         fuzz_selection_log.append({
             'seed_state': selected_info['seed_state'],
             'mutate_state': mutate_states,
             'parent_depth': current_mutation_depth,
             'did_crash': did_crash,
-            'elapsed_time': time.time() - start_fuzz_time
+            'elapsed_time': time.time() - start_fuzz_time,
+            'bd_distance': bd_dist,      # <--- Added
+            'bd_mean_angle': bd_mean_angle # <--- Added
         })
         
         print(f'Total seeds tested: {seedcount}, Crashes found: {len(fuzzer.result)}')

@@ -45,6 +45,9 @@ class cure:
         self.original = []
         self.count = []
         self.envsetting = []
+        
+        # [NEW] 新增：用于记录每个种子的变异代数
+        self.generations = []
 
         self.sequences = []
         self.current_pose = None
@@ -57,6 +60,9 @@ class cure:
         self.current_envsetting = None
         self.current_vehicle_info = None
         
+        # [NEW] 新增：当前选中的代数
+        self.current_generation = 0
+        
         self.rnd = RND(input_size, hidden_size, output_size)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.rnd = self.rnd.to(self.device)
@@ -68,15 +74,11 @@ class cure:
 
         new_prob = []
         for i in range(len(self.corpus)):
-            # [修改 1] 恢复老代码的计算逻辑，移除 try-except 和 1e100 溢出保护
-            # 这允许 math.exp 产生较大的值，避免因人为截断导致的种子选择死锁
             prob = (math.exp(-self.rewards[i]*alpha) + math.exp(self.intrinsic_reward[i]*beta) + self.entropy[i]*gamma)
             new_prob.append(prob)
         
         new_prob = np.array(new_prob)
         
-        # [修改 2] 保留新代码的负概率截断和清洗逻辑 (User Request)
-        # 确保概率非负且无非法值，防止 np.random.choice 崩溃
         new_prob = np.nan_to_num(new_prob, nan=0.0, posinf=None, neginf=0.0)
         new_prob = np.maximum(new_prob, 1e-6)
         
@@ -99,6 +101,9 @@ class cure:
         self.current_original = self.original[choose_index]
         self.current_envsetting = self.envsetting[choose_index]
         
+        # [NEW] 获取当前种子的代数
+        self.current_generation = self.generations[choose_index]
+        
         if self.count[choose_index] <= 0:
             self.drop_current()
             
@@ -111,7 +116,8 @@ class cure:
         self.result.append(result_pose)
         self.drop_current()
 
-    def further_mutation(self, current_pose, rewards, entropy, intrinsic_reward, final_state, original, further_envsetting):
+    # [NEW] 修改：增加 generation 参数，默认值为 0
+    def further_mutation(self, current_pose, rewards, entropy, intrinsic_reward, final_state, original, further_envsetting, generation=0):
         choose_index = self.current_index
         pose = current_pose[0]
         newpose = carla.Transform(carla.Location(x=pose.location.x, y=pose.location.y, z=pose.location.z), carla.Rotation(pitch=pose.rotation.pitch, yaw=pose.rotation.yaw, roll=pose.rotation.roll))
@@ -134,6 +140,8 @@ class cure:
             self.intrinsic_reward[choose_index] = intrinsic_reward
             self.count[choose_index] = 5
             self.envsetting[choose_index] = copy_envsetting
+            # [NEW] 更新现有种子的代数
+            self.generations[choose_index] = generation
         else:
             self.corpus.append(copy_pose)
             self.final_state.append(final_state)
@@ -143,6 +151,8 @@ class cure:
             self.original.append(original)
             self.count.append(5)
             self.envsetting.append(copy_envsetting)
+            # [NEW] 添加新种子的代数
+            self.generations.append(generation)
     
     def mutation(self, pose):
         newpose = carla.Transform(carla.Location(x=pose.location.x, y=pose.location.y, z=pose.location.z), carla.Rotation(pitch=pose.rotation.pitch, yaw=pose.rotation.yaw, roll=pose.rotation.roll))
@@ -178,6 +188,8 @@ class cure:
             self.original.pop(choose_index)
             self.count.pop(choose_index)
             self.envsetting.pop(choose_index)
+            # [NEW] 移除对应的 generation
+            self.generations.pop(choose_index)
             self.current_index = None
 
     def flatten_states(self, states):
@@ -206,9 +218,6 @@ class cure:
             l2_reg += torch.norm(param)
         loss = loss + l2_reg_coeff * l2_reg
         
-        # [修改 3] 严格对齐老代码：注释掉/移除 optimizer.zero_grad()
-        # 允许梯度累积，使网络产生漂移，维持较高的内在奖励（好奇心），
-        # 这是老代码能发现更多 Crash 的关键机制。
         if not torch.isnan(loss):
             # self.optimizer.zero_grad() 
             loss.backward()

@@ -303,6 +303,7 @@ class BenchmarkEnv:
         self.init_vehicles = [] 
 
         if not self.summary_csv.exists():
+            # [NEW] 修改：添加新的列 mutation_generation, input_pre, input_post
             columns = [
                 "task_id", "phase", "weather_id", "start_id", "target_id",
                 "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
@@ -311,7 +312,9 @@ class BenchmarkEnv:
                 # Spatial Metrics
                 "state_coverage", "distinct_crashes", "final_x", "final_y",
                 # Behavior Metrics (QD)
-                "behavior_count", "fault_behavior_count", "avg_speed", "steer_std"
+                "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
+                # Mutation Tracking
+                "mutation_generation", "input_pre", "input_post"
             ]
             df = pd.DataFrame(columns=columns)
             df.to_csv(self.summary_csv, index=False)
@@ -727,11 +730,16 @@ def run_benchmark_suite(args):
             cov, dist_crashes = env_manager.diversity_manager.get_metrics()
             b_cnt, fb_cnt = env_manager.behavior_manager.get_metrics()
             
+            # [NEW] Phase 1 的 Input 记录
+            # generation 为 0，input_pre 为空，input_post 为当前 final_state
+            input_post_str = str(res['final_state'].tolist()) if 'final_state' in res else "[]"
+            
             log_result(env_manager, run_name, "Phase1", weather_id, start_id, target_id, res, intrinsic_reward, 
                        coverage=cov, distinct_crashes=dist_crashes, 
                        final_x=res['final_x'], final_y=res['final_y'],
                        behavior_count=b_cnt, fault_behavior_count=fb_cnt,
-                       avg_speed=res['avg_speed'], steer_std=res['steer_std'])
+                       avg_speed=res['avg_speed'], steer_std=res['steer_std'],
+                       mutation_generation=0, input_pre="None", input_post=input_post_str)
 
             # --- Decision: Keep or Skip? ---
             # 只有成功且无碰撞的才算作合格种子
@@ -740,8 +748,10 @@ def run_benchmark_suite(args):
                 
                 # Add to Fuzzer Corpus
                 current_pose_tuple = (start_pose, res['npc_info']) 
+                # [NEW] 传递 generation=0
                 env_manager.fuzzer.further_mutation(
-                    current_pose_tuple, res['total_reward'], res['seq_entropy'], intrinsic_reward, res['final_state'], current_pose_tuple, [start_id, target_id, weather_id]
+                    current_pose_tuple, res['total_reward'], res['seq_entropy'], intrinsic_reward, res['final_state'], current_pose_tuple, [start_id, target_id, weather_id],
+                    generation=0
                 )
                 
                 collected_seeds_count += 1
@@ -757,7 +767,7 @@ def run_benchmark_suite(args):
                 'total_reward': 0, 'duration': 0, 'steps': 0, 'final_dist': 0, 'video_path': "",
                 'final_x': 0, 'final_y': 0, 'avg_speed': 0, 'steer_std': 0
             }
-            log_result(env_manager, run_name, "Phase1", weather_id, start_id, target_id, dummy_res, 0)
+            log_result(env_manager, run_name, "Phase1", weather_id, start_id, target_id, dummy_res, 0, mutation_generation=0, input_pre="None", input_post="None")
 
         # 无论成功与否，都处理下一个任务
         task_idx += 1
@@ -775,7 +785,11 @@ def run_benchmark_suite(args):
         current_fuzz_seed = args.seed + 100000 + fuzz_idx
         set_global_seed(current_fuzz_seed)
         
+        # [NEW] 在变异前获取种子和状态，包括 generation
         seed_pose = env_manager.fuzzer.get_pose() 
+        current_generation = env_manager.fuzzer.current_generation
+        pre_input = env_manager.fuzzer.current_final_state # 变异前的 input
+        
         mutated_start_pose = env_manager.fuzzer.mutation(seed_pose)
         mutated_vehicles = env_manager.fuzzer.vehicle_mutate(env_manager.fuzzer.current_vehicle_info)
         
@@ -798,13 +812,19 @@ def run_benchmark_suite(args):
         cov, dist_crashes = env_manager.diversity_manager.get_metrics()
         b_cnt, fb_cnt = env_manager.behavior_manager.get_metrics()
         
+        # [NEW] 记录变异代数 (父代 + 1) 和 input 前后状态
+        new_generation = current_generation + 1
+        input_pre_str = str(pre_input.tolist()) if isinstance(pre_input, np.ndarray) else "None"
+        input_post_str = str(res_fuzz['final_state'].tolist()) if 'final_state' in res_fuzz else "[]"
+        
         log_result(env_manager, run_name, "Phase2", weather_id, start_id, target_id, res_fuzz, intrinsic_fuzz,
                    coverage=cov, distinct_crashes=dist_crashes,
                    final_x=res_fuzz['final_x'], final_y=res_fuzz['final_y'],
                    behavior_count=b_cnt, fault_behavior_count=fb_cnt,
-                   avg_speed=res_fuzz['avg_speed'], steer_std=res_fuzz['steer_std'])
+                   avg_speed=res_fuzz['avg_speed'], steer_std=res_fuzz['steer_std'],
+                   mutation_generation=new_generation, input_pre=input_pre_str, input_post=input_post_str)
         
-        print(f"[METRICS] ID:{run_name} | BehavCnt: {b_cnt} | FaultBehav: {fb_cnt} | Crash: {res_fuzz['collision']}")
+        print(f"[METRICS] ID:{run_name} | BehavCnt: {b_cnt} | FaultBehav: {fb_cnt} | Crash: {res_fuzz['collision']} | Gen: {new_generation}")
 
         new_entropy = np.linalg.norm(res_fuzz['final_state'] - env_manager.fuzzer.current_final_state) + res_fuzz['seq_entropy']
         
@@ -822,24 +842,29 @@ def run_benchmark_suite(args):
                intrinsic_fuzz > args.threshold_intrinsic or \
                new_entropy > args.threshold_entropy:
                 
+                # [NEW] 传递 new_generation
                 env_manager.fuzzer.further_mutation(
                     (env_manager.fuzzer.current_pose, env_manager.fuzzer.current_vehicle_info),
                     res_fuzz['total_reward'], new_entropy, intrinsic_fuzz, res_fuzz['final_state'],
-                    env_manager.fuzzer.current_original, env_manager.fuzzer.current_envsetting
+                    env_manager.fuzzer.current_original, env_manager.fuzzer.current_envsetting,
+                    generation=new_generation
                 )
     
     save_replayer_pickle(env_manager.replayer, result_folder)
 
+# [NEW] 修改：增加三个新参数 mutation_generation, input_pre, input_post
 def log_result(env_manager, task_id, phase, weather, start, target, res, intrinsic, 
                coverage=0.0, distinct_crashes=0, final_x=0.0, final_y=0.0,
-               behavior_count=0, fault_behavior_count=0, avg_speed=0.0, steer_std=0.0):
+               behavior_count=0, fault_behavior_count=0, avg_speed=0.0, steer_std=0.0,
+               mutation_generation=0, input_pre="None", input_post="None"):
     columns = [
         "task_id", "phase", "weather_id", "start_id", "target_id",
         "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
         "duration", "steps", "final_dist", "video_path",
         "elapsed_time", "current_timestamp",
         "state_coverage", "distinct_crashes", "final_x", "final_y",
-        "behavior_count", "fault_behavior_count", "avg_speed", "steer_std"
+        "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
+        "mutation_generation", "input_pre", "input_post"
     ]
     current_time = time.time()
     elapsed_time = current_time - env_manager.start_time
@@ -855,7 +880,10 @@ def log_result(env_manager, task_id, phase, weather, start, target, res, intrins
         "state_coverage": coverage, "distinct_crashes": distinct_crashes,
         "final_x": final_x, "final_y": final_y,
         "behavior_count": behavior_count, "fault_behavior_count": fault_behavior_count,
-        "avg_speed": avg_speed, "steer_std": steer_std
+        "avg_speed": avg_speed, "steer_std": steer_std,
+        "mutation_generation": mutation_generation,
+        "input_pre": input_pre,
+        "input_post": input_post
     }
     pd.DataFrame([row_data], columns=columns).to_csv(env_manager.summary_csv, mode='a', header=False, index=False)
 

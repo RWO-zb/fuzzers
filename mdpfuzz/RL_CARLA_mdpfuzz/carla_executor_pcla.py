@@ -9,7 +9,7 @@ import queue
 import cv2
 import pandas as pd
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 import traceback
 import pygame 
 
@@ -307,12 +307,14 @@ class PCLAExecutor(Executor):
         self.rng = np.random.default_rng(seed=int(time.time()))
 
     def _init_csv(self):
+        # [修改] 新增 generation, parent_input, current_input 列
         columns = [
             "task_id", "phase", "global_time", "weather_id", "start_id", "target_id",
             "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
             "duration", "steps", "final_dist", "video_path",
             "state_coverage", "distinct_crashes", "final_x", "final_y",
-            "behavior_count", "fault_behavior_count", "avg_speed", "steer_std"
+            "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
+            "generation", "parent_input", "current_input"
         ]
         pd.DataFrame(columns=columns).to_csv(self.csv_file, index=False)
 
@@ -401,10 +403,15 @@ class PCLAExecutor(Executor):
     def load_policy(self):
         return None
 
-    def execute_policy(self, input: np.ndarray, policy: Any) -> tuple:
+    # [修改] 增加 generation 和 parent_input 参数
+    def execute_policy(self, input: np.ndarray, policy: Any, generation: int = 0, parent_input: Optional[np.ndarray] = None) -> tuple:
         # [核心修改] 移除 while True，由外部控制循环
         
         print(f"[Debug] Input Vector Header: Weather={int(input[0])}, Target={int(input[1])}, StartID={int(input[2])}")
+
+        # 格式化输入向量为字符串以进行保存
+        current_input_str = str(list(input))
+        parent_input_str = str(list(parent_input)) if parent_input is not None else "None"
 
         weather_idx = int(input[0])
         target_idx = int(input[1])
@@ -675,7 +682,8 @@ class PCLAExecutor(Executor):
                 is_success, stop_reason, is_collision, total_reward, 0, 
                 duration, step, final_dist, final_video_path,
                 cov, dist_crashes, final_x, final_y, 
-                b_cnt, fb_cnt, final_avg_speed, final_steer_std
+                b_cnt, fb_cnt, final_avg_speed, final_steer_std,
+                generation, parent_input_str, current_input_str
             )
 
             # 2. Phase 2 (Fuzzing) 更新多样性
@@ -696,7 +704,8 @@ class PCLAExecutor(Executor):
             return total_reward, is_collision, is_success, np.array(sequence) if len(sequence)>0 else np.zeros((1, 19)), duration
 
     def _log_result(self, task_id, phase, global_time, weather, start, target, success, stop_reason, collision, reward, intrinsic, duration, steps, final_dist, video_path,
-                    coverage, distinct_crashes, final_x, final_y, behavior_count, fault_behavior_count, avg_speed, steer_std):
+                    coverage, distinct_crashes, final_x, final_y, behavior_count, fault_behavior_count, avg_speed, steer_std,
+                    generation, parent_input, current_input):
         row_data = {
             "task_id": task_id,
             "phase": phase,
@@ -720,6 +729,9 @@ class PCLAExecutor(Executor):
             "behavior_count": behavior_count,
             "fault_behavior_count": fault_behavior_count,
             "avg_speed": avg_speed,
-            "steer_std": steer_std
+            "steer_std": steer_std,
+            "generation": generation,
+            "parent_input": parent_input,
+            "current_input": current_input
         }
         pd.DataFrame([row_data]).to_csv(self.csv_file, mode='a', header=False, index=False)

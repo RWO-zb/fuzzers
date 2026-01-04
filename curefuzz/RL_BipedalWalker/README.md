@@ -33,5 +33,5 @@ git clone https://github.com/DLR-RM/rl-trained-agents
 
 Check the default path of the model is correct in `./enjoy_cure.py`. 
 
-Run `python enjoy_cure.py --alg tqc --env BipedalWalkerHardcore-v3 --folder rl-trained-agents/ --guide --no-render --n-timesteps 300 ` to start fuzz testing.
+Run `python enjoy_cure.py --alg tqc --env BipedalWalkerHardcore-v3 --folder rl-trained-agents/ --guide --no-render --n-timesteps 300 --seed 0 ` to start fuzz testing.
 

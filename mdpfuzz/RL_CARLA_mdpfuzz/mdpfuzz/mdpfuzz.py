@@ -36,6 +36,9 @@ class Fuzzer():
         self.coverage_model = CoverageModel(random_seed, k, gamma)
         # used to track uniqueness of solutions
         self.evaluated_solutions = []
+        
+        # [修改] 新增 generation_map 用于追踪每个 Input 的代数
+        self.generation_map = {} 
 
         self.executor = executor
         self.sim_steps = self.executor.sim_steps
@@ -43,6 +46,9 @@ class Fuzzer():
 
         self._set_config()
 
+    # [修改] 辅助方法，用于生成 Numpy Array 的 Key
+    def _get_key(self, input_arr: np.ndarray) -> str:
+        return str(list(input_arr))
 
     def _set_config(self):
         self.config = {
@@ -90,14 +96,14 @@ class Fuzzer():
         return mutate_states
 
 
-    def mdp(self, state: np.ndarray, policy: Any = None) -> Tuple[float, bool, bool, np.ndarray, float]:
+    def mdp(self, state: np.ndarray, policy: Any = None, generation: int = 0, parent_input: Any = None) -> Tuple[float, bool, bool, np.ndarray, float]:
         '''Returns the accumulated reward, crash, SUCCESS, state sequence and exec time.'''
-        # [修改] 接收 5 个返回值
-        episode_reward, crash, success, obs_seq, exec_time = self.executor.execute_policy(state, policy)
+        # [修改] 接收 5 个返回值，传递 generation 和 parent_input
+        episode_reward, crash, success, obs_seq, exec_time = self.executor.execute_policy(state, policy, generation=generation, parent_input=parent_input)
         return episode_reward, crash, success, obs_seq, exec_time
 
 
-    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, **kwargs) -> Tuple[float, float, bool, bool, List[np.ndarray], float]:
+    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, generation: int = 0, parent_input: Any = None, **kwargs) -> Tuple[float, float, bool, bool, List[np.ndarray], float]:
         '''
         Computes the sensitivity of the state @state.
         [修改] 更新为处理 success 标志
@@ -108,14 +114,17 @@ class Fuzzer():
 
         # runs the two states if no accumulated reward is provided
         if acc_reward is None:
-            acc_reward, crash, success, state_sequence, exec_time = self.mdp(state, policy)
+            # [修改] 传递代数
+            acc_reward, crash, success, state_sequence, exec_time = self.mdp(state, policy, generation=generation, parent_input=parent_input)
         else:
             state_sequence = []
             crash = None
             success = None
             exec_time = None
 
-        acc_reward_perturbed, crash_perturbed, success_perturbed, state_sequence_perturbed, exec_time_perturbed = self.mdp(perturbed_state, policy)
+        # 扰动状态通常作为临时检测，传递 generation 和 parent_input=state
+        acc_reward_perturbed, crash_perturbed, success_perturbed, state_sequence_perturbed, exec_time_perturbed = self.mdp(perturbed_state, policy, generation=generation, parent_input=state)
+        
         if self.logger is not None:
             episode_length = len(state_sequence_perturbed)
             self.logger.log(
@@ -178,8 +187,11 @@ class Fuzzer():
         model_initialized = False
 
         for state in initial_inputs:
-            # [修改] 解包 6 个值
-            sensitivity, acc_reward, oracle, success, state_sequence, exec_time = self.sentivity(state, policy=policy, **kwargs)
+            # [修改] 记录 generation 为 0
+            self.generation_map[self._get_key(state)] = 0
+            
+            # [修改] 解包 6 个值，传入 generation=0
+            sensitivity, acc_reward, oracle, success, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, parent_input=None, **kwargs)
             
             if not model_initialized:
                 if len(state_sequence) > self.k + 1:
@@ -218,6 +230,7 @@ class Fuzzer():
 
             if oracle:
                 pool.add_crash(state)
+                # Crash inputs also inherit generation, already set above
 
             pbar_init.update(1)
         pbar_init.close()
@@ -252,9 +265,16 @@ class Fuzzer():
                         break
 
                 input, acc_reward_input = pool.select(self.rng)
+                
+                # [修改] 计算下一代
+                parent_key = self._get_key(input)
+                parent_gen = self.generation_map.get(parent_key, 0)
+                current_gen = parent_gen + 1
+                
                 mutant = self.mutate_validate(input, **kwargs)
-                # [修改] 解包 5 个值
-                acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(mutant, policy)
+                
+                # [修改] 解包 5 个值，传入 generation 和 parent_input
+                acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(mutant, policy, generation=current_gen, parent_input=input)
                 
                 coverage = 0.0
                 if model_initialized:
@@ -272,13 +292,18 @@ class Fuzzer():
                 sensitivity = None
                 if oracle:
                     pool.add_crash(mutant)
+                    # [修改] 记录 crash 的代数
+                    self.generation_map[self._get_key(mutant)] = current_gen
                 elif (acc_reward_mutant < acc_reward_input) or (coverage < self.tau):
                     if local_sensitivity:
                         sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                     else:
-                        # [修改] 解包 6 个值
-                        sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, **kwargs)
+                        # [修改] 解包 6 个值，传入 generation
+                        sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=current_gen, parent_input=input, **kwargs)
+                    
                     pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle)
+                    # [修改] 记录新种子的代数
+                    self.generation_map[self._get_key(mutant)] = current_gen
 
                 if self.logger is not None:
                     episode_length = len(state_sequence)
@@ -363,13 +388,15 @@ class Fuzzer():
             input_idx += 1
             
             # 1. 运行 Seed (不计算敏感度，不跑变异体)
-            # [修改] 解包 5 个值
-            acc_reward, oracle, is_success, state_sequence, exec_time = self.mdp(state, policy)
+            # [修改] 解包 5 个值，传入 generation=0
+            acc_reward, oracle, is_success, state_sequence, exec_time = self.mdp(state, policy, generation=0, parent_input=None)
             
             # 2. 只有成功的才加入 Pool
             if is_success:
                 pool.add(state, acc_reward, 0, 0.0, oracle)
                 self.evaluated_solutions.append(state.tolist())
+                # [修改] 记录种子代数
+                self.generation_map[self._get_key(state)] = 0
                 successful_seeds += 1
                 pbar_init.update(1)
             
@@ -415,19 +442,30 @@ class Fuzzer():
                     break
 
             input, acc_reward_input = pool.select(self.rng)
+            
+            # [修改] 计算下一代
+            parent_key = self._get_key(input)
+            parent_gen = self.generation_map.get(parent_key, 0)
+            current_gen = parent_gen + 1
+            
             mutant = self.mutate_validate(input, **kwargs)
-            # [修改] 解包 5 个值
-            acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(mutant, policy)
+            # [修改] 解包 5 个值，传入 generation
+            acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(mutant, policy, generation=current_gen, parent_input=input)
+            
             sensitivity = None
             if oracle:
                 pool.add_crash(mutant)
+                # [修改] 记录 crash 代数
+                self.generation_map[self._get_key(mutant)] = current_gen
             elif acc_reward_mutant < acc_reward_input:
                 if local_sensitivity:
                     sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                 else:
-                    # [修改] 解包 6 个值
-                    sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, **kwargs)
+                    # [修改] 解包 6 个值，传入 generation
+                    sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=current_gen, parent_input=input, **kwargs)
                 pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle)
+                # [修改] 记录新种子代数
+                self.generation_map[self._get_key(mutant)] = current_gen
 
             if self.logger is not None:
                 episode_length = len(state_sequence)
