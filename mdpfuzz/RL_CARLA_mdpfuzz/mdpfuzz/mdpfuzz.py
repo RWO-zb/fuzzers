@@ -123,6 +123,7 @@ class Fuzzer():
             exec_time = None
 
         # 扰动状态通常作为临时检测，传递 generation 和 parent_input=state
+        # 注意：这里虽然算作 sensitivity 计算的一部分，但实际上也是一次执行
         acc_reward_perturbed, crash_perturbed, success_perturbed, state_sequence_perturbed, exec_time_perturbed = self.mdp(perturbed_state, policy, generation=generation, parent_input=state)
         
         if self.logger is not None:
@@ -137,14 +138,18 @@ class Fuzzer():
             )
 
         # computes the sensitivity, the coverage, and adds test case in the pool
-        sensitivity = np.abs(acc_reward - acc_reward_perturbed) / perturbation
+        # [修复] 防止除以零
+        epsilon = 1e-6
+        sensitivity = np.abs(acc_reward - acc_reward_perturbed) / (perturbation + epsilon)
 
         return sensitivity, acc_reward, crash, success, state_sequence, exec_time
 
 
     def local_sensitivity(self, state: np.ndarray, state_mutate: np.ndarray, state_reward: float, state_mutate_reward: float):
         perturbation = np.linalg.norm(state - state_mutate)
-        return np.abs(state_reward - state_mutate_reward) / perturbation
+        # [修复] 防止除以零
+        epsilon = 1e-6
+        return np.abs(state_reward - state_mutate_reward) / (perturbation + epsilon)
 
 
     def initialize_coverage_model(self, **kwargs) -> int:
@@ -347,6 +352,7 @@ class Fuzzer():
     def fuzzing_no_coverage(self, n: int, policy: Any = None, **kwargs):
         '''
         Works similarly as fuzzing but coverages are not computed.
+        Strict Mode Update: Computes real sensitivity for initial seeds to prevent probability starvation.
         '''
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
@@ -369,33 +375,47 @@ class Fuzzer():
             pool = IndexedPool(is_integer=np.issubdtype(np.array(initial_inputs).dtype, np.integer)) # type: Pool
         
         # ======================================================================
-        # Phase 1: Init (Strict Seed Selection)
+        # Phase 1: Init (Strict Seed Selection & Sensitivity Calculation)
         # ======================================================================
-        pbar_init = tqdm.tqdm(total=n, desc="Initializing (Phase 1)")
+        pbar_init = tqdm.tqdm(total=n, desc="Initializing (Strict Phase 1)")
         
         successful_seeds = 0
         input_idx = 0
         
-        # [修改] 使用 while 循环直到找到 n 个成功的种子
+        # 使用 while 循环直到找到 n 个成功的种子
         while successful_seeds < n:
             # 如果预生成的输入用完了，动态补充新种子
             if input_idx >= len(initial_inputs):
-                # [FIXED] 动态生成种子时不应使用 [0] 索引，而是保留完整向量
-                # initial_inputs.append(self.sampling(1)[0]) # <--- ORIGINAL BUG
                 initial_inputs.append(self.sampling(1).tolist())
             
             state = np.array(initial_inputs[input_idx])
             input_idx += 1
             
             # 1. 运行 Seed (不计算敏感度，不跑变异体)
-            # [修改] 解包 5 个值，传入 generation=0
+            # 传入 generation=0
             acc_reward, oracle, is_success, state_sequence, exec_time = self.mdp(state, policy, generation=0, parent_input=None)
             
             # 2. 只有成功的才加入 Pool
             if is_success:
-                pool.add(state, acc_reward, 0, 0.0, oracle)
+                # [严格模式] 立即计算真实的 Sensitivity
+                # 调用 sentivity() 会生成一个变异体并运行它，通过对比当前 reward 计算真实的 sensitivity
+                # 注意：这会消耗额外的仿真时间，但保证了概率分布的公平性
+                sensitivity, _, _, _, _, _ = self.sentivity(
+                    state, 
+                    acc_reward=acc_reward, 
+                    policy=policy, 
+                    generation=0, 
+                    parent_input=None, 
+                    **kwargs
+                )
+                
+                # 安全网：防止 sensitivity 为 0 导致的饥饿 (epsilon)
+                if sensitivity == 0:
+                    sensitivity = 1e-6
+                
+                pool.add(state, acc_reward, 0, sensitivity, oracle)
                 self.evaluated_solutions.append(state.tolist())
-                # [修改] 记录种子代数
+                # 记录种子代数
                 self.generation_map[self._get_key(state)] = 0
                 successful_seeds += 1
                 pbar_init.update(1)
@@ -408,12 +428,10 @@ class Fuzzer():
                     oracle=oracle,
                     reward=acc_reward,
                     episode_length=episode_length,
-                    sensitivity=0.0,
+                    sensitivity=0.0, # Log 中初始执行暂记为 0，实际 sensitivity 在 sentivity 方法内部调用 mdp 时会再 Log 一次变异体
                     test_exec_time=exec_time,
                     run_time=time.time()
                 )
-
-            # 失败的种子在此处被直接丢弃，进入下一次循环
 
         pbar_init.close()
 
@@ -443,28 +461,29 @@ class Fuzzer():
 
             input, acc_reward_input = pool.select(self.rng)
             
-            # [修改] 计算下一代
+            # 计算下一代
             parent_key = self._get_key(input)
             parent_gen = self.generation_map.get(parent_key, 0)
             current_gen = parent_gen + 1
             
             mutant = self.mutate_validate(input, **kwargs)
-            # [修改] 解包 5 个值，传入 generation
+            # 解包 5 个值，传入 generation
             acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(mutant, policy, generation=current_gen, parent_input=input)
             
             sensitivity = None
             if oracle:
                 pool.add_crash(mutant)
-                # [修改] 记录 crash 代数
+                # 记录 crash 代数
                 self.generation_map[self._get_key(mutant)] = current_gen
             elif acc_reward_mutant < acc_reward_input:
                 if local_sensitivity:
                     sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                 else:
-                    # [修改] 解包 6 个值，传入 generation
+                    # 解包 6 个值，传入 generation
                     sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=current_gen, parent_input=input, **kwargs)
+                
                 pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle)
-                # [修改] 记录新种子代数
+                # 记录新种子代数
                 self.generation_map[self._get_key(mutant)] = current_gen
 
             if self.logger is not None:
