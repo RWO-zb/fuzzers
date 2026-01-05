@@ -2,18 +2,16 @@ import os
 import sys
 import random
 import argparse
-import time
 import math
 import numpy as np
 import carla
 import pygame
 import queue
-import traceback
-from pathlib import Path
+from agents.navigation.global_route_planner import GlobalRoutePlanner
+from agents.navigation.local_planner import RoadOption
+from bird_view.utils import map_utils
+from PCLA.PCLA import PCLA, route_maker, location_to_waypoint
 
-# ==============================================================================
-# 路径配置
-# ==============================================================================
 current_script_path = os.path.dirname(os.path.abspath(__file__))
 workspace_root = os.path.dirname(current_script_path)
 
@@ -22,48 +20,14 @@ if current_script_path not in sys.path:
 if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
-# ==============================================================================
-# [严格同步配置] 针对 run_fuzz_carl.py 的限制
-# ==============================================================================
-os.environ["SDL_VIDEODRIVER"] = "dummy" 
+os.environ["SDL_VIDEODRIVER"] = "dummy"
 
-# 1. 距离限制调整
-# 原理：测试代码限制 10秒 (200步)。
-# 假设车速 25km/h ≈ 7m/s。10秒极限距离约 70米。
-# 如果设置 180米，测试时必挂。因此这里设为 20-70米。
 ROUTE_MIN_DIST = 40.0
 ROUTE_MAX_DIST = 70.0
-
-# 2. 步数限制同步
-# 必须等于 run_fuzz_carl.py 中的 max_steps
-VERIFY_MAX_STEPS = 200 
-
+VERIFY_MAX_STEPS = 200
 SEARCH_MAX_ATTEMPTS = 50000
-AGENT_NAME = "carl_roach_0" 
+AGENT_NAME = "carl_roach_0"
 
-# ==============================================================================
-# 导入依赖
-# ==============================================================================
-try:
-    from bird_view.utils import map_utils
-    from PCLA.PCLA import PCLA, route_maker, location_to_waypoint
-    try:
-        from agents.navigation.global_route_planner import GlobalRoutePlanner
-        from agents.navigation.local_planner import RoadOption
-    except ImportError:
-        carla_egg_path = os.path.join(workspace_root, 'carla-0.9.15', 'PythonAPI', 'carla')
-        if os.path.exists(carla_egg_path):
-            sys.path.append(carla_egg_path)
-        from agents.navigation.global_route_planner import GlobalRoutePlanner
-        from agents.navigation.local_planner import RoadOption
-    print("[INFO] All dependencies loaded successfully.")
-except ImportError as e:
-    print(f"[ERROR] Missing dependency: {e}")
-    sys.exit(1)
-
-# ==============================================================================
-# Headless Patch
-# ==============================================================================
 def patch_map_utils():
     @classmethod
     def patched_init(cls, client, world, carla_map, player):
@@ -84,9 +48,6 @@ def patch_map_utils():
     map_utils.Wrapper.init = patched_init
 patch_map_utils()
 
-# ==============================================================================
-# 几何逻辑
-# ==============================================================================
 def get_route_length(route):
     length = 0.0
     for i in range(len(route) - 1):
@@ -104,12 +65,17 @@ def check_geometry(route, length, task_type):
             turns += 1
     if task_type == 'straight': return turns == 0
     elif task_type == 'turn': return turns >= 1
-    elif task_type == 'navigation': return True 
+    elif task_type == 'navigation': return True
     return False
 
-# ==============================================================================
-# 验证逻辑 (Strict Mode)
-# ==============================================================================
+def cleanup(vehicle, sensor):
+    if sensor and sensor.is_alive:
+        sensor.stop()
+        sensor.destroy()
+    if vehicle and vehicle.is_alive:
+        vehicle.destroy()
+    map_utils.Wrapper.clear()
+
 def verify_route_execution(client, world, start_pose, end_pose, route_id):
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('vehicle.*')])
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
@@ -131,11 +97,7 @@ def verify_route_execution(client, world, start_pose, end_pose, route_id):
     collision_queue = queue.Queue()
     collision_sensor.listen(collision_queue.put)
 
-    try:
-        map_utils.Wrapper.init(client, world, world.get_map(), vehicle)
-    except Exception:
-        cleanup(vehicle, collision_sensor)
-        return False
+    map_utils.Wrapper.init(client, world, world.get_map(), vehicle)
 
     for _ in range(5):
         world.tick()
@@ -146,71 +108,54 @@ def verify_route_execution(client, world, start_pose, end_pose, route_id):
     route_file_abs = os.path.join(current_script_path, f"temp_strict_{route_id}.xml")
     success = False
     original_cwd = os.getcwd()
-    
-    try:
-        waypoints = location_to_waypoint(client, start_pose.location, end_pose.location)
-        route_maker(waypoints, route_file_abs)
-        
-        pcla_dir = os.path.join(workspace_root, 'PCLA')
-        if os.path.exists(pcla_dir):
-            os.chdir(pcla_dir)
-        
-        agent = PCLA(AGENT_NAME, vehicle, route_file_abs, client)
-        
-        target_loc = end_pose.location
-        
-        # [严格模式] 循环次数严格限制为 VERIFY_MAX_STEPS (200)
-        step = 0
-        while step < VERIFY_MAX_STEPS:
-            world.tick()
-            try: map_utils.Wrapper.tick()
-            except: pass
-            
-            if not collision_queue.empty(): 
-                break # Collision = Fail
-            
-            control = agent.get_action()
-            if control: vehicle.apply_control(control)
 
-            # Success = Fail
-            if vehicle.get_location().distance(target_loc) < 5.0:
-                success = True
-                break
-            
-            step += 1
-            
-    except Exception:
-        success = False
-    finally:
-        os.chdir(original_cwd)
-        cleanup(vehicle, collision_sensor)
-        if os.path.exists(route_file_abs):
-            try: os.remove(route_file_abs)
-            except: pass
+    waypoints = location_to_waypoint(client, start_pose.location, end_pose.location)
+    route_maker(waypoints, route_file_abs)
+    
+    pcla_dir = os.path.join(workspace_root, 'PCLA')
+    if os.path.exists(pcla_dir):
+        os.chdir(pcla_dir)
+    
+    agent = PCLA(AGENT_NAME, vehicle, route_file_abs, client)
+    target_loc = end_pose.location
+    step = 0
+
+    while step < VERIFY_MAX_STEPS:
+        world.tick()
+        map_utils.Wrapper.tick()
+        
+        if not collision_queue.empty():
+            break
+        
+        control = agent.get_action()
+        if control: 
+            vehicle.apply_control(control)
+
+        if vehicle.get_location().distance(target_loc) < 5.0:
+            success = True
+            break
+        
+        step += 1
+
+    os.chdir(original_cwd)
+    cleanup(vehicle, collision_sensor)
+    if os.path.exists(route_file_abs):
+        os.remove(route_file_abs)
 
     return success
 
-def cleanup(vehicle, sensor):
-    if sensor and sensor.is_alive:
-        sensor.stop()
-        sensor.destroy()
-    if vehicle and vehicle.is_alive:
-        vehicle.destroy()
-    try: map_utils.Wrapper.clear()
-    except: pass
-
-# ==============================================================================
-# 主入口
-# ==============================================================================
 def main():
-    argparser = argparse.ArgumentParser(description='Town01 Route Generator (Strict Mode)')
+    argparser = argparse.ArgumentParser()
     argparser.add_argument('--host', default='127.0.0.1')
-    argparser.add_argument('--port', type=int, default=2000)
+    argparser.add_argument('--port', type=int, default=3000)
     argparser.add_argument('--num_pairs', default=500, type=int)
     argparser.add_argument('--output_dir', default='town01_strict_routes')
-    
+    argparser.add_argument('--seed', default=, type=int)
     args = argparser.parse_args()
     
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+
     output_path = os.path.join(current_script_path, args.output_dir)
     if not os.path.exists(output_path):
         os.makedirs(output_path)
@@ -220,78 +165,54 @@ def main():
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(60.0)
-
-    print(f"[{time.ctime()}] 启动 Town01 严格生成任务")
-    print(f"限制条件: 步数<={VERIFY_MAX_STEPS}, 距离 {ROUTE_MIN_DIST}-{ROUTE_MAX_DIST}m")
-
-    try:
-        print(f"\nLoading {town}...")
-        client.load_world(town)
-        world = client.get_world()
+    client.load_world(town)
+    world = client.get_world()
+    
+    settings = world.get_settings()
+    settings.synchronous_mode = True
+    settings.fixed_delta_seconds = 0.05
+    settings.no_rendering_mode = False
+    world.apply_settings(settings)
+    
+    spawn_points = world.get_map().get_spawn_points()
+    grp = GlobalRoutePlanner(world.get_map(), sampling_resolution=2.0)
+    
+    for task in task_types:
+        valid_pairs = []
+        attempts = 0
         
-        settings = world.get_settings()
-        settings.synchronous_mode = True
-        settings.fixed_delta_seconds = 0.05
-        settings.no_rendering_mode = False
-        world.apply_settings(settings)
+        save_path = os.path.join(output_path, f"{task}_{town}.txt")
+        if os.path.exists(save_path):
+            os.remove(save_path)
         
-        spawn_points = world.get_map().get_spawn_points()
-        grp = GlobalRoutePlanner(world.get_map(), sampling_resolution=2.0)
-        
-        for task in task_types:
-            valid_pairs = []
-            attempts = 0
+        while len(valid_pairs) < args.num_pairs and attempts < SEARCH_MAX_ATTEMPTS:
+            attempts += 1
             
-            print(f"\n>>> 正在生成 [ {task} ] 任务...")
+            idx1 = random.randint(0, len(spawn_points) - 1)
+            idx2 = random.randint(0, len(spawn_points) - 1)
+            if idx1 == idx2: continue
             
-            while len(valid_pairs) < args.num_pairs and attempts < SEARCH_MAX_ATTEMPTS:
-                attempts += 1
-                if attempts % 2000 == 0:
-                    print(f"   (尝试 {attempts}, 成功 {len(valid_pairs)})")
+            sp_start = spawn_points[idx1]
+            sp_end = spawn_points[idx2]
+            
+            route = grp.trace_route(sp_start.location, sp_end.location)
+            if not route: continue
+            length = get_route_length(route)
+            
+            if check_geometry(route, length, task):
+                is_verified = verify_route_execution(
+                    client, world, sp_start, sp_end, 
+                    route_id=f"{task}_{len(valid_pairs)}"
+                )
                 
-                idx1 = random.randint(0, len(spawn_points) - 1)
-                idx2 = random.randint(0, len(spawn_points) - 1)
-                if idx1 == idx2: continue
-                
-                sp_start = spawn_points[idx1]
-                sp_end = spawn_points[idx2]
-                
-                dist_line = sp_start.location.distance(sp_end.location)
-                if dist_line > ROUTE_MAX_DIST * 1.1 or dist_line < 5.0: continue
+                if is_verified:
+                    valid_pairs.append((idx1, idx2))
+                    with open(save_path, 'a') as f:
+                        f.write(f"{idx1} {idx2}\n")
 
-                try: route = grp.trace_route(sp_start.location, sp_end.location)
-                except: continue
-                
-                if not route: continue
-                length = get_route_length(route)
-                
-                if check_geometry(route, length, task):
-                    # 验证
-                    print(f"   候选 ({length:.1f}m) -> 验证...", end="")
-                    is_verified = verify_route_execution(
-                        client, world, sp_start, sp_end, 
-                        route_id=f"{task}_{len(valid_pairs)}"
-                    )
-                    
-                    if is_verified:
-                        print(" [PASS]")
-                        valid_pairs.append((idx1, idx2))
-                        save_path = os.path.join(output_path, f"{task}_{town}.txt")
-                        with open(save_path, 'a') as f:
-                            f.write(f"{idx1} {idx2}\n")
-                    else:
-                        print(" [TIMEOUT/FAIL]")
-            
-            print(f"--- {task} 完成。共生成 {len(valid_pairs)} 条 ---")
-
-    except Exception:
-        traceback.print_exc()
-    finally:
-        try:
-            settings = world.get_settings()
-            settings.synchronous_mode = False
-            world.apply_settings(settings)
-        except: pass
+    settings = world.get_settings()
+    settings.synchronous_mode = False
+    world.apply_settings(settings)
 
 if __name__ == '__main__':
     main()
