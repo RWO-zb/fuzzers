@@ -17,11 +17,21 @@ from utils.exp_manager import ExperimentManager
 from utils.utils import StoreDict
 from fuzz.cure_fuzz import CureFuzz
 
+def get_real_unwrapped_env(env):
+    current_env = env
+    while hasattr(current_env, 'venv'):
+        current_env = current_env.venv
+    
+    if hasattr(current_env, 'envs'):
+        return current_env.envs[0].unwrapped
+    
+    return None
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", help="environment ID", type=str, default="CartPole-v1")
+    parser.add_argument("--env", help="environment ID", type=str, default="BipedalWalkerHardcore-v3")
     parser.add_argument("-f", "--folder", help="Log folder", type=str, default="../rl-trained-agents")
-    parser.add_argument("--algo", help="RL Algorithm", default="ppo", type=str, required=False, choices=list(ALGOS.keys()))
+    parser.add_argument("--algo", help="RL Algorithm", default="tqc", type=str, required=False, choices=list(ALGOS.keys()))
     parser.add_argument("-n", "--n-timesteps", help="number of timesteps", default=300, type=int)
     parser.add_argument("--num-threads", help="Number of threads for PyTorch", default=-1, type=int)
     parser.add_argument("--n-envs", help="number of environments", default=1, type=int)
@@ -40,7 +50,7 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=100, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=2, type=int)
     
     args = parser.parse_args()
     
@@ -48,11 +58,10 @@ def main():
     result_folder = f"{now_str}_seed_{args.seed}"
     result_path = './results/' + result_folder + '/'
     os.makedirs(result_path, exist_ok=True)
-    
     log_file_path = os.path.join(result_path, 'cure_fuzz.txt')
-    f = open(log_file_path, 'w', buffering=1)
+    f = open(log_file_path, 'w', buffering=1, encoding='utf-8')
     sys.stdout = f
-    sys.stderr = f 
+    sys.stderr = f
 
     for env_module in args.gym_packages:
         importlib.import_module(env_module)
@@ -151,7 +160,7 @@ def main():
     i = 0
     
     # --- Corpus Generation Loop ---
-    # (Optional: You can add BD tracking here too, but mainly needed for Fuzzing Loop)
+    print("\nStarting Corpus Generation...")
     while i < seeds_num and (time.time() - start_corpus_time) <= (3600*2):
         states = np.random.randint(low=1, high=4, size=15)
         state = None
@@ -194,6 +203,8 @@ def main():
     pbar1 = tqdm.tqdm(total=seeds_num)
     seedcount = 0
     fuzz_selection_log = []
+    
+    print("\nStarting Fuzzing Loop...")
 
     # --- Fuzzing Loop ---
     while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0:
@@ -208,21 +219,22 @@ def main():
         obs = env.reset(mutate_states)
         sequences = [obs[0]]
         
-        # [NEW]: Initialize Behavior Descriptor Variables
-        # BipedalWalker Obs: [hull_angle, hull_angular_velocity, x_vel, y_vel, ...]
-        episode_x_vel_sum = 0.0
-        episode_hull_angle_sum = 0.0
+        total_x_pos_sum = 0.0
+        total_abs_angle_sum = 0.0
         episode_steps = 0
         
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, _ = env.step(action)
             
-            # [NEW]: Accumulate Behavior Features
-            # obs shape is (1, 24) because of VecEnv
-            current_obs = obs[0]
-            episode_x_vel_sum += current_obs[2]       # Index 2 is x_velocity
-            episode_hull_angle_sum += current_obs[0]  # Index 0 is hull_angle
+            real_env = get_real_unwrapped_env(env)
+            
+            raw_x_pos = real_env.hull.position[0]
+            raw_angle = real_env.hull.angle
+            
+            total_x_pos_sum += raw_x_pos
+            total_abs_angle_sum += abs(raw_angle)
+
             episode_steps += 1
             
             sequences.append(obs[0])
@@ -230,11 +242,8 @@ def main():
             if done:
                 break
         
-        # [NEW]: Calculate Final Behavior Descriptors
-        # Use Sum of X Velocity as proxy for Distance (assuming roughly constant dt)
-        # Use Mean Hull Angle
-        bd_dist = episode_x_vel_sum 
-        bd_mean_angle = episode_hull_angle_sum / max(1, episode_steps)
+        bd_dist = total_x_pos_sum / max(1, episode_steps)
+        bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
         
         intrinsic_reward = fuzzer.train_rnd(sequences)
         entropy = np.linalg.norm(np.asarray(obs[0]) - np.asarray(fuzzer.final_state))
@@ -243,7 +252,7 @@ def main():
         if done or episode_reward < 10:
             pbar1.update(1)
             fuzzer.add_crash(mutate_states)
-            print('Found: ', len(fuzzer.result))
+            print(f'Found Crash! Total: {len(fuzzer.result)}')
             did_crash = True
         else:
             condition = False
@@ -255,18 +264,19 @@ def main():
             if condition:
                 fuzzer.further_mutation(copy.deepcopy(mutate_states), episode_reward, entropy, intrinsic_reward, final_state, fuzzer.current_original)
         
-        # [NEW]: Save BD to log
         fuzz_selection_log.append({
             'seed_state': selected_info['seed_state'],
             'mutate_state': mutate_states,
             'parent_depth': current_mutation_depth,
             'did_crash': did_crash,
             'elapsed_time': time.time() - start_fuzz_time,
-            'bd_distance': bd_dist,      # <--- Added
-            'bd_mean_angle': bd_mean_angle # <--- Added
+            'bd_distance': bd_dist,      
+            'bd_mean_angle': bd_mean_angle 
         })
         
-        print(f'Total seeds tested: {seedcount}, Crashes found: {len(fuzzer.result)}')
+        if seedcount % 100 == 0:
+            print(f'Seeds tested: {seedcount}, Crashes found: {len(fuzzer.result)}')
+            
         current_time = time.time()
 
     crash_file = 'cure_crash.pkl' if args.guide else 'ablated_crash.pkl'
