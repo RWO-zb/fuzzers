@@ -11,7 +11,6 @@ import cv2
 import queue
 import pickle
 import copy
-import json  # [新增] 用于序列化物理参数
 from pathlib import Path
 import carla
 import pygame 
@@ -101,7 +100,39 @@ def patch_map_utils():
 patch_map_utils()
 
 # ==============================================================================
-# Diversity Managers
+# [新增] 辅助函数：序列化完整状态 (input_post)
+# ==============================================================================
+def get_full_state_str(ego_transform, npc_info_list):
+    """
+    将自我车辆和NPC的状态序列化为字符串，保留2位小数以便去重比较。
+    格式: Ego:[x,y,yaw]|NPCs:(x1,y1),(x2,y2)...
+    """
+    # 1. 序列化 Ego State
+    if ego_transform is None:
+        ego_str = "None"
+    else:
+        # 保留2位小数
+        ego_str = f"[{ego_transform.location.x:.2f},{ego_transform.location.y:.2f},{ego_transform.rotation.yaw:.2f}]"
+
+    # 2. 序列化 NPC State
+    # npc_info_list 结构在这里为: [(bp_id, transform), ...]
+    if not npc_info_list:
+        npc_str = "None"
+    else:
+        npc_coords = []
+        for item in npc_info_list:
+            # item[1] 是 carla.Transform
+            t = item[1]
+            npc_coords.append(f"({t.location.x:.2f},{t.location.y:.2f})")
+        
+        # 排序 NPC 坐标，防止因为列表顺序不同但内容相同导致的误判
+        npc_coords.sort() 
+        npc_str = ",".join(npc_coords)
+
+    return f"Ego:{ego_str}|NPCs:{npc_str}"
+
+# ==============================================================================
+# Diversity Managers (Modified)
 # ==============================================================================
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
@@ -109,7 +140,8 @@ class DiversityManager:
         self.y_min, self.y_max = y_range
         self.num_bins = num_bins
         self.visited_states = set()
-        self.crash_states = set()
+        # [修改] 改为 failure_states，存储所有失败（碰撞或未完成）的网格
+        self.failure_states = set()
         
     def get_grid_id(self, x, y):
         norm_x = (x - self.x_min) / (self.x_max - self.x_min + 1e-5)
@@ -126,15 +158,17 @@ class DiversityManager:
         grid_id = self.get_grid_id(x, y)
         self.visited_states.add(grid_id)
 
-    def record_crash(self, x, y):
+    # [修改] 使用 record_failure 替代 record_crash
+    def record_failure(self, x, y):
         grid_id = self.get_grid_id(x, y)
-        self.crash_states.add(grid_id)
+        self.failure_states.add(grid_id)
 
     def get_metrics(self):
         total_grids = self.num_bins * self.num_bins
         coverage = len(self.visited_states) / total_grids
-        distinct_crashes = len(self.crash_states)
-        return coverage, distinct_crashes
+        # [修改] 返回不同失败位置的数量
+        distinct_failures = len(self.failure_states)
+        return coverage, distinct_failures
 
 class BehaviorDiversityManager:
     def __init__(self, speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20):
@@ -277,6 +311,7 @@ class BenchmarkEnv:
             "Town02": ((-20, 200), (-20, 320)),
         }
         current_bounds = map_bounds.get(args.town, ((-500, 500), (-500, 500)))
+        # [Info] DiversityManager 实例化
         self.diversity_manager = DiversityManager(current_bounds[0], current_bounds[1], num_bins=100)
         self.behavior_manager = BehaviorDiversityManager(speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20)
         print(f"[INFO] Diversity Managers initialized for {args.town}")
@@ -318,7 +353,7 @@ class BenchmarkEnv:
         potential_spawns = self.map.get_spawn_points()
         
         batch = []
-        npc_ids = []
+        npc_info_list = [] # [修改] 存储 NPC 信息
         
         veh_config = getattr(generated_config, 'vehicles', [])
         
@@ -343,11 +378,15 @@ class BenchmarkEnv:
             cmd = carla.command.SpawnActor(blueprint, spawn_point).then(
                 carla.command.SetAutopilot(carla.command.FutureActor, True, self.tm_port))
             batch.append(cmd)
+            
+            # [修改] 保存 spawn_point (即 transform) 以便生成 input_post
+            npc_info_list.append((blueprint.id, spawn_point))
+            
             count += 1
             
         results = self.client.apply_batch_sync(batch, True)
         npc_ids = [r.actor_id for r in results if not r.error]
-        return npc_ids
+        return npc_ids, npc_info_list # [修改] 返回 npc_info_list
 
 
 def run_episode(env_manager, generated_config, run_name, results_dir):
@@ -397,7 +436,10 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             return None 
         
     # 4. Spawn NPCs
-    npc_ids = env_manager.init_generated_traffic(generated_config, start_pose, env_manager.args.num_vehicles)
+    # [修改] 接收 npc_infos 并生成 input_post_str
+    npc_ids, npc_infos = env_manager.init_generated_traffic(generated_config, start_pose, env_manager.args.num_vehicles)
+    input_post_str = get_full_state_str(start_pose, npc_infos) # 生成物理状态字符串
+
     world.tick()
     
     # 5. Setup Sensors
@@ -495,7 +537,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     sequence = [] 
     
     step = 0
-    # [对齐] 将最大时间步设置为 200，与 CureFuzz 一致
     max_steps = 200 
     stop_reason = "Timeout"
     
@@ -523,9 +564,12 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
                 collided = True
             
             cur_loc = vehicle.get_location()
+            
+            # [修改] 碰撞时记录坐标并退出，但不立即调用 DiversityManager
             if collided:
-                env_manager.diversity_manager.record_crash(cur_loc.x, cur_loc.y)
                 stop_reason = "Collision"
+                final_x = cur_loc.x
+                final_y = cur_loc.y
                 break
                 
             if not vehicle.is_alive:
@@ -597,7 +641,14 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     finally:
         avg_speed = np.mean(episode_speeds) if episode_speeds else 0.0
         steer_std = np.std(episode_steers) if episode_steers else 0.0
+        
+        # [修改] 判断是否失败 (只要不是 Success 就算失败)
         is_failure = (stop_reason != "Success")
+        
+        # [修改] 只有在失败时，才将最终位置记录为“失败点”
+        if is_failure:
+            env_manager.diversity_manager.record_failure(final_x, final_y)
+
         env_manager.behavior_manager.record_episode(avg_speed, steer_std, is_failure)
 
         if 'video_writer' in locals() and video_writer: video_writer.release()
@@ -619,7 +670,8 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             try: os.remove(route_file)
             except: pass
     
-    cov, dist_crashes = env_manager.diversity_manager.get_metrics()
+    # [修改] 从 diversity_manager 获取更新后的 metrics
+    cov, dist_failures = env_manager.diversity_manager.get_metrics()
     b_cnt, fb_cnt = env_manager.behavior_manager.get_metrics()
 
     return {
@@ -634,12 +686,13 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         "start_id": start_id,
         "target_id": target_id,
         "state_coverage": cov,
-        "distinct_crashes": dist_crashes,
+        "distinct_crashes": dist_failures, # 使用失败计数填充 distinct_crashes 字段
         "behavior_count": b_cnt,
         "fault_behavior_count": fb_cnt,
         "final_x": final_x,
         "final_y": final_y,
-        "final_dist": cur_distance
+        "final_dist": cur_distance,
+        "input_post": input_post_str # [修改] 返回 input_post
     }
 
 
@@ -673,7 +726,7 @@ def run_generation_loop(args):
         results_dir.mkdir(parents=True, exist_ok=True)
         summary_csv = results_dir / "summary.csv"
         
-        # [修改] 增加了 final_dist, input_vector 和 physical_params
+        # [修改] 使用 input_post 并移除 physical_params
         columns = [
             "task_id", "method", "success", "collision", "stop_reason", 
             "total_reward", "duration", "steps", 
@@ -683,7 +736,7 @@ def run_generation_loop(args):
             "state_coverage", "distinct_crashes", 
             "behavior_count", "fault_behavior_count",
             "final_x", "final_y", "elapsed_time",
-            "final_dist", "input_vector", "physical_params" # 像CureFuzz一样的物理参数列
+            "final_dist", "input_post" # 使用 input_post 代替 input_vector 和 physical_params
         ]
         
         pd.DataFrame(columns=columns).to_csv(summary_csv, index=False)
@@ -693,9 +746,6 @@ def run_generation_loop(args):
         
         while (time.time() - start_time) < 3600 * args.hour:
             
-            # [逻辑说明] 
-            # 如果 step 是 args.step 的倍数 (例如每 5 步), 进入 "Generation" 阶段
-            # 否则进入 "Random" 阶段
             if cur_step > 0 and cur_step % args.step == 0:
                 print(f"[Info] Training Diffusion Model at step {cur_step}")
                 if len(normal_case_list) > 0:
@@ -716,8 +766,6 @@ def run_generation_loop(args):
                 metric_list = []
                 memory_model.clear()
                 
-                # [逻辑说明] 这里的 10 表示每次训练完模型后，立刻生成 10 个测试用例来验证模型
-                # 如果您想改变生成的频率，修改 range(10) 为您想要的数字
                 for idx in range(10): 
                     try:
                         generated_vec = diffusion_model.generate()
@@ -765,16 +813,6 @@ def run_generation_loop(args):
                         
                         print(f"[{task_id}] Res: {res['stop_reason']} | Rew: {total_reward:.2f} | Behav: {res['behavior_count']}")
                         
-                        # [新增逻辑] 提取 CureFuzz 风格的物理参数
-                        physical_config = {
-                            "route_idx": int(carla_env.start_pose),
-                            "weather_id": int(carla_env.weather),
-                            "ego_offset": [float(carla_env.start_pose_x), float(carla_env.start_pose_y), float(carla_env.start_pose_yaw)],
-                            # 只保存实际用到的前 N 辆车
-                            "npc_offsets": [ [float(xy[0]), float(xy[1])] for xy in getattr(carla_env, 'vehicles', [])[:args.num_vehicles] ] 
-                        }
-                        physical_params_str = json.dumps(physical_config)
-
                         row_data = {
                             "task_id": task_id,
                             "method": args.method,
@@ -802,8 +840,7 @@ def run_generation_loop(args):
                             "final_y": res['final_y'],
                             "elapsed_time": time.time() - start_time,
                             "final_dist": res.get('final_dist', 0.0),
-                            "input_vector": str(generated_vec.tolist()),
-                            "physical_params": physical_params_str # 保存可读的物理参数
+                            "input_post": res['input_post'] # [修改] 记录 input_post
                         }
                         pd.DataFrame([row_data]).to_csv(summary_csv, mode='a', header=False, index=False)
                         
@@ -814,7 +851,6 @@ def run_generation_loop(args):
             else:
                 try:
                     # [Random 阶段]
-                    # 生成随机向量作为基准
                     normal_case = np.random.uniform(-1, 1, case_dimension)
                     carla_env = Carla_ENV()
                     carla_env.from_vector(normal_case)
@@ -848,15 +884,6 @@ def run_generation_loop(args):
                             
                             print(f"[{task_id}] Rew: {total_reward:.2f}")
 
-                            # [新增逻辑] 随机阶段也需要保存物理参数
-                            physical_config = {
-                                "route_idx": int(carla_env.start_pose),
-                                "weather_id": int(carla_env.weather),
-                                "ego_offset": [float(carla_env.start_pose_x), float(carla_env.start_pose_y), float(carla_env.start_pose_yaw)],
-                                "npc_offsets": [ [float(xy[0]), float(xy[1])] for xy in getattr(carla_env, 'vehicles', [])[:args.num_vehicles] ]
-                            }
-                            physical_params_str = json.dumps(physical_config)
-
                             row_data = {
                                 "task_id": task_id,
                                 "method": "random",
@@ -884,8 +911,7 @@ def run_generation_loop(args):
                                 "final_y": res['final_y'],
                                 "elapsed_time": time.time() - start_time,
                                 "final_dist": res.get('final_dist', 0.0),
-                                "input_vector": str(normal_case.tolist()),
-                                "physical_params": physical_params_str # 保存这一列
+                                "input_post": res['input_post'] # [修改] 记录 input_post
                             }
                             pd.DataFrame([row_data]).to_csv(summary_csv, mode='a', header=False, index=False)
 
@@ -901,9 +927,9 @@ def run_generation_loop(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=2000)
+    parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--town", default="Town01")
-    parser.add_argument("--num_vehicles", type=int, default=20)
+    parser.add_argument("--num_vehicles", type=int, default=30)
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--method", default="generative", 
                         choices=['generative', 'generative+density', 'generative+sensitivity', 'generative+performance', 'generative+novelty'])

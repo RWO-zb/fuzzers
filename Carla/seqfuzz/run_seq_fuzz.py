@@ -63,6 +63,38 @@ def patch_map_utils():
 patch_map_utils()
 
 # ==============================================================================
+# [新增] 辅助函数：序列化完整状态
+# ==============================================================================
+def get_full_state_str(ego_transform, npc_info_list):
+    """
+    将自我车辆和NPC的状态序列化为字符串，保留2位小数以便去重比较。
+    格式: Ego:[x,y,yaw]|NPCs:(x1,y1),(x2,y2)...
+    """
+    # 1. 序列化 Ego State
+    if ego_transform is None:
+        ego_str = "None"
+    else:
+        # 保留2位小数
+        ego_str = f"[{ego_transform.location.x:.2f},{ego_transform.location.y:.2f},{ego_transform.rotation.yaw:.2f}]"
+
+    # 2. 序列化 NPC State
+    # npc_info_list 结构通常为: [(bp_id, transform, color, driver_id), ...]
+    if not npc_info_list:
+        npc_str = "None"
+    else:
+        npc_coords = []
+        for item in npc_info_list:
+            # item[1] 是 carla.Transform
+            t = item[1]
+            npc_coords.append(f"({t.location.x:.2f},{t.location.y:.2f})")
+        
+        # 排序 NPC 坐标，防止因为列表顺序不同但内容相同导致的误判
+        npc_coords.sort() 
+        npc_str = ",".join(npc_coords)
+
+    return f"Ego:{ego_str}|NPCs:{npc_str}"
+
+# ==============================================================================
 # [对齐] Diversity Manager Classes
 # ==============================================================================
 class DiversityManager:
@@ -292,6 +324,7 @@ class SeqFuzzManager:
             
             bp = rng.choice(blueprints)
             bp.set_attribute('role_name', 'autopilot')
+            # 记录 NPC 信息以便后续变异和日志记录
             npc_info_list.append((bp.id, transform, None, None))
             
             cmd = carla.command.SpawnActor(bp, transform).then(
@@ -597,10 +630,10 @@ def log_result(manager, task_id, phase, weather, start, target, res, cvg_metric,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=2000)
+    parser.add_argument("--port", type=int, default=3000)
     parser.add_argument("--town", default="Town01")
     parser.add_argument("--suite", default="straight")
-    parser.add_argument("--num_vehicles", type=int, default=20)
+    parser.add_argument("--num_vehicles", type=int, default=30)
     parser.add_argument("--max_run", type=int, default=100)
     parser.add_argument("--num_tasks", type=int, default=5)
     parser.add_argument("--seed", type=int, default=2024)
@@ -645,7 +678,9 @@ def main():
                 cvg = 0
                 if len(seq_np) > 5: cvg = manager.fuzzer.state_coverage(seq_np)
 
-                input_post_str = str(res['final_state'].tolist())
+                # [修改] 使用辅助函数生成 input_post (Phase 1 pre 为 None)
+                # res['npc_info'] 包含了初始生成的 NPC Transform
+                input_post_str = get_full_state_str(start_pose, res['npc_info'])
                 log_result(manager, run_name, "Phase1", weather_id, start_id, target_id, res, cvg, 0, 0, "None", input_post_str)
                 
                 if res['success'] and not res['collision']:
@@ -684,15 +719,25 @@ def main():
                 print("[INFO] Corpus empty. Stopping.")
                 break
             
+            # 1. 获取种子
             seed_pose = manager.fuzzer.get_pose()
             cur_gen = manager.fuzzer.current_generation
-            pre_input = manager.fuzzer.current_final_state
+            
+            # [修改] 捕获变异前的状态 (input_pre)
+            # manager.fuzzer.get_vehicle_info() 返回当前种子的 NPC 列表 (在 vehicle_mutate 调用前)
+            seed_npc = manager.fuzzer.get_vehicle_info()
+            input_pre_str = get_full_state_str(seed_pose, seed_npc)
+
+            # 2. 执行变异
+            mut_start = manager.fuzzer.mutation(seed_pose)
+            mut_npc = manager.fuzzer.vehicle_mutate(seed_npc)
+            
+            # [修改] 捕获变异后的状态 (input_post)
+            input_post_str = get_full_state_str(mut_start, mut_npc)
+            
             env_setting = manager.fuzzer.current_envsetting
             s_id, t_id, w_id = env_setting[0], env_setting[1], env_setting[2]
-            
             target_pose = manager.spawn_points[t_id] if t_id < total_spawns else manager.spawn_points[0]
-            mut_start = manager.fuzzer.mutation(seed_pose)
-            mut_npc = manager.fuzzer.vehicle_mutate(manager.fuzzer.get_vehicle_info())
             
             run_name = f"fuzz_{fuzz_idx:04d}"
             res = run_episode(manager, mut_start, target_pose, w_id, run_name, "Phase2", npc_data=mut_npc, seed=args.seed+10000+fuzz_idx)
@@ -710,8 +755,8 @@ def main():
                 is_anomaly = predict_one(manager.tapnet, seq_np)
             
             new_gen = cur_gen + 1
-            input_pre_str = str(pre_input.tolist()) if pre_input is not None else "None"
-            input_post_str = str(res['final_state'].tolist())
+            
+            # 3. 记录日志 (传入 pre 和 post)
             log_result(manager, run_name, "Phase2", w_id, s_id, t_id, res, cvg, is_anomaly, new_gen, input_pre_str, input_post_str)
             print(f"ID:{run_name} | R:{res['total_reward']:.1f} | CVG:{cvg:.3f} | Anom:{is_anomaly} | Gen:{new_gen}")
             

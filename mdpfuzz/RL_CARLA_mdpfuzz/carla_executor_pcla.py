@@ -101,6 +101,47 @@ if not hasattr(PCLA, 'get_action_with_entropy'):
         return self.get_action(), 0.0
     PCLA.get_action_with_entropy = patched_get_action
 
+# ==============================================================================
+# 辅助函数：序列化输入向量 (NEW)
+# ==============================================================================
+def get_full_state_str(input_vector):
+    """
+    解析 MDPFuzz 的输入向量并序列化为保留2位小数的字符串。
+    向量结构: [weather, target, start, ego_x, ego_y, ego_z, ego_yaw, npc1_x, npc1_y, npc1_z, npc1_yaw, ...]
+    """
+    if input_vector is None:
+        return "None"
+    
+    try:
+        # 确保是 numpy array
+        if not isinstance(input_vector, np.ndarray):
+            input_vector = np.array(input_vector)
+            
+        # Ego State (Indices 3-6: x, y, z, yaw)
+        # 注意: index 5 是 z, 我们主要关注平面坐标 x, y 和朝向 yaw
+        ego_x = input_vector[3]
+        ego_y = input_vector[4]
+        ego_yaw = input_vector[6]
+        
+        ego_str = f"[{ego_x:.2f},{ego_y:.2f},{ego_yaw:.2f}]"
+        
+        # NPC State (Index 7 onwards, stride 4)
+        # 每个 NPC 占用 4 个位置: x, y, z, yaw
+        npc_coords = []
+        for i in range(7, len(input_vector), 4):
+            if i + 1 < len(input_vector):
+                n_x = input_vector[i]
+                n_y = input_vector[i+1]
+                npc_coords.append(f"({n_x:.2f},{n_y:.2f})")
+        
+        # 排序以支持去重 (忽略 NPC 列表的顺序差异)
+        npc_coords.sort()
+        npc_str = ",".join(npc_coords) if npc_coords else "None"
+        
+        return f"Ego:{ego_str}|NPCs:{npc_str}"
+    except Exception as e:
+        return f"ErrorParsing:{str(e)}"
+
 # ... (DiversityManager 和 BehaviorDiversityManager 保持不变) ...
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
@@ -385,14 +426,16 @@ class PCLAExecutor(Executor):
 
     def mutate(self, input: np.ndarray, rng: np.random.Generator, **kwargs) -> np.ndarray:
         mutant = input.copy()
-        mutant[3] += rng.uniform(-0.5, 0.5) 
-        mutant[4] += rng.uniform(-0.5, 0.5) 
-        mutant[6] += rng.uniform(-5, 5)     
+        # [修改] 与 seqfuzz 和 cure 保持一致
+        mutant[3] += rng.uniform(-0.15, 0.15)  # Ego X (原为 -0.5, 0.5)
+        mutant[4] += rng.uniform(-0.15, 0.15)  # Ego Y (原为 -0.5, 0.5)
+        mutant[6] += rng.uniform(-5, 5)        # Ego Yaw (保持不变)
         
         start_npc_idx = 7
         for i in range(start_npc_idx, len(mutant), 4):
-            mutant[i] += rng.uniform(-0.2, 0.2)
-            mutant[i+1] += rng.uniform(-0.2, 0.2)
+            # [修改] 与 seqfuzz 和 cure 保持一致
+            mutant[i] += rng.uniform(-0.1, 0.1)    # NPC X (原为 -0.2, 0.2)
+            mutant[i+1] += rng.uniform(-0.1, 0.1)  # NPC Y (原为 -0.2, 0.2)
         return mutant
 
     def load_policy(self):
@@ -403,9 +446,9 @@ class PCLAExecutor(Executor):
         
         print(f"[Debug] Input Vector Header: Weather={int(input[0])}, Target={int(input[1])}, StartID={int(input[2])}")
 
-        # 格式化输入向量为字符串以进行保存
-        current_input_str = str(list(input))
-        parent_input_str = str(list(parent_input)) if parent_input is not None else "None"
+        # [修改] 使用辅助函数格式化状态字符串
+        current_input_str = get_full_state_str(input)
+        parent_input_str = get_full_state_str(parent_input)
 
         weather_idx = int(input[0])
         target_idx = int(input[1])
