@@ -1,6 +1,5 @@
 import os
 import sys
-import traceback
 import time
 import math
 import random
@@ -10,17 +9,12 @@ import pandas as pd
 import cv2
 import queue
 import pickle
-import copy
 from pathlib import Path
 import carla
 import pygame
 
-# [关键修复] 强制使用 dummy 视频驱动
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
-# ==============================================================================
-# [路径修正]
-# ==============================================================================
 current_script_path = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_script_path)
 
@@ -28,12 +22,10 @@ if current_script_path not in sys.path:
     sys.path.insert(0, current_script_path)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-    print(f"[INFO] Added project root to sys.path: {project_root}")
 
 try:
     from bird_view.utils import map_utils
 except ImportError:
-    print("[ERROR] Could not import map_utils.")
     sys.exit(1)
 
 try:
@@ -42,21 +34,15 @@ except ImportError:
     try:
         from PCLA import PCLA, route_maker, location_to_waypoint
     except ImportError:
-        print("[ERROR] Could not import PCLA.")
         sys.exit(1)
 
 try:
     from fuzz.cure_fuzz import cure
     from fuzz.replayer import replayer 
 except ImportError:
-    print("[ERROR] Could not import fuzz modules.")
     sys.exit(1)
 
-# ==============================================================================
-# [补丁] PyGame Off-screen
-# ==============================================================================
 def patch_map_utils():
-    print("[INFO] Applying Robust Off-screen Rendering Patch to map_utils...")
     @classmethod
     def patched_init(cls, client, world, carla_map, player):
         pygame.init()
@@ -93,9 +79,6 @@ def patch_map_utils():
 
 patch_map_utils()
 
-# ==============================================================================
-# Diversity Manager 1: Spatial (State Coverage & Crash Location)
-# ==============================================================================
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
         self.x_min, self.x_max = x_range
@@ -129,61 +112,34 @@ class DiversityManager:
         distinct_crashes = len(self.crash_states)
         return coverage, distinct_crashes
 
-# ==============================================================================
-# Diversity Manager 2: Behavior (QD-Fuzz Logic)
-# ==============================================================================
 class BehaviorDiversityManager:
     def __init__(self, speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20):
-        """
-        基于 QD-Fuzz 论文的 Behavior Space 实现
-        Dimension 1: Average Speed (m/s) - 衡量激进度
-        Dimension 2: Steering Stability (Std Dev) - 衡量稳定性
-        """
         self.speed_min, self.speed_max = speed_range
         self.steer_min, self.steer_max = steer_range
         self.num_bins = num_bins
-        
-        # 存储已发现的行为 (Behavior Archive)
-        # key: (grid_speed, grid_steer), value: present
         self.behavior_archive = set()
-        self.fault_archive = set() # 专门记录 Crash/Failure 的行为多样性
+        self.fault_archive = set()
 
     def get_bin_index(self, value, v_min, v_max):
-        """将连续值映射到离散 Bin"""
         norm = (value - v_min) / (v_max - v_min + 1e-6)
         norm = np.clip(norm, 0, 1)
-        # 映射到 0 到 num_bins-1
         idx = int(norm * self.num_bins)
         if idx == self.num_bins: idx -= 1
         return idx
 
     def record_episode(self, avg_speed, steer_std, is_failure):
-        """
-        记录一个完整的 Episode 特征
-        """
         idx_speed = self.get_bin_index(avg_speed, self.speed_min, self.speed_max)
         idx_steer = self.get_bin_index(steer_std, self.steer_min, self.steer_max)
-        
         behavior_signature = (idx_speed, idx_steer)
-        
-        # 记录总体行为
         self.behavior_archive.add(behavior_signature)
-        
-        # 如果是失败案例，记录故障行为多样性
         if is_failure:
             self.fault_archive.add(behavior_signature)
 
     def get_metrics(self):
-        """返回行为覆盖率指标 (Count of Unique Behaviors)"""
-        # 返回绝对数量，方便与 QD-Fuzz 论文中的图表对比 (#Behaviours)
         behavior_count = len(self.behavior_archive)
         fault_diversity_count = len(self.fault_archive)
-        
         return behavior_count, fault_diversity_count
 
-# ==============================================================================
-# 全局设置
-# ==============================================================================
 def set_global_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -268,7 +224,6 @@ class BenchmarkEnv:
         self.result_dir = Path(result_dir)
         self.start_time = time.time()
         
-        # Spatial Diversity
         map_bounds = {
             "Town01": ((-20, 420), (-20, 350)),
             "Town02": ((-20, 200), (-20, 320)),
@@ -277,12 +232,8 @@ class BenchmarkEnv:
         }
         current_bounds = map_bounds.get(args.town, ((-500, 500), (-500, 500)))
         self.diversity_manager = DiversityManager(current_bounds[0], current_bounds[1], num_bins=100)
-        
-        # Behavior Diversity (QD-Fuzz)
         self.behavior_manager = BehaviorDiversityManager(speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20)
         
-        print(f"[INFO] Diversity Managers initialized for {args.town}")
-
         self.tm_port = args.port + 8000
         self.traffic_manager = self.client.get_trafficmanager(self.tm_port)
         self.traffic_manager.set_synchronous_mode(True)
@@ -303,17 +254,13 @@ class BenchmarkEnv:
         self.init_vehicles = [] 
 
         if not self.summary_csv.exists():
-            # [NEW] 修改：添加新的列 mutation_generation, input_pre, input_post
             columns = [
                 "task_id", "phase", "weather_id", "start_id", "target_id",
                 "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
-                "duration", "steps", "final_dist", "video_path",
+                "steps", "final_dist", "video_path",
                 "elapsed_time", "current_timestamp",
-                # Spatial Metrics
                 "state_coverage", "distinct_crashes", "final_x", "final_y",
-                # Behavior Metrics (QD)
                 "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
-                # Mutation Tracking
                 "mutation_generation", "input_pre", "input_post"
             ]
             df = pd.DataFrame(columns=columns)
@@ -330,10 +277,8 @@ class BenchmarkEnv:
         for p in possible_paths:
             if p.exists():
                 task_file = p
-                print(f"[INFO] Loaded task file: {task_file}")
                 break
         if not task_file:
-            print(f"[WARNING] Task file not found.")
             return []
         tasks = []
         with open(task_file, 'r') as f:
@@ -372,9 +317,6 @@ class BenchmarkEnv:
         results = self.client.apply_batch_sync(batch, True)
         return [r.actor_id for r in results if not r.error]
 
-# ==============================================================================
-# 单次运行逻辑 (State Coverage + Failure Diversity + Behavior Diversity)
-# ==============================================================================
 def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase, npc_count=0, npc_mutate_info=None, seed=None):
     if seed is not None:
         set_global_seed(seed)
@@ -465,7 +407,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     camera_sensor = None
     video_writer = None
 
-    # [QD] 行为数据收集
     episode_speeds = []
     episode_steers = []
 
@@ -519,7 +460,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
             except: pass
             
             if collided:
-                # [CHANGE] Phase 1 阶段不计算 Crash Diversity
                 if phase != "Phase1":
                     crash_loc = vehicle.get_location()
                     env_manager.diversity_manager.record_crash(crash_loc.x, crash_loc.y)
@@ -529,17 +469,14 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
             control, entropy = agent.get_action_with_entropy()
             if control: 
                 vehicle.apply_control(control)
-                # [QD] 收集转向
                 episode_steers.append(control.steer)
             
             v = vehicle.get_velocity()
             cur_speed = np.array([v.x, v.y, v.z])
-            # [QD] 收集速度
             episode_speeds.append(np.linalg.norm(cur_speed))
 
             cur_loc = vehicle.get_location()
             
-            # [CHANGE] Phase 1 阶段不计算 State Coverage
             if phase != "Phase1":
                 env_manager.diversity_manager.record_step(cur_loc.x, cur_loc.y)
 
@@ -585,28 +522,20 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
                 break
             step += 1
 
-        # Spatial Failure Handling: Record unsuccesful location
         if not is_success and not collided:
             if 'cur_loc' in locals():
-                # [CHANGE] Phase 1 阶段不计算 Crash Diversity
                 if phase != "Phase1":
                     env_manager.diversity_manager.record_crash(cur_loc.x, cur_loc.y)
 
-        # [QD] Behavior Diversity Logic
-        # 计算整局特征
         avg_speed = np.mean(episode_speeds) if episode_speeds else 0.0
         steer_std = np.std(episode_steers) if episode_steers else 0.0
-        
-        # Unsuccessful 也算作故障行为多样性
         is_failure = (not is_success)
         
-        # [CHANGE] Phase 1 阶段不计算 Behavior Diversity
         if phase != "Phase1":
             env_manager.behavior_manager.record_episode(avg_speed, steer_std, is_failure)
 
     except Exception:
         stop_reason = "Exception"
-        traceback.print_exc()
         if wrapper_initialized: env_manager.map_wrapper.clear()
         if collision_sensor: collision_sensor.destroy()
         if vehicle: vehicle.destroy()
@@ -653,7 +582,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         "final_state": sequence[-1] if sequence else np.zeros(RND_INPUT_SIZE),
         "stop_reason": stop_reason,
         "steps": step,
-        "duration": 0,
         "final_dist": cur_distance if 'cur_distance' in locals() else 0,
         "video_path": str(video_path),
         "npc_info": current_npc_info,
@@ -682,23 +610,12 @@ def run_benchmark_suite(args):
     tasks = env_manager.load_suite_tasks(args.town, args.suite)
     weather_list = [1, 3, 6, 8]
     
-    print(f"[Phase1] Starting initialization to collect {args.num_tasks} successful seeds...")
-    
-    # ==========================================================================
-    # Phase 1: Modified Logic
-    # 1. Iterate until we collect `num_tasks` SUCCESSFUL seeds.
-    # 2. Log ALL attempts (including failures).
-    # 3. Skip failed seeds and try the next one in `tasks`.
-    # ==========================================================================
-    
     collected_seeds_count = 0
     task_idx = 0
     
-    # 循环条件：收集的种子数量未满 且 还有可用的任务
     while collected_seeds_count < args.num_tasks and task_idx < len(tasks):
         start_id, target_id = tasks[task_idx]
         
-        # 边界检查
         if start_id >= total_spawns or target_id >= total_spawns:
             task_idx += 1
             continue
@@ -706,32 +623,23 @@ def run_benchmark_suite(args):
         start_pose = env_manager.spawn_points[start_id]
         target_pose = env_manager.spawn_points[target_id]
         
-        # 使用唯一 seed 以保证可复现
         current_task_seed = args.seed + task_idx 
         task_rng = random.Random(current_task_seed)
         weather_id = task_rng.choice(weather_list)
         
-        # 运行名称包含 collected_count 以便排序，保留 task_idx 以便追溯
         run_name = f"seed_{collected_seeds_count:02d}_task{task_idx:03d}"
-        
-        print(f"[Phase1] Attempting Task {task_idx} (Collected: {collected_seeds_count}/{args.num_tasks})...")
         
         res = run_single(env_manager, start_pose, target_pose, weather_id, run_name, "Phase1", npc_count=args.num_vehicles, seed=current_task_seed)
         
-        # --- Handle Logging for ALL results (Success or Fail) ---
         intrinsic_reward = 0
         
-        # 如果 res 是有效字典（即没有发生 INITIAL_CRASH 且运行正常结束）
         if isinstance(res, dict):
             if len(res['sequence']) > 10:
                 intrinsic_reward = env_manager.fuzzer.train_rnd(np.array(res['sequence']))
             
-            # 此时获取的 metrics 应该为 0（因为 Phase1 禁用了记录）
             cov, dist_crashes = env_manager.diversity_manager.get_metrics()
             b_cnt, fb_cnt = env_manager.behavior_manager.get_metrics()
             
-            # [NEW] Phase 1 的 Input 记录
-            # generation 为 0，input_pre 为空，input_post 为当前 final_state
             input_post_str = str(res['final_state'].tolist()) if 'final_state' in res else "[]"
             
             log_result(env_manager, run_name, "Phase1", weather_id, start_id, target_id, res, intrinsic_reward, 
@@ -741,43 +649,27 @@ def run_benchmark_suite(args):
                        avg_speed=res['avg_speed'], steer_std=res['steer_std'],
                        mutation_generation=0, input_pre="None", input_post=input_post_str)
 
-            # --- Decision: Keep or Skip? ---
-            # 只有成功且无碰撞的才算作合格种子
             if res['success'] and not res['collision']:
-                print(f"[Phase1] >>> Success! Added seed {run_name} to corpus.")
-                
-                # Add to Fuzzer Corpus
                 current_pose_tuple = (start_pose, res['npc_info']) 
-                # [NEW] 传递 generation=0
                 env_manager.fuzzer.further_mutation(
                     current_pose_tuple, res['total_reward'], res['seq_entropy'], intrinsic_reward, res['final_state'], current_pose_tuple, [start_id, target_id, weather_id],
                     generation=0
                 )
-                
                 collected_seeds_count += 1
-            else:
-                print(f"[Phase1] !!! Failed (Success={res['success']}, Collision={res['collision']}). Skipping to next task.")
         
         else:
-            # 处理 INITIAL_CRASH 或其他 None 返回
-            print(f"[Phase1] !!! Run Failed / Initial Crash. Skipping.")
-            # 构造一个假的失败记录以保证 summary.csv 记录了这次尝试
             dummy_res = {
                 'success': False, 'stop_reason': "InitialCrash", 'collision': True,
-                'total_reward': 0, 'duration': 0, 'steps': 0, 'final_dist': 0, 'video_path': "",
+                'total_reward': 0, 'steps': 0, 'final_dist': 0, 'video_path': "",
                 'final_x': 0, 'final_y': 0, 'avg_speed': 0, 'steer_std': 0
             }
             log_result(env_manager, run_name, "Phase1", weather_id, start_id, target_id, dummy_res, 0, mutation_generation=0, input_pre="None", input_post="None")
 
-        # 无论成功与否，都处理下一个任务
         task_idx += 1
 
-    print(f"[Phase1] Initialization Complete. Collected {collected_seeds_count} seeds from {task_idx} attempts.")
-    
     start_time = time.time()
     fuzz_idx = 0
     
-    # Phase 2
     while True:
         if (time.time() - start_time) > (args.fuzz_hours * 3600): break
         if len(env_manager.fuzzer.corpus) == 0: break
@@ -785,10 +677,9 @@ def run_benchmark_suite(args):
         current_fuzz_seed = args.seed + 100000 + fuzz_idx
         set_global_seed(current_fuzz_seed)
         
-        # [NEW] 在变异前获取种子和状态，包括 generation
         seed_pose = env_manager.fuzzer.get_pose() 
         current_generation = env_manager.fuzzer.current_generation
-        pre_input = env_manager.fuzzer.current_final_state # 变异前的 input
+        pre_input = env_manager.fuzzer.current_final_state 
         
         mutated_start_pose = env_manager.fuzzer.mutation(seed_pose)
         mutated_vehicles = env_manager.fuzzer.vehicle_mutate(env_manager.fuzzer.current_vehicle_info)
@@ -798,7 +689,6 @@ def run_benchmark_suite(args):
         target_pose = env_manager.spawn_points[target_id] if target_id < total_spawns else env_manager.spawn_points[0]
         run_name = f"fuzz_{fuzz_idx:04d}"
         
-        # Phase 2 正常计算所有指标
         res_fuzz = run_single(env_manager, mutated_start_pose, target_pose, weather_id, run_name, "Phase2", npc_count=args.num_vehicles, npc_mutate_info=mutated_vehicles, seed=current_fuzz_seed)
         
         if res_fuzz == "INITIAL_CRASH" or not res_fuzz:
@@ -812,7 +702,6 @@ def run_benchmark_suite(args):
         cov, dist_crashes = env_manager.diversity_manager.get_metrics()
         b_cnt, fb_cnt = env_manager.behavior_manager.get_metrics()
         
-        # [NEW] 记录变异代数 (父代 + 1) 和 input 前后状态
         new_generation = current_generation + 1
         input_pre_str = str(pre_input.tolist()) if isinstance(pre_input, np.ndarray) else "None"
         input_post_str = str(res_fuzz['final_state'].tolist()) if 'final_state' in res_fuzz else "[]"
@@ -824,8 +713,6 @@ def run_benchmark_suite(args):
                    avg_speed=res_fuzz['avg_speed'], steer_std=res_fuzz['steer_std'],
                    mutation_generation=new_generation, input_pre=input_pre_str, input_post=input_post_str)
         
-        print(f"[METRICS] ID:{run_name} | BehavCnt: {b_cnt} | FaultBehav: {fb_cnt} | Crash: {res_fuzz['collision']} | Gen: {new_generation}")
-
         new_entropy = np.linalg.norm(res_fuzz['final_state'] - env_manager.fuzzer.current_final_state) + res_fuzz['seq_entropy']
         
         if res_fuzz['collision']:
@@ -842,7 +729,6 @@ def run_benchmark_suite(args):
                intrinsic_fuzz > args.threshold_intrinsic or \
                new_entropy > args.threshold_entropy:
                 
-                # [NEW] 传递 new_generation
                 env_manager.fuzzer.further_mutation(
                     (env_manager.fuzzer.current_pose, env_manager.fuzzer.current_vehicle_info),
                     res_fuzz['total_reward'], new_entropy, intrinsic_fuzz, res_fuzz['final_state'],
@@ -852,7 +738,6 @@ def run_benchmark_suite(args):
     
     save_replayer_pickle(env_manager.replayer, result_folder)
 
-# [NEW] 修改：增加三个新参数 mutation_generation, input_pre, input_post
 def log_result(env_manager, task_id, phase, weather, start, target, res, intrinsic, 
                coverage=0.0, distinct_crashes=0, final_x=0.0, final_y=0.0,
                behavior_count=0, fault_behavior_count=0, avg_speed=0.0, steer_std=0.0,
@@ -860,7 +745,7 @@ def log_result(env_manager, task_id, phase, weather, start, target, res, intrins
     columns = [
         "task_id", "phase", "weather_id", "start_id", "target_id",
         "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
-        "duration", "steps", "final_dist", "video_path",
+        "steps", "final_dist", "video_path",
         "elapsed_time", "current_timestamp",
         "state_coverage", "distinct_crashes", "final_x", "final_y",
         "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
@@ -874,7 +759,7 @@ def log_result(env_manager, task_id, phase, weather, start, target, res, intrins
         "success": res['success'], "stop_reason": res['stop_reason'],
         "collision": res['collision'], 
         "total_reward": res['total_reward'], "intrinsic_reward": intrinsic,
-        "duration": res['duration'], "steps": res['steps'], "final_dist": res['final_dist'],
+        "steps": res['steps'], "final_dist": res['final_dist'],
         "video_path": res['video_path'], 
         "elapsed_time": elapsed_time, "current_timestamp": current_time,
         "state_coverage": coverage, "distinct_crashes": distinct_crashes,

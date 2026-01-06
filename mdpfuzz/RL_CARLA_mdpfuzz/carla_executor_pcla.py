@@ -302,9 +302,10 @@ class PCLAExecutor(Executor):
         self.rng = np.random.default_rng(seed=int(time.time()))
 
     def _init_csv(self):
+        # [修改] 移除了 intrinsic_reward 列
         columns = [
             "task_id", "phase", "global_time", "weather_id", "start_id", "target_id",
-            "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
+            "success", "stop_reason", "collision", "total_reward", 
             "duration", "steps", "final_dist", "video_path",
             "state_coverage", "distinct_crashes", "final_x", "final_y",
             "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
@@ -647,30 +648,25 @@ class PCLAExecutor(Executor):
             duration = time.time() - start_time
             final_video_path = str(video_filename) if video_filename.exists() and video_filename.stat().st_size > 0 else "None"
             
-            # 多样性计算
-            cov, dist_crashes = self.diversity_manager.get_metrics()
-            b_cnt, fb_cnt = self.behavior_manager.get_metrics()
+            # [关键修复] 计算平均速度和转向标准差
+            avg_speed = 0.0
+            steer_std = 0.0
+            if len(episode_speeds) > 0:
+                avg_speed = float(np.mean(episode_speeds))
+            if len(episode_steers) > 0:
+                steer_std = float(np.std(episode_steers))
+
+            final_avg_speed = avg_speed
+            final_steer_std = steer_std
             
             final_x = 0.0
             final_y = 0.0
             if 'cur_loc' in locals():
                 final_x = cur_loc.x
                 final_y = cur_loc.y
-            
-            final_avg_speed = avg_speed if 'avg_speed' in locals() else 0.0
-            final_steer_std = steer_std if 'steer_std' in locals() else 0.0
-
-            # 1. 始终记录 Log
-            self._log_result(
-                task_id, phase, current_global_time, weather_idx, start_idx, target_idx, 
-                is_success, stop_reason, is_collision, total_reward, 0, 
-                duration, step, final_dist, final_video_path,
-                cov, dist_crashes, final_x, final_y, 
-                b_cnt, fb_cnt, final_avg_speed, final_steer_std,
-                generation, parent_input_str, current_input_str
-            )
 
             # 2. Phase 2 (Fuzzing) 更新多样性
+            # [调整顺序] 在 get_metrics 之前调用 record，确保当前 episode 被计入
             if phase == "Phase2":
                 for (x, y) in episode_visited_states:
                     self.diversity_manager.record_step(x, y)
@@ -680,6 +676,21 @@ class PCLAExecutor(Executor):
                 is_failure = (not is_success)
                 self.behavior_manager.record_episode(final_avg_speed, final_steer_std, is_failure)
 
+            # 多样性计算
+            cov, dist_crashes = self.diversity_manager.get_metrics()
+            b_cnt, fb_cnt = self.behavior_manager.get_metrics()
+
+            # 1. 始终记录 Log
+            # [修改] 移除了 intrinsic_reward (原先传参为 0)
+            self._log_result(
+                task_id, phase, current_global_time, weather_idx, start_idx, target_idx, 
+                is_success, stop_reason, is_collision, total_reward,
+                duration, step, final_dist, final_video_path,
+                cov, dist_crashes, final_x, final_y, 
+                b_cnt, fb_cnt, final_avg_speed, final_steer_std,
+                generation, parent_input_str, current_input_str
+            )
+
             # 3. 对应计数器递增
             if phase == "Phase1":
                 self.phase1_count += 1
@@ -688,7 +699,8 @@ class PCLAExecutor(Executor):
             
             return total_reward, is_collision, is_success, np.array(sequence) if len(sequence)>0 else np.zeros((1, 19)), duration
 
-    def _log_result(self, task_id, phase, global_time, weather, start, target, success, stop_reason, collision, reward, intrinsic, duration, steps, final_dist, video_path,
+    # [修改] 移除了 intrinsic 参数和相关字段
+    def _log_result(self, task_id, phase, global_time, weather, start, target, success, stop_reason, collision, reward, duration, steps, final_dist, video_path,
                     coverage, distinct_crashes, final_x, final_y, behavior_count, fault_behavior_count, avg_speed, steer_std,
                     generation, parent_input, current_input):
         row_data = {
@@ -702,7 +714,7 @@ class PCLAExecutor(Executor):
             "stop_reason": stop_reason,
             "collision": collision,
             "total_reward": round(reward, 4),
-            "intrinsic_reward": intrinsic,
+            # "intrinsic_reward": intrinsic,  <-- REMOVED
             "duration": round(duration, 2),
             "steps": steps,
             "final_dist": round(final_dist, 2),
