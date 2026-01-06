@@ -1,8 +1,6 @@
 import numpy as np
-
 from abc import ABC, abstractmethod
-from typing import Any, Tuple
-
+from typing import Any, Tuple, Optional
 
 class Executor(ABC):
 
@@ -27,6 +25,7 @@ class Executor(ABC):
     def load_policy(self):
         pass
 
+    # [修改] 增加 phase 参数
     @abstractmethod
-    def execute_policy(self, input: np.ndarray, policy: Any) -> Tuple[float, bool, np.ndarray, float]:
+    def execute_policy(self, input: np.ndarray, policy: Any, generation: int = 0, parent_input: Any = None, phase: str = "Phase1") -> Tuple[float, bool, bool, np.ndarray, float]:
         pass

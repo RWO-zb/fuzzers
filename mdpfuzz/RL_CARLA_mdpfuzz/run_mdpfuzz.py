@@ -22,10 +22,10 @@ def main():
     parser.add_argument("--town", default="Town01", help="Map name")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     # [关键优化] 默认步数增加到 400
-    parser.add_argument("--sim-steps", type=int, default=400, help="Max simulation steps per episode")
+    parser.add_argument("--sim-steps", type=int, default=200, help="Max simulation steps per episode")
     
-    parser.add_argument("--num-vehicles", type=int, default=10, help="Number of NPC vehicles")
-    parser.add_argument("--init-budget", type=int, default=10, help="Number of initial random test cases")
+    parser.add_argument("--num-vehicles", type=int, default=30, help="Number of NPC vehicles")
+    parser.add_argument("--init-budget", type=int, default=50, help="Number of initial random test cases")
 
     # 互斥组：时间预算 OR 次数预算
     group = parser.add_mutually_exclusive_group()

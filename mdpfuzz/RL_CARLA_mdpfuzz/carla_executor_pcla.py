@@ -47,9 +47,10 @@ except ImportError as e:
 from mdpfuzz.executor import Executor
 
 # ==============================================================================
-# [关键修复2] PyGame 冲突热补丁
+# PyGame Patch
 # ==============================================================================
 def patch_map_utils():
+    # ... (保持原有的 patch 代码不变) ...
     print("[INFO] Applying Robust Off-screen Rendering Patch to map_utils...")
 
     @classmethod
@@ -96,14 +97,11 @@ def patch_map_utils():
 patch_map_utils()
 
 if not hasattr(PCLA, 'get_action_with_entropy'):
-    print("[INFO] Patching PCLA with get_action_with_entropy...")
     def patched_get_action(self):
         return self.get_action(), 0.0
     PCLA.get_action_with_entropy = patched_get_action
 
-# ==============================================================================
-# Diversity Manager 1: Spatial (State Coverage & Crash Location)
-# ==============================================================================
+# ... (DiversityManager 和 BehaviorDiversityManager 保持不变) ...
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
         self.x_min, self.x_max = x_range
@@ -137,9 +135,6 @@ class DiversityManager:
         distinct_crashes = len(self.crash_states)
         return coverage, distinct_crashes
 
-# ==============================================================================
-# Diversity Manager 2: Behavior (QD-Fuzz Logic)
-# ==============================================================================
 class BehaviorDiversityManager:
     def __init__(self, speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20):
         self.speed_min, self.speed_max = speed_range
@@ -167,8 +162,6 @@ class BehaviorDiversityManager:
         behavior_count = len(self.behavior_archive)
         fault_diversity_count = len(self.fault_archive)
         return behavior_count, fault_diversity_count
-
-# ==============================================================================
 
 def set_global_seed(seed):
     random.seed(seed)
@@ -266,11 +259,13 @@ class PCLAExecutor(Executor):
         self.num_vehicles = num_vehicles + 1 
         self.env_seed = env.seed
         self.init_budget = init_budget 
-        self.execution_count = 0       
+        
+        # [修改] 独立计数器
+        self.phase1_count = 0
+        self.phase2_count = 0
         self.next_benchmark_idx = 0    
         
         self.experiment_start_time = time.time()
-        # 注意：不再需要在 Executor 内部维护 phase1_successful_seeds，该逻辑移至 mdpfuzz.py 控制
 
         map_bounds = {
             "Town01": ((-20, 420), (-20, 350)),
@@ -307,7 +302,6 @@ class PCLAExecutor(Executor):
         self.rng = np.random.default_rng(seed=int(time.time()))
 
     def _init_csv(self):
-        # [修改] 新增 generation, parent_input, current_input 列
         columns = [
             "task_id", "phase", "global_time", "weather_id", "start_id", "target_id",
             "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
@@ -403,9 +397,8 @@ class PCLAExecutor(Executor):
     def load_policy(self):
         return None
 
-    # [修改] 增加 generation 和 parent_input 参数
-    def execute_policy(self, input: np.ndarray, policy: Any, generation: int = 0, parent_input: Optional[np.ndarray] = None) -> tuple:
-        # [核心修改] 移除 while True，由外部控制循环
+    # [修改] 接受 phase 参数，并基于 phase 使用不同的计数器和命名逻辑
+    def execute_policy(self, input: np.ndarray, policy: Any, generation: int = 0, parent_input: Optional[np.ndarray] = None, phase: str = "Phase1") -> tuple:
         
         print(f"[Debug] Input Vector Header: Weather={int(input[0])}, Target={int(input[1])}, StartID={int(input[2])}")
 
@@ -433,29 +426,20 @@ class PCLAExecutor(Executor):
         total_reward = 0
         step = 0
         final_dist = 999.0
-        start_time = time.time()
-
+        
         episode_visited_states = []
         episode_crash_pos = None
         episode_speeds = []
         episode_steers = []
         
-        # 命名逻辑: 依据 execution_count 判断 Phase
-        # 注意: 这里的 init_budget 需要与外部逻辑一致
-        # Phase 1: 0 ~ init_budget*2 (预留空间) -> 但实际现在完全由 mdpfuzz 逻辑决定
-        # 为了兼容文件名，我们简单判断：
-        is_phase1 = (self.execution_count < self.init_budget * 2)
-        
-        if is_phase1:
-            phase = "Phase1"
-            current_idx = self.execution_count
-            task_id = f"seed_{current_idx:03d}"
-            run_seed = self.env_seed + current_idx
+        # [逻辑修复] 完全基于传入的 phase 参数决定 task_id
+        if phase == "Phase1":
+            task_id = f"seed_{self.phase1_count:03d}"
+            run_seed = self.env_seed + self.phase1_count
         else:
-            phase = "Phase2"
-            fuzz_idx = self.execution_count - (self.init_budget * 2) + 1
-            task_id = f"fuzz_{fuzz_idx:04d}"
-            run_seed = self.env_seed + 100000 + fuzz_idx
+            task_id = f"fuzz_{self.phase2_count:04d}"
+            # 保证种子不重叠
+            run_seed = self.env_seed + 100000 + self.phase2_count
 
         video_filename = self.video_dir / f"{task_id}.mp4"
         
@@ -663,7 +647,7 @@ class PCLAExecutor(Executor):
             duration = time.time() - start_time
             final_video_path = str(video_filename) if video_filename.exists() and video_filename.stat().st_size > 0 else "None"
             
-            # 多样性计算 (仅获取，不一定记录)
+            # 多样性计算
             cov, dist_crashes = self.diversity_manager.get_metrics()
             b_cnt, fb_cnt = self.behavior_manager.get_metrics()
             
@@ -676,7 +660,7 @@ class PCLAExecutor(Executor):
             final_avg_speed = avg_speed if 'avg_speed' in locals() else 0.0
             final_steer_std = steer_std if 'steer_std' in locals() else 0.0
 
-            # 1. 始终记录 Log (Record Every Run)
+            # 1. 始终记录 Log
             self._log_result(
                 task_id, phase, current_global_time, weather_idx, start_idx, target_idx, 
                 is_success, stop_reason, is_collision, total_reward, 0, 
@@ -687,8 +671,7 @@ class PCLAExecutor(Executor):
             )
 
             # 2. Phase 2 (Fuzzing) 更新多样性
-            # 注意: Phase 1 的更新控制权在外部 (或者说 Phase 1 根本不应该更新)
-            if not is_phase1:
+            if phase == "Phase2":
                 for (x, y) in episode_visited_states:
                     self.diversity_manager.record_step(x, y)
                 if episode_crash_pos:
@@ -697,10 +680,12 @@ class PCLAExecutor(Executor):
                 is_failure = (not is_success)
                 self.behavior_manager.record_episode(final_avg_speed, final_steer_std, is_failure)
 
-            # 3. 计数器递增 (无论成功失败)
-            self.execution_count += 1
+            # 3. 对应计数器递增
+            if phase == "Phase1":
+                self.phase1_count += 1
+            else:
+                self.phase2_count += 1
             
-            # [关键修改] 返回 is_success
             return total_reward, is_collision, is_success, np.array(sequence) if len(sequence)>0 else np.zeros((1, 19)), duration
 
     def _log_result(self, task_id, phase, global_time, weather, start, target, success, stop_reason, collision, reward, intrinsic, duration, steps, final_dist, video_path,

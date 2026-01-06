@@ -11,10 +11,10 @@ import cv2
 import queue
 import pickle
 import copy
-import json
+import json  # [新增] 用于序列化物理参数
 from pathlib import Path
 import carla
-import pygame # 需要导入 pygame 进行 patch
+import pygame 
 
 # --- PCLA Path Setup ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -57,7 +57,7 @@ except ImportError:
         pass
 
 # ==============================================================================
-# [PATCH] PyGame Off-screen Rendering Patch (来自 RL_CARLA)
+# [PATCH] PyGame Off-screen Rendering Patch 
 # ==============================================================================
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
@@ -101,7 +101,7 @@ def patch_map_utils():
 patch_map_utils()
 
 # ==============================================================================
-# [NEW] Diversity Managers (移植自 RL_CARLA)
+# Diversity Managers
 # ==============================================================================
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
@@ -165,7 +165,6 @@ class BehaviorDiversityManager:
         return behavior_count, fault_diversity_count
 
 # --- Constants & Config ---
-# [MODIFIED] Switch to Roach Agent
 AGENT_NAME = "carl_roach_0" 
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 600
@@ -252,11 +251,10 @@ class BenchmarkEnv:
         self.world = self.client.get_world()
         self.map = self.world.get_map()
         
-        # [Sync Mode] 必须开启同步模式
         settings = self.world.get_settings()
         settings.synchronous_mode = True
         settings.fixed_delta_seconds = 1.0 / VIDEO_FPS 
-        settings.no_rendering_mode = False # Roach通常需要渲染来获取bev，虽然我们在用dummy driver
+        settings.no_rendering_mode = False 
         self.world.apply_settings(settings)
         
         self.spawn_points = self.map.get_spawn_points()
@@ -274,7 +272,6 @@ class BenchmarkEnv:
 
         self.routes = self._load_routes(args.town)
 
-        # [NEW] Initialize Diversity Managers
         map_bounds = {
             "Town01": ((-20, 420), (-20, 350)),
             "Town02": ((-20, 200), (-20, 320)),
@@ -358,7 +355,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     client = env_manager.client
     spawn_points = env_manager.map.get_spawn_points()
 
-    # Route Selection
     if len(env_manager.routes) > 0:
         route_idx = generated_config.start_pose % len(env_manager.routes)
         start_id, target_id = env_manager.routes[route_idx]
@@ -383,7 +379,7 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
     for _ in range(5): world.tick()
     
-    # 3. Spawn Ego (Robust Spawn Logic)
+    # 3. Spawn Ego
     bp = world.get_blueprint_library().find('vehicle.lincoln.mkz_2017')
     bp.set_attribute('role_name', 'hero')
     
@@ -394,7 +390,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     
     vehicle = world.try_spawn_actor(bp, start_pose)
     if not vehicle:
-        # Retry once
         world.tick()
         vehicle = world.try_spawn_actor(bp, start_pose)
         if not vehicle:
@@ -417,7 +412,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     camera_bp.set_attribute('fov', '110')
     camera_bp.set_attribute('sensor_tick', str(1.0 / VIDEO_FPS))
     
-    # Roach usually uses a different camera setup, but we keep this for consistency with visualization
     camera_transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-8.0))
     camera_sensor = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
     image_queue = queue.Queue()
@@ -455,7 +449,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         print("[Info] Initial collision detected")
         if wrapper_initialized: env_manager.map_wrapper.clear()
         
-        # Cleanup
         if collision_sensor: collision_sensor.destroy()
         if camera_sensor: camera_sensor.destroy()
         if video_writer: video_writer.release()
@@ -469,7 +462,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     route_file = f"route_{run_name}.xml"
     agent = None
     
-    # [NEW] QD-Fuzz Data Collection
     episode_speeds = []
     episode_steers = []
     final_x = 0.0
@@ -478,10 +470,8 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     try:
         waypoints = location_to_waypoint(client, start_pose.location, target_pose.location)
         route_maker(waypoints, route_file)
-        # Using the same PCLA wrapper class, assuming it handles the new AGENT_NAME internally
         agent = PCLA(AGENT_NAME, vehicle, route_file, client)
         
-        # Patch for entropy if not present (Roach might have it, but safety first)
         if not hasattr(agent, 'get_action_with_entropy'):
             def patched_get_action(self): return self.get_action(), 0.0
             agent.get_action_with_entropy = patched_get_action.__get__(agent)
@@ -498,20 +488,21 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         return None
 
     prev_distance = start_pose.location.distance(target_pose.location)
+    cur_distance = prev_distance 
     prev_speed = np.array([0,0,0])
     total_reward = 0
     seq_entropy = 0
     sequence = [] 
     
     step = 0
-    max_steps = 400 
+    # [对齐] 将最大时间步设置为 200，与 CureFuzz 一致
+    max_steps = 200 
     stop_reason = "Timeout"
     
     try:
         while step < max_steps:
             world.tick()
             
-            # Blocking get to sync video
             try:
                 img_data = image_queue.get(timeout=2.0)
                 array = np.frombuffer(img_data.raw_data, dtype=np.dtype("uint8"))
@@ -531,7 +522,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
                 collision_queue.get_nowait()
                 collided = True
             
-            # [NEW] Record Crash Location
             cur_loc = vehicle.get_location()
             if collided:
                 env_manager.diversity_manager.record_crash(cur_loc.x, cur_loc.y)
@@ -553,7 +543,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
                 control, entropy = agent.get_action_with_entropy()
                 if control: 
                     vehicle.apply_control(control)
-                    # [NEW] Record Steer
                     episode_steers.append(control.steer)
             except ValueError as ve:
                 print(f"[Warn] Agent distribution error (NaNs): {ve}")
@@ -566,12 +555,10 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             
             v = vehicle.get_velocity()
             cur_speed = np.array([v.x, v.y, v.z])
-            # [NEW] Record Speed
             episode_speeds.append(np.linalg.norm(cur_speed))
             
             cur_distance = cur_loc.distance(target_pose.location)
             
-            # [NEW] Record Spatial Coverage
             env_manager.diversity_manager.record_step(cur_loc.x, cur_loc.y)
             final_x = cur_loc.x
             final_y = cur_loc.y
@@ -582,7 +569,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             total_reward += reward
             seq_entropy += entropy
             
-            # Robust Command Retrieval
             current_command = 2.0 
             real_agent = agent.agent_instance if hasattr(agent, 'agent_instance') else agent
             if hasattr(real_agent, 'route_planner'):
@@ -609,13 +595,11 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         stop_reason = "Error"
     
     finally:
-        # [NEW] Behavior Diversity Calculation
         avg_speed = np.mean(episode_speeds) if episode_speeds else 0.0
         steer_std = np.std(episode_steers) if episode_steers else 0.0
         is_failure = (stop_reason != "Success")
         env_manager.behavior_manager.record_episode(avg_speed, steer_std, is_failure)
 
-        # --- SAFE CLEANUP SEQUENCE ---
         if 'video_writer' in locals() and video_writer: video_writer.release()
         if 'camera_sensor' in locals() and camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
         if 'collision_sensor' in locals() and collision_sensor and collision_sensor.is_alive: collision_sensor.destroy()
@@ -635,7 +619,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             try: os.remove(route_file)
             except: pass
     
-    # [NEW] Get Metrics
     cov, dist_crashes = env_manager.diversity_manager.get_metrics()
     b_cnt, fb_cnt = env_manager.behavior_manager.get_metrics()
 
@@ -650,13 +633,13 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         "video_path": str(video_path),
         "start_id": start_id,
         "target_id": target_id,
-        # Extended Metrics
         "state_coverage": cov,
         "distinct_crashes": dist_crashes,
         "behavior_count": b_cnt,
         "fault_behavior_count": fb_cnt,
         "final_x": final_x,
-        "final_y": final_y
+        "final_y": final_y,
+        "final_dist": cur_distance
     }
 
 
@@ -690,17 +673,17 @@ def run_generation_loop(args):
         results_dir.mkdir(parents=True, exist_ok=True)
         summary_csv = results_dir / "summary.csv"
         
-        # [MODIFIED] Added new columns
+        # [修改] 增加了 final_dist, input_vector 和 physical_params
         columns = [
             "task_id", "method", "success", "collision", "stop_reason", 
             "total_reward", "duration", "steps", 
             "start_id", "target_id", "weather", 
             "start_x_off", "start_y_off", "start_yaw_off",
             "video_path", "density", "sensitivity", "novelty",
-            # New Metrics
             "state_coverage", "distinct_crashes", 
             "behavior_count", "fault_behavior_count",
-            "final_x", "final_y", "elapsed_time"
+            "final_x", "final_y", "elapsed_time",
+            "final_dist", "input_vector", "physical_params" # 像CureFuzz一样的物理参数列
         ]
         
         pd.DataFrame(columns=columns).to_csv(summary_csv, index=False)
@@ -710,7 +693,9 @@ def run_generation_loop(args):
         
         while (time.time() - start_time) < 3600 * args.hour:
             
-            # 1. Train Step
+            # [逻辑说明] 
+            # 如果 step 是 args.step 的倍数 (例如每 5 步), 进入 "Generation" 阶段
+            # 否则进入 "Random" 阶段
             if cur_step > 0 and cur_step % args.step == 0:
                 print(f"[Info] Training Diffusion Model at step {cur_step}")
                 if len(normal_case_list) > 0:
@@ -731,7 +716,8 @@ def run_generation_loop(args):
                 metric_list = []
                 memory_model.clear()
                 
-                # 2. Generation Loop
+                # [逻辑说明] 这里的 10 表示每次训练完模型后，立刻生成 10 个测试用例来验证模型
+                # 如果您想改变生成的频率，修改 range(10) 为您想要的数字
                 for idx in range(10): 
                     try:
                         generated_vec = diffusion_model.generate()
@@ -779,6 +765,16 @@ def run_generation_loop(args):
                         
                         print(f"[{task_id}] Res: {res['stop_reason']} | Rew: {total_reward:.2f} | Behav: {res['behavior_count']}")
                         
+                        # [新增逻辑] 提取 CureFuzz 风格的物理参数
+                        physical_config = {
+                            "route_idx": int(carla_env.start_pose),
+                            "weather_id": int(carla_env.weather),
+                            "ego_offset": [float(carla_env.start_pose_x), float(carla_env.start_pose_y), float(carla_env.start_pose_yaw)],
+                            # 只保存实际用到的前 N 辆车
+                            "npc_offsets": [ [float(xy[0]), float(xy[1])] for xy in getattr(carla_env, 'vehicles', [])[:args.num_vehicles] ] 
+                        }
+                        physical_params_str = json.dumps(physical_config)
+
                         row_data = {
                             "task_id": task_id,
                             "method": args.method,
@@ -804,7 +800,10 @@ def run_generation_loop(args):
                             "fault_behavior_count": res['fault_behavior_count'],
                             "final_x": res['final_x'],
                             "final_y": res['final_y'],
-                            "elapsed_time": time.time() - start_time
+                            "elapsed_time": time.time() - start_time,
+                            "final_dist": res.get('final_dist', 0.0),
+                            "input_vector": str(generated_vec.tolist()),
+                            "physical_params": physical_params_str # 保存可读的物理参数
                         }
                         pd.DataFrame([row_data]).to_csv(summary_csv, mode='a', header=False, index=False)
                         
@@ -814,7 +813,8 @@ def run_generation_loop(args):
 
             else:
                 try:
-                    # Bootstrap random case
+                    # [Random 阶段]
+                    # 生成随机向量作为基准
                     normal_case = np.random.uniform(-1, 1, case_dimension)
                     carla_env = Carla_ENV()
                     carla_env.from_vector(normal_case)
@@ -848,6 +848,15 @@ def run_generation_loop(args):
                             
                             print(f"[{task_id}] Rew: {total_reward:.2f}")
 
+                            # [新增逻辑] 随机阶段也需要保存物理参数
+                            physical_config = {
+                                "route_idx": int(carla_env.start_pose),
+                                "weather_id": int(carla_env.weather),
+                                "ego_offset": [float(carla_env.start_pose_x), float(carla_env.start_pose_y), float(carla_env.start_pose_yaw)],
+                                "npc_offsets": [ [float(xy[0]), float(xy[1])] for xy in getattr(carla_env, 'vehicles', [])[:args.num_vehicles] ]
+                            }
+                            physical_params_str = json.dumps(physical_config)
+
                             row_data = {
                                 "task_id": task_id,
                                 "method": "random",
@@ -873,7 +882,10 @@ def run_generation_loop(args):
                                 "fault_behavior_count": res['fault_behavior_count'],
                                 "final_x": res['final_x'],
                                 "final_y": res['final_y'],
-                                "elapsed_time": time.time() - start_time
+                                "elapsed_time": time.time() - start_time,
+                                "final_dist": res.get('final_dist', 0.0),
+                                "input_vector": str(normal_case.tolist()),
+                                "physical_params": physical_params_str # 保存这一列
                             }
                             pd.DataFrame([row_data]).to_csv(summary_csv, mode='a', header=False, index=False)
 
@@ -896,7 +908,7 @@ if __name__ == "__main__":
     parser.add_argument("--method", default="generative", 
                         choices=['generative', 'generative+density', 'generative+sensitivity', 'generative+performance', 'generative+novelty'])
     parser.add_argument("--hour", type=float, default=2.0)
-    parser.add_argument("--step", type=int, default=10, help="Steps before retraining diffusion")
+    parser.add_argument("--step", type=int, default=10, help="Steps before retraining diffusion (controls random vs generation frequency)")
     parser.add_argument("--grid", type=int, default=10, help="Grid size for novelty")
     
     args = parser.parse_args()
