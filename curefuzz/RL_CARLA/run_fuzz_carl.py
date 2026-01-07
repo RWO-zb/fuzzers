@@ -6,7 +6,6 @@ import random
 import numpy as np
 import argparse
 import pandas as pd
-import cv2
 import queue
 import pickle
 from pathlib import Path
@@ -197,8 +196,6 @@ def set_global_seed(seed):
     except ImportError: pass
 
 AGENT_NAME = "carl_roach_0" 
-VIDEO_WIDTH = 800
-VIDEO_HEIGHT = 600
 VIDEO_FPS = 20.0
 ARRIVAL_DISTANCE = 5.0
 RND_INPUT_SIZE = 18
@@ -289,9 +286,12 @@ class BenchmarkEnv:
         self.traffic_manager.set_global_distance_to_leading_vehicle(2.0)
 
         (self.result_dir / "diagnostics").mkdir(parents=True, exist_ok=True)
-        (self.result_dir / "videos").mkdir(parents=True, exist_ok=True)
+        # (self.result_dir / "videos").mkdir(parents=True, exist_ok=True) # REMOVED
         (self.result_dir / "reward_logs").mkdir(parents=True, exist_ok=True)
         
+        # [NEW] 创建轨迹数据保存目录
+        (self.result_dir / "trajectories").mkdir(parents=True, exist_ok=True) 
+
         self.summary_csv = self.result_dir / "summary.csv"
         self.crash_log = self.result_dir / "crash_log.txt"
 
@@ -304,7 +304,8 @@ class BenchmarkEnv:
             columns = [
                 "task_id", "phase", "weather_id", "start_id", "target_id",
                 "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
-                "steps", "final_dist", "video_path",
+                "steps", "final_dist", 
+                # "video_path", # REMOVED from columns
                 "elapsed_time", "current_timestamp",
                 "state_coverage", "distinct_crashes", "final_x", "final_y",
                 "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
@@ -454,29 +455,20 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         return "INITIAL_CRASH" 
 
     route_file = f"route_{run_name}.xml"
-    camera_sensor = None
-    video_writer = None
+    # [MODIFIED] Removed Camera/Video variables
+    # camera_sensor = None 
+    # video_writer = None 
 
     episode_speeds = []
     episode_steers = []
+    
+    # [NEW] 初始化动作序列
+    episode_actions = []
 
     try:
         waypoints = location_to_waypoint(client, start_pose.location, target_pose.location)
         route_maker(waypoints, route_file)
         agent = PCLA(AGENT_NAME, vehicle, route_file, client)
-
-        camera_bp = world.get_blueprint_library().find('sensor.camera.rgb')
-        camera_bp.set_attribute('image_size_x', str(VIDEO_WIDTH))
-        camera_bp.set_attribute('image_size_y', str(VIDEO_HEIGHT))
-        camera_bp.set_attribute('sensor_tick', str(1.0 / VIDEO_FPS))
-        camera_transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-15))
-        camera_sensor = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
-        image_queue = queue.Queue()
-        camera_sensor.listen(image_queue.put)
-        
-        video_path = Path(env_manager.result_dir / "videos" / f"{run_name}.mp4")
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(str(video_path), fourcc, VIDEO_FPS, (VIDEO_WIDTH, VIDEO_HEIGHT))
 
         prev_distance = start_pose.location.distance(target_pose.location)
         prev_speed = np.array([0,0,0])
@@ -520,6 +512,11 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
             if control: 
                 vehicle.apply_control(control)
                 episode_steers.append(control.steer)
+                # [NEW] 记录完整动作 (Steer, Throttle, Brake)
+                episode_actions.append([control.steer, control.throttle, control.brake])
+            else:
+                # [NEW] 记录空动作以对齐时间步
+                episode_actions.append([0.0, 0.0, 0.0])
             
             v = vehicle.get_velocity()
             cur_speed = np.array([v.x, v.y, v.z])
@@ -557,14 +554,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
             prev_distance = cur_distance
             prev_speed = cur_speed
             
-            try:
-                while not image_queue.empty():
-                    image = image_queue.get_nowait()
-                    array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-                    array = np.reshape(array, (image.height, image.width, 4))
-                    array = array[:, :, :3]
-                    video_writer.write(array)
-            except: pass
+            # [MODIFIED] Removed Image Queue Processing
 
             if cur_distance < ARRIVAL_DISTANCE:
                 is_success = True
@@ -583,7 +573,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         
         if phase != "Phase1":
             env_manager.behavior_manager.record_episode(avg_speed, steer_std, is_failure)
-
+    
     except Exception:
         stop_reason = "Exception"
         if wrapper_initialized: env_manager.map_wrapper.clear()
@@ -591,18 +581,18 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         if vehicle: vehicle.destroy()
     
     finally:
-        if camera_sensor and camera_sensor.is_alive: camera_sensor.stop()
+        # [MODIFIED] Removed Camera Cleanup
         if collision_sensor and collision_sensor.is_alive: collision_sensor.stop()
         if wrapper_initialized: 
             try: env_manager.map_wrapper.clear()
             except: pass
-        if camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
+        
         if collision_sensor and collision_sensor.is_alive: collision_sensor.destroy()
         if vehicle and vehicle.is_alive: vehicle.destroy()
         if npc_ids: client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         try: world.tick()
         except: pass
-        if video_writer: video_writer.release()
+        
         settings = world.get_settings()
         settings.synchronous_mode = False 
         settings.fixed_delta_seconds = None
@@ -610,6 +600,32 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         if os.path.exists(route_file): 
             try: os.remove(route_file)
             except: pass
+        
+        # [NEW] 保存完整的轨迹数据 (.npz)
+        if len(sequence) > 0 and len(episode_actions) > 0:
+            min_len = min(len(sequence), len(episode_actions), len(reward_history))
+            rewards_array = [r['total_reward'] for r in reward_history[:min_len]]
+            
+            traj_path = env_manager.result_dir / "trajectories" / f"{run_name}.npz"
+            is_collision_episode = (stop_reason == "Collision")
+            
+            try:
+                np.savez_compressed(
+                    traj_path,
+                    states=np.array(sequence[:min_len]),       
+                    actions=np.array(episode_actions[:min_len]), 
+                    rewards=np.array(rewards_array),           
+                    is_collision=is_collision_episode,         
+                    stop_reason=stop_reason,                   
+                    metadata={                                 
+                        "weather_id": weather_id,
+                        "phase": phase,
+                        "avg_speed": avg_speed if 'avg_speed' in locals() else 0.0
+                    }
+                )
+            except Exception as e:
+                print(f"Error saving trajectory: {e}")
+
         if reward_history:
             try:
                 df_log = pd.DataFrame(reward_history)
@@ -633,7 +649,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         "stop_reason": stop_reason,
         "steps": step,
         "final_dist": cur_distance if 'cur_distance' in locals() else 0,
-        "video_path": str(video_path),
+        # "video_path": "None", # REMOVED from return dict
         "npc_info": current_npc_info,
         "start_pose": start_pose,
         "target_pose": target_pose,
@@ -663,29 +679,51 @@ def run_benchmark_suite(args):
     tasks = env_manager.load_suite_tasks(args.town, args.suite)
     weather_list = [1, 3, 6, 8]
     
-    collected_seeds_count = 0
-    task_idx = 0
+    # [MODIFIED] 生成所有 400 种组合 (100 routes * 4 weathers)
+    all_combinations = []
+    for task_idx, (start_id, target_id) in enumerate(tasks):
+        for w_id in weather_list:
+            all_combinations.append((task_idx, start_id, target_id, w_id))
     
-    # Phase 1: Seed Generation
-    while collected_seeds_count < args.num_tasks and task_idx < len(tasks):
-        start_id, target_id = tasks[task_idx]
+    # [MODIFIED] 随机打乱组合
+    random.shuffle(all_combinations)
+    
+    collected_seeds_count = 0
+    attempt_idx = 0
+    combo_iterator = iter(all_combinations)
+    
+    # Phase 1: Seed Generation (Modified Logic)
+    print(f"Starting Phase 1: Exploring up to {len(all_combinations)} combinations to find {args.num_tasks} successful seeds...")
+    
+    while collected_seeds_count < args.num_tasks:
+        try:
+            task_idx, start_id, target_id, weather_id = next(combo_iterator)
+        except StopIteration:
+            print(f"Warning: Exhausted all {len(all_combinations)} combinations. Found {collected_seeds_count} successful seeds.")
+            break
+        
+        attempt_idx += 1
         
         if start_id >= total_spawns or target_id >= total_spawns:
-            task_idx += 1
             continue
             
         start_pose = env_manager.spawn_points[start_id]
         target_pose = env_manager.spawn_points[target_id]
         
-        current_task_seed = args.seed + task_idx 
-        task_rng = random.Random(current_task_seed)
-        weather_id = task_rng.choice(weather_list)
+        # 使用 attempt_idx 确保每次尝试的随机种子不同
+        current_attempt_seed = args.seed + attempt_idx 
         
-        run_name = f"seed_{collected_seeds_count:02d}_task{task_idx:03d}"
+        run_name = f"phase1_try{attempt_idx:03d}_task{task_idx:03d}_w{weather_id:02d}"
         
-        res = run_single(env_manager, start_pose, target_pose, weather_id, run_name, "Phase1", npc_count=args.num_vehicles, seed=current_task_seed)
+        res = run_single(env_manager, start_pose, target_pose, weather_id, run_name, "Phase1", npc_count=args.num_vehicles, seed=current_attempt_seed)
         
         intrinsic_reward = 0
+        
+        # Check if successful
+        is_success_run = False
+        if isinstance(res, dict):
+            if res['success'] and not res['collision']:
+                is_success_run = True
         
         if isinstance(res, dict):
             if len(res['sequence']) > 10:
@@ -694,8 +732,6 @@ def run_benchmark_suite(args):
             cov, dist_crashes = env_manager.diversity_manager.get_metrics()
             b_cnt, fb_cnt = env_manager.behavior_manager.get_metrics()
             
-            # [MODIFIED] Store full simulation state (Phase 1 has no 'pre' mutation state)
-            # res['npc_info'] contains the actual spawned NPC transforms
             input_post_str = get_full_state_str(start_pose, res['npc_info'])
             
             log_result(env_manager, run_name, "Phase1", weather_id, start_id, target_id, res, intrinsic_reward, 
@@ -705,23 +741,22 @@ def run_benchmark_suite(args):
                        avg_speed=res['avg_speed'], steer_std=res['steer_std'],
                        mutation_generation=0, input_pre="None", input_post=input_post_str)
 
-            if res['success'] and not res['collision']:
+            if is_success_run:
                 current_pose_tuple = (start_pose, res['npc_info']) 
                 env_manager.fuzzer.further_mutation(
                     current_pose_tuple, res['total_reward'], res['seq_entropy'], intrinsic_reward, res['final_state'], current_pose_tuple, [start_id, target_id, weather_id],
                     generation=0
                 )
                 collected_seeds_count += 1
-        
+                print(f"Found successful seed #{collected_seeds_count}: {run_name}")
         else:
             dummy_res = {
                 'success': False, 'stop_reason': "InitialCrash", 'collision': True,
-                'total_reward': 0, 'steps': 0, 'final_dist': 0, 'video_path': "",
+                'total_reward': 0, 'steps': 0, 'final_dist': 0, 
+                # 'video_path': "None", # REMOVED
                 'final_x': 0, 'final_y': 0, 'avg_speed': 0, 'steer_std': 0
             }
             log_result(env_manager, run_name, "Phase1", weather_id, start_id, target_id, dummy_res, 0, mutation_generation=0, input_pre="None", input_post="None")
-
-        task_idx += 1
 
     # Phase 2: Fuzzing
     start_time = time.time()
@@ -814,7 +849,8 @@ def log_result(env_manager, task_id, phase, weather, start, target, res, intrins
     columns = [
         "task_id", "phase", "weather_id", "start_id", "target_id",
         "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
-        "steps", "final_dist", "video_path",
+        "steps", "final_dist", 
+        # "video_path", # REMOVED from columns
         "elapsed_time", "current_timestamp",
         "state_coverage", "distinct_crashes", "final_x", "final_y",
         "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
@@ -829,7 +865,7 @@ def log_result(env_manager, task_id, phase, weather, start, target, res, intrins
         "collision": res['collision'], 
         "total_reward": res['total_reward'], "intrinsic_reward": intrinsic,
         "steps": res['steps'], "final_dist": res['final_dist'],
-        "video_path": res['video_path'], 
+        # "video_path": res['video_path'], # REMOVED from row_data
         "elapsed_time": elapsed_time, "current_timestamp": current_time,
         "state_coverage": coverage, "distinct_crashes": distinct_crashes,
         "final_x": final_x, "final_y": final_y,
@@ -848,7 +884,8 @@ if __name__ == "__main__":
     parser.add_argument("--town", default="Town01")
     parser.add_argument("--suite", default="straight")
     parser.add_argument("--num_vehicles", type=int, default=20)
-    parser.add_argument("--num_tasks", type=int, default=10)
+    # [MODIFIED] 默认值设为 100，以匹配您的需求
+    parser.add_argument("--num_tasks", type=int, default=100)
     parser.add_argument("--fuzz_hours", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--threshold_intrinsic", type=float, default=100.0)

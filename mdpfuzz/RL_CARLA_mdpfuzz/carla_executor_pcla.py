@@ -6,14 +6,14 @@ import random
 import numpy as np
 import carla
 import queue
-import cv2
+# import cv2  <-- REMOVED
 import pandas as pd
 from pathlib import Path
 from typing import Any, Optional
 import traceback
 import pygame 
 
-# [关键修复1] 强制使用 dummy 视频驱动
+# [关键修复] 强制使用 dummy 视频驱动
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 # --- 路径设置 ---
@@ -50,7 +50,6 @@ from mdpfuzz.executor import Executor
 # PyGame Patch
 # ==============================================================================
 def patch_map_utils():
-    # ... (保持原有的 patch 代码不变) ...
     print("[INFO] Applying Robust Off-screen Rendering Patch to map_utils...")
 
     @classmethod
@@ -102,7 +101,7 @@ if not hasattr(PCLA, 'get_action_with_entropy'):
     PCLA.get_action_with_entropy = patched_get_action
 
 # ==============================================================================
-# 辅助函数：序列化输入向量 (NEW)
+# 辅助函数：序列化输入向量
 # ==============================================================================
 def get_full_state_str(input_vector):
     """
@@ -113,20 +112,15 @@ def get_full_state_str(input_vector):
         return "None"
     
     try:
-        # 确保是 numpy array
         if not isinstance(input_vector, np.ndarray):
             input_vector = np.array(input_vector)
             
-        # Ego State (Indices 3-6: x, y, z, yaw)
-        # 注意: index 5 是 z, 我们主要关注平面坐标 x, y 和朝向 yaw
         ego_x = input_vector[3]
         ego_y = input_vector[4]
         ego_yaw = input_vector[6]
         
         ego_str = f"[{ego_x:.2f},{ego_y:.2f},{ego_yaw:.2f}]"
         
-        # NPC State (Index 7 onwards, stride 4)
-        # 每个 NPC 占用 4 个位置: x, y, z, yaw
         npc_coords = []
         for i in range(7, len(input_vector), 4):
             if i + 1 < len(input_vector):
@@ -134,7 +128,6 @@ def get_full_state_str(input_vector):
                 n_y = input_vector[i+1]
                 npc_coords.append(f"({n_x:.2f},{n_y:.2f})")
         
-        # 排序以支持去重 (忽略 NPC 列表的顺序差异)
         npc_coords.sort()
         npc_str = ",".join(npc_coords) if npc_coords else "None"
         
@@ -301,10 +294,8 @@ class PCLAExecutor(Executor):
         self.env_seed = env.seed
         self.init_budget = init_budget 
         
-        # [修改] 独立计数器
         self.phase1_count = 0
         self.phase2_count = 0
-        self.next_benchmark_idx = 0    
         
         self.experiment_start_time = time.time()
 
@@ -330,9 +321,27 @@ class PCLAExecutor(Executor):
         else:
             print(f"[Info] Loaded {len(self.benchmark_tasks)} tasks from benchmark file.")
 
+        # [MODIFIED] 初始化所有组合并打乱
+        self.all_combinations = []
+        if self.benchmark_tasks:
+            # 100 routes * 4 weathers = 400 combinations
+            for t_idx, (s_idx, tgt_idx) in enumerate(self.benchmark_tasks):
+                for w_idx in range(4):
+                    self.all_combinations.append((s_idx, tgt_idx, w_idx))
+            random.shuffle(self.all_combinations)
+            print(f"[Info] Generated and shuffled {len(self.all_combinations)} unique task/weather combinations.")
+        
+        self.combo_iterator = iter(self.all_combinations)
+        
+        # [MODIFIED] 执行缓存，用于避免 Phase1 重复执行
+        self.execution_cache = {}
+        # 临时存储最近一次运行的元数据，用于缓存构建
+        self.last_run_metadata = {}
+
         self.out_dir = Path(out_dir)
-        self.video_dir = self.out_dir / "videos"
-        self.video_dir.mkdir(parents=True, exist_ok=True)
+        self.traj_dir = self.out_dir / "trajectories"
+        self.traj_dir.mkdir(parents=True, exist_ok=True)
+        
         self.csv_file = self.out_dir / "summary.csv"
         
         print(f"[Info] Executor Output directory: {self.out_dir}")
@@ -343,11 +352,10 @@ class PCLAExecutor(Executor):
         self.rng = np.random.default_rng(seed=int(time.time()))
 
     def _init_csv(self):
-        # [修改] 移除了 intrinsic_reward 列
         columns = [
             "task_id", "phase", "global_time", "weather_id", "start_id", "target_id",
             "success", "stop_reason", "collision", "total_reward", 
-            "duration", "steps", "final_dist", "video_path",
+            "duration", "steps", "final_dist", 
             "state_coverage", "distinct_crashes", "final_x", "final_y",
             "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
             "generation", "parent_input", "current_input"
@@ -380,32 +388,7 @@ class PCLAExecutor(Executor):
                         continue
         return tasks
 
-    def generate_input(self, rng: np.random.Generator) -> np.ndarray:
-        s_idx, t_idx = 0, 0
-        is_sequential = False
-        
-        if self.benchmark_tasks and self.next_benchmark_idx < self.init_budget:
-            if self.next_benchmark_idx < len(self.benchmark_tasks):
-                s_idx, t_idx = self.benchmark_tasks[self.next_benchmark_idx]
-                self.next_benchmark_idx += 1
-                is_sequential = True
-        
-        if not is_sequential:
-            if self.benchmark_tasks:
-                task_idx = rng.choice(len(self.benchmark_tasks))
-                s_idx, t_idx = self.benchmark_tasks[task_idx]
-                if s_idx >= self.num_start_positions or t_idx >= self.num_start_positions:
-                     s_idx = rng.choice(self.num_start_positions)
-                     t_idx = rng.choice(self.num_start_positions)
-                     while t_idx == s_idx: t_idx = rng.choice(self.num_start_positions)
-            else:
-                s_idx = rng.choice(self.num_start_positions)
-                t_idx = rng.choice(self.num_start_positions)
-                while t_idx == s_idx:
-                    t_idx = rng.choice(self.num_start_positions)
-            
-        weather_idx = rng.integers(0, 4)
-        
+    def _create_input_vector(self, s_idx, t_idx, weather_idx, rng):
         start_vec = self.start_positions[s_idx].copy()
         
         indices = []
@@ -415,41 +398,133 @@ class PCLAExecutor(Executor):
                 indices.append(i)
         
         npc_vecs = [self.start_positions[i].copy() for i in indices]
-        
         return np.hstack([np.array([weather_idx, t_idx, s_idx]), start_vec] + npc_vecs)
 
+    # [MODIFIED] 生成单个 Input (保留原接口兼容性)
+    def generate_input(self, rng: np.random.Generator) -> np.ndarray:
+        # 如果单独调用，尝试从迭代器取，取不到则随机
+        try:
+            s_idx, t_idx, w_idx = next(self.combo_iterator)
+        except StopIteration:
+            # Fallback to random
+            s_idx = rng.choice(self.num_start_positions)
+            t_idx = rng.choice(self.num_start_positions)
+            w_idx = rng.integers(0, 4)
+            
+        return self._create_input_vector(s_idx, t_idx, w_idx, rng)
+
+    # [MODIFIED] 核心逻辑：重写 generate_inputs 以实现“搜索直到找到 N 个成功种子”
     def generate_inputs(self, rng: np.random.Generator, n: int) -> np.ndarray:
-        inputs = []
-        for _ in range(n):
-            inputs.append(self.generate_input(rng))
-        return np.array(inputs)
+        valid_inputs = []
+        attempt_count = 0
+        
+        print(f"[Info] Phase 1 Search: Scanning shuffled combinations to find {n} successful seeds...")
+        
+        while len(valid_inputs) < n:
+            try:
+                s_idx, t_idx, w_idx = next(self.combo_iterator)
+            except StopIteration:
+                print(f"[Warning] Exhausted all combinations. Found {len(valid_inputs)}/{n} valid seeds.")
+                break
+            
+            attempt_count += 1
+            input_vec = self._create_input_vector(s_idx, t_idx, w_idx, rng)
+            
+            # 使用特殊 Phase 标记进行预执行
+            # execute_policy 会运行仿真并返回标准结果 (total_reward, is_collision, is_success, sequence, duration)
+            # 同时它会将详细数据存入 self.last_run_metadata
+            res = self.execute_policy(input_vec, None, phase="Phase1_Search")
+            
+            is_success = res[2]
+            is_collision = res[1]
+            
+            if is_success and not is_collision:
+                valid_inputs.append(input_vec)
+                # 缓存成功结果
+                state_key = get_full_state_str(input_vec)
+                # 缓存结构: (标准返回结果, 详细元数据)
+                self.execution_cache[state_key] = (res, self.last_run_metadata)
+                print(f"  [Search] Found Seed #{len(valid_inputs)} (Attempt {attempt_count}): W={w_idx}, S={s_idx}, T={t_idx}")
+            else:
+                # 失败用例不计入 valid_inputs，继续搜索
+                pass
+                
+        return np.array(valid_inputs)
 
     def mutate(self, input: np.ndarray, rng: np.random.Generator, **kwargs) -> np.ndarray:
         mutant = input.copy()
-        # [修改] 与 seqfuzz 和 cure 保持一致
-        mutant[3] += rng.uniform(-0.15, 0.15)  # Ego X (原为 -0.5, 0.5)
-        mutant[4] += rng.uniform(-0.15, 0.15)  # Ego Y (原为 -0.5, 0.5)
-        mutant[6] += rng.uniform(-5, 5)        # Ego Yaw (保持不变)
+        mutant[3] += rng.uniform(-0.15, 0.15)  # Ego X
+        mutant[4] += rng.uniform(-0.15, 0.15)  # Ego Y
+        mutant[6] += rng.uniform(-5, 5)        # Ego Yaw
         
         start_npc_idx = 7
         for i in range(start_npc_idx, len(mutant), 4):
-            # [修改] 与 seqfuzz 和 cure 保持一致
-            mutant[i] += rng.uniform(-0.1, 0.1)    # NPC X (原为 -0.2, 0.2)
-            mutant[i+1] += rng.uniform(-0.1, 0.1)  # NPC Y (原为 -0.2, 0.2)
+            mutant[i] += rng.uniform(-0.1, 0.1)    # NPC X
+            mutant[i+1] += rng.uniform(-0.1, 0.1)  # NPC Y
         return mutant
 
     def load_policy(self):
         return None
 
-    # [修改] 接受 phase 参数，并基于 phase 使用不同的计数器和命名逻辑
     def execute_policy(self, input: np.ndarray, policy: Any, generation: int = 0, parent_input: Optional[np.ndarray] = None, phase: str = "Phase1") -> tuple:
         
-        print(f"[Debug] Input Vector Header: Weather={int(input[0])}, Target={int(input[1])}, StartID={int(input[2])}")
-
-        # [修改] 使用辅助函数格式化状态字符串
         current_input_str = get_full_state_str(input)
         parent_input_str = get_full_state_str(parent_input)
+        
+        # [MODIFIED] 检查缓存 (仅针对 Fuzzer 正式调用 Phase1 时)
+        if phase == "Phase1" and current_input_str in self.execution_cache:
+            print(f"[Info] Cache Hit for Phase 1 Seed (Skipping Re-simulation): {current_input_str[:50]}...")
+            
+            # 恢复数据
+            cached_res, metadata = self.execution_cache[current_input_str]
+            total_reward, is_collision, is_success, sequence, duration = cached_res
+            
+            # 确定新的 task_id
+            task_id = f"seed_{self.phase1_count:03d}"
+            
+            # 补写日志
+            current_global_time = time.time() - self.experiment_start_time
+            self._log_result(
+                task_id, phase, current_global_time, metadata['weather_idx'], metadata['start_idx'], metadata['target_idx'],
+                is_success, metadata['stop_reason'], is_collision, total_reward,
+                duration, metadata['step'], metadata['final_dist'],
+                metadata['cov'], metadata['dist_crashes'], metadata['final_x'], metadata['final_y'],
+                metadata['b_cnt'], metadata['fb_cnt'], metadata['avg_speed'], metadata['steer_std'],
+                generation, parent_input_str, current_input_str
+            )
+            
+            # 补存 .npz (重命名或重新保存)
+            # 为简单起见，利用元数据重新保存一份
+            if len(sequence) > 0 and len(metadata['episode_actions']) > 0:
+                traj_path = self.traj_dir / f"{task_id}.npz"
+                try:
+                    np.savez_compressed(
+                        traj_path,
+                        states=np.array(sequence),
+                        actions=np.array(metadata['episode_actions']),
+                        rewards=np.array(metadata['episode_rewards']),
+                        is_collision=is_collision,
+                        stop_reason=metadata['stop_reason'],
+                        metadata={
+                            "weather_id": metadata['weather_idx'],
+                            "phase": phase,
+                            "avg_speed": metadata['avg_speed'],
+                            "total_reward": total_reward
+                        }
+                    )
+                except Exception as e:
+                    print(f"Error saving cached trajectory: {e}")
+            
+            # 计数器递增
+            self.phase1_count += 1
+            
+            # 释放缓存以节省内存
+            del self.execution_cache[current_input_str]
+            
+            return cached_res
 
+        # ================== 以下为正常执行逻辑 (Simulation) ==================
+        
         weather_idx = int(input[0])
         target_idx = int(input[1])
         start_idx = int(input[2]) 
@@ -461,7 +536,6 @@ class PCLAExecutor(Executor):
         npc_actors = []
         sensor_list = []
         route_file = None
-        video_writer = None
         agent = None
         
         stop_reason = "timeout"
@@ -475,17 +549,21 @@ class PCLAExecutor(Executor):
         episode_crash_pos = None
         episode_speeds = []
         episode_steers = []
+        episode_actions = []
+        episode_rewards = []
         
-        # [逻辑修复] 完全基于传入的 phase 参数决定 task_id
+        # 确定 task_id
         if phase == "Phase1":
             task_id = f"seed_{self.phase1_count:03d}"
             run_seed = self.env_seed + self.phase1_count
+        elif phase == "Phase1_Search":
+            # 搜索阶段使用临时 ID，不占用计数器
+            # 使用 input 的 hash 或者随机数作为 seed 偏移，保证确定性
+            run_seed = self.env_seed + int(input.sum() * 100) % 100000
+            task_id = f"search_{run_seed}"
         else:
             task_id = f"fuzz_{self.phase2_count:04d}"
-            # 保证种子不重叠
             run_seed = self.env_seed + 100000 + self.phase2_count
-
-        video_filename = self.video_dir / f"{task_id}.mp4"
         
         try:
             self.env.reset_world()
@@ -500,7 +578,7 @@ class PCLAExecutor(Executor):
                     tl.freeze(True)
                 self.env.world.tick()
             except Exception as e:
-                print(f"[Warning] Failed to set traffic lights: {e}")
+                pass
 
             weathers = {
                 0: carla.WeatherParameters.ClearNoon,
@@ -562,17 +640,6 @@ class PCLAExecutor(Executor):
             collision_sensor.listen(collision_queue.put)
             sensor_list.append(collision_sensor)
             
-            camera_bp = bp_lib.find('sensor.camera.rgb')
-            camera_bp.set_attribute('image_size_x', '800')
-            camera_bp.set_attribute('image_size_y', '600')
-            camera_bp.set_attribute('sensor_tick', '0.05')
-            camera_transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-15))
-            camera_sensor = self.env.world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
-            image_queue = queue.Queue()
-            camera_sensor.listen(image_queue.put)
-            
-            video_writer = cv2.VideoWriter(str(video_filename), cv2.VideoWriter_fourcc(*'mp4v'), 20.0, (800, 600))
-            
             wrapper_initialized = False
             try:
                 self.env.map_wrapper.init(self.env.client, self.env.world, self.env.map, vehicle)
@@ -587,15 +654,6 @@ class PCLAExecutor(Executor):
             
             for step in range(self.sim_steps):
                 self.env.world.tick()
-                
-                if video_writer is not None and video_writer.isOpened():
-                    while not image_queue.empty():
-                        image = image_queue.get()
-                        array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
-                        array = np.reshape(array, (600, 800, 4))[:, :, :3]
-                        video_writer.write(array)
-                else:
-                    while not image_queue.empty(): image_queue.get()
                 
                 obs_birdview = None
                 if wrapper_initialized:
@@ -623,10 +681,13 @@ class PCLAExecutor(Executor):
                     if control:
                         vehicle.apply_control(control)
                         episode_steers.append(control.steer)
+                        episode_actions.append([control.steer, control.throttle, control.brake])
                     else:
                         vehicle.apply_control(carla.VehicleControl(brake=1.0))
+                        episode_actions.append([0.0, 0.0, 1.0])
                 except Exception as e:
                     stop_reason = "agent_error"
+                    episode_actions.append([0.0, 0.0, 1.0])
                     break
                 
                 v = vehicle.get_velocity()
@@ -640,6 +701,7 @@ class PCLAExecutor(Executor):
                 
                 reward = calculate_reward(prev_distance, cur_distance, is_collision, False, cur_speed, prev_speed)
                 total_reward += reward
+                episode_rewards.append(reward)
 
                 current_command = 2.0
                 try:
@@ -673,12 +735,6 @@ class PCLAExecutor(Executor):
             is_collision = True 
         
         finally:
-            if video_writer is not None and video_writer.isOpened():
-                try:
-                    while not image_queue.empty(): image_queue.get()
-                except Exception: pass
-                video_writer.release()
-            
             for sensor in sensor_list:
                 if sensor and sensor.is_alive: sensor.destroy()
             if vehicle and vehicle.is_alive: vehicle.destroy()
@@ -689,9 +745,7 @@ class PCLAExecutor(Executor):
 
             current_global_time = time.time() - self.experiment_start_time
             duration = time.time() - start_time
-            final_video_path = str(video_filename) if video_filename.exists() and video_filename.stat().st_size > 0 else "None"
             
-            # [关键修复] 计算平均速度和转向标准差
             avg_speed = 0.0
             steer_std = 0.0
             if len(episode_speeds) > 0:
@@ -699,17 +753,36 @@ class PCLAExecutor(Executor):
             if len(episode_steers) > 0:
                 steer_std = float(np.std(episode_steers))
 
-            final_avg_speed = avg_speed
-            final_steer_std = steer_std
-            
             final_x = 0.0
             final_y = 0.0
             if 'cur_loc' in locals():
                 final_x = cur_loc.x
                 final_y = cur_loc.y
 
-            # 2. Phase 2 (Fuzzing) 更新多样性
-            # [调整顺序] 在 get_metrics 之前调用 record，确保当前 episode 被计入
+            # 保存轨迹数据
+            if len(sequence) > 0 and len(episode_actions) > 0:
+                min_len = min(len(sequence), len(episode_actions), len(episode_rewards))
+                traj_path = self.traj_dir / f"{task_id}.npz"
+                
+                try:
+                    np.savez_compressed(
+                        traj_path,
+                        states=np.array(sequence[:min_len]),       
+                        actions=np.array(episode_actions[:min_len]), 
+                        rewards=np.array(episode_rewards[:min_len]),           
+                        is_collision=is_collision,         
+                        stop_reason=stop_reason,                   
+                        metadata={                                 
+                            "weather_id": weather_idx,
+                            "phase": phase,
+                            "avg_speed": avg_speed,
+                            "total_reward": total_reward
+                        }
+                    )
+                except Exception as e:
+                    print(f"Error saving trajectory: {e}")
+
+            # 仅 Phase 2 更新多样性
             if phase == "Phase2":
                 for (x, y) in episode_visited_states:
                     self.diversity_manager.record_step(x, y)
@@ -717,33 +790,40 @@ class PCLAExecutor(Executor):
                     self.diversity_manager.record_crash(episode_crash_pos[0], episode_crash_pos[1])
                 
                 is_failure = (not is_success)
-                self.behavior_manager.record_episode(final_avg_speed, final_steer_std, is_failure)
+                self.behavior_manager.record_episode(avg_speed, steer_std, is_failure)
 
             # 多样性计算
             cov, dist_crashes = self.diversity_manager.get_metrics()
             b_cnt, fb_cnt = self.behavior_manager.get_metrics()
 
-            # 1. 始终记录 Log
-            # [修改] 移除了 intrinsic_reward (原先传参为 0)
+            # 记录 Log
             self._log_result(
                 task_id, phase, current_global_time, weather_idx, start_idx, target_idx, 
                 is_success, stop_reason, is_collision, total_reward,
-                duration, step, final_dist, final_video_path,
+                duration, step, final_dist, 
                 cov, dist_crashes, final_x, final_y, 
-                b_cnt, fb_cnt, final_avg_speed, final_steer_std,
+                b_cnt, fb_cnt, avg_speed, steer_std,
                 generation, parent_input_str, current_input_str
             )
 
-            # 3. 对应计数器递增
+            # 计数器递增 (Phase1_Search 不递增 phase1_count)
             if phase == "Phase1":
                 self.phase1_count += 1
-            else:
+            elif phase == "Phase2":
                 self.phase2_count += 1
+            
+            # [MODIFIED] 保存 Last Run Metadata 用于缓存
+            self.last_run_metadata = {
+                'weather_idx': weather_idx, 'start_idx': start_idx, 'target_idx': target_idx,
+                'stop_reason': stop_reason, 'step': step, 'final_dist': final_dist,
+                'cov': cov, 'dist_crashes': dist_crashes, 'final_x': final_x, 'final_y': final_y,
+                'b_cnt': b_cnt, 'fb_cnt': fb_cnt, 'avg_speed': avg_speed, 'steer_std': steer_std,
+                'episode_actions': episode_actions, 'episode_rewards': episode_rewards
+            }
             
             return total_reward, is_collision, is_success, np.array(sequence) if len(sequence)>0 else np.zeros((1, 19)), duration
 
-    # [修改] 移除了 intrinsic 参数和相关字段
-    def _log_result(self, task_id, phase, global_time, weather, start, target, success, stop_reason, collision, reward, duration, steps, final_dist, video_path,
+    def _log_result(self, task_id, phase, global_time, weather, start, target, success, stop_reason, collision, reward, duration, steps, final_dist, 
                     coverage, distinct_crashes, final_x, final_y, behavior_count, fault_behavior_count, avg_speed, steer_std,
                     generation, parent_input, current_input):
         row_data = {
@@ -757,11 +837,9 @@ class PCLAExecutor(Executor):
             "stop_reason": stop_reason,
             "collision": collision,
             "total_reward": round(reward, 4),
-            # "intrinsic_reward": intrinsic,  <-- REMOVED
             "duration": round(duration, 2),
             "steps": steps,
             "final_dist": round(final_dist, 2),
-            "video_path": video_path,
             "state_coverage": coverage,
             "distinct_crashes": distinct_crashes,
             "final_x": final_x,

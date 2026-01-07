@@ -8,7 +8,7 @@ import argparse
 import pandas as pd
 import carla
 import torch
-import cv2
+# [MODIFIED] Removed cv2 import
 import pickle
 import queue
 from pathlib import Path
@@ -160,6 +160,7 @@ class BehaviorDiversityManager:
 # 全局设置与工具
 # ==============================================================================
 AGENT_NAME = "carl_roach_0"
+# [MODIFIED] Removed Video Constants usage for recording, but keeping FPS for sim step
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 600
 VIDEO_FPS = 20.0
@@ -270,8 +271,13 @@ class SeqFuzzManager:
             print(f"[WARNING] 权重文件未找到: {weights_path}")
 
         # 目录结构
-        (self.result_dir / "videos").mkdir(parents=True, exist_ok=True)
+        # [MODIFIED] Removed "videos" directory creation
+        # (self.result_dir / "videos").mkdir(parents=True, exist_ok=True)
         (self.result_dir / "reward_logs").mkdir(parents=True, exist_ok=True)
+        
+        # [NEW] 创建轨迹数据保存目录
+        (self.result_dir / "trajectories").mkdir(parents=True, exist_ok=True)
+
         self.summary_csv = self.result_dir / "summary.csv"
         self.crash_log = self.result_dir / "crash_log.txt"
         
@@ -279,7 +285,9 @@ class SeqFuzzManager:
             columns = [
                 "task_id", "phase", "weather_id", "start_id", "target_id",
                 "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
-                "duration", "steps", "final_dist", "video_path",
+                "duration", "steps", "final_dist", 
+                # [MODIFIED] Removed "video_path" column
+                # "video_path",
                 "elapsed_time", "current_timestamp",
                 "state_coverage", "distinct_crashes", "final_x", "final_y",
                 "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
@@ -408,16 +416,9 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
     collision_queue = queue.Queue()
     collision_sensor.listen(collision_queue.put)
 
-    camera_bp = world.get_blueprint_library().find('sensor.camera.rgb')
-    camera_bp.set_attribute('image_size_x', str(VIDEO_WIDTH))
-    camera_bp.set_attribute('image_size_y', str(VIDEO_HEIGHT))
-    camera_sensor = world.spawn_actor(camera_bp, carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-15)), attach_to=vehicle)
-    image_queue = queue.Queue()
-    camera_sensor.listen(image_queue.put)
-    
-    video_path = Path(env_manager.result_dir / "videos" / f"{run_name}.mp4")
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video_writer = cv2.VideoWriter(str(video_path), fourcc, VIDEO_FPS, (VIDEO_WIDTH, VIDEO_HEIGHT))
+    # [MODIFIED] Removed Camera/Video setup
+    # camera_sensor = None
+    # video_writer = None
 
     wrapper_initialized = False
     try:
@@ -438,7 +439,7 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
     if initial_collision:
         if wrapper_initialized: env_manager.map_wrapper.clear()
         if collision_sensor: collision_sensor.destroy()
-        if camera_sensor: camera_sensor.destroy()
+        # if camera_sensor: camera_sensor.destroy()
         if vehicle: vehicle.destroy()
         client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         world.tick()
@@ -456,6 +457,8 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
     sequence = []
     episode_speeds = []
     episode_steers = []
+    # [NEW] Action sequence
+    episode_actions = []
     reward_history = []
     total_reward = 0
     total_entropy = 0
@@ -502,6 +505,10 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
                 if control: 
                     vehicle.apply_control(control)
                     episode_steers.append(control.steer)
+                    # [NEW] Record full action
+                    episode_actions.append([control.steer, control.throttle, control.brake])
+                else:
+                    episode_actions.append([0.0, 0.0, 0.0])
             except Exception:
                 stop_reason = "AgentError"
                 break
@@ -529,10 +536,8 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
             prev_dist = cur_dist
             prev_speed = cur_speed_vec
             
-            while not image_queue.empty():
-                img = image_queue.get_nowait()
-                arr = np.frombuffer(img.raw_data, dtype=np.dtype("uint8")).reshape((img.height, img.width, 4))
-                video_writer.write(arr[:, :, :3])
+            # [MODIFIED] Removed Image queue processing
+            # while not image_queue.empty(): ...
 
             if cur_dist < ARRIVAL_DISTANCE:
                 success = True
@@ -569,21 +574,55 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
         if phase != "Phase1" and not success:
             env_manager.diversity_manager.record_crash(final_x, final_y)
 
-        if camera_sensor and camera_sensor.is_alive: camera_sensor.stop()
+        # [MODIFIED] Removed Camera Cleanup
+        # if camera_sensor and camera_sensor.is_alive: camera_sensor.stop()
+        
         if collision_sensor and collision_sensor.is_alive: collision_sensor.stop()
         if wrapper_initialized: 
             try: env_manager.map_wrapper.clear()
             except: pass
-        if camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
+            
+        # [MODIFIED] Removed Camera Destroy
+        # if camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
+        
         if collision_sensor and collision_sensor.is_alive: collision_sensor.destroy()
         if vehicle and vehicle.is_alive: vehicle.destroy()
         if npc_ids: client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         try: world.tick()
         except: pass
-        if video_writer: video_writer.release()
+        
+        # [MODIFIED] Removed Video Writer Release
+        # if video_writer: video_writer.release()
+        
         if os.path.exists(route_file): 
             try: os.remove(route_file)
             except: pass
+        
+        # [NEW] Save trajectory data (.npz)
+        if len(sequence) > 0 and len(episode_actions) > 0:
+            min_len = min(len(sequence), len(episode_actions), len(reward_history))
+            rewards_array = [r['total_reward'] for r in reward_history[:min_len]]
+            
+            traj_path = env_manager.result_dir / "trajectories" / f"{run_name}.npz"
+            is_collision_episode = (stop_reason == "Collision")
+            
+            try:
+                np.savez_compressed(
+                    traj_path,
+                    states=np.array(sequence[:min_len]),       
+                    actions=np.array(episode_actions[:min_len]), 
+                    rewards=np.array(rewards_array),           
+                    is_collision=is_collision_episode,         
+                    stop_reason=stop_reason,                   
+                    metadata={                                 
+                        "weather_id": weather_id,
+                        "phase": phase,
+                        "avg_speed": avg_speed if 'avg_speed' in locals() else 0.0
+                    }
+                )
+            except Exception as e:
+                print(f"[ERROR] Saving trajectory failed: {e}")
+
         if reward_history:
             pd.DataFrame(reward_history).to_csv(env_manager.result_dir / "reward_logs" / f"{run_name}.csv", index=False)
 
@@ -597,7 +636,7 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
         "final_state": sequence[-1] if sequence else np.zeros(17),
         "steps": step,
         "final_dist": prev_dist,
-        "video_path": str(video_path),
+        # [MODIFIED] Removed "video_path" from return
         "npc_info": current_npc_info,
         "final_x": final_x, "final_y": final_y,
         "avg_speed": avg_speed if 'avg_speed' in locals() else 0.0,
@@ -616,7 +655,8 @@ def log_result(manager, task_id, phase, weather, start, target, res, cvg_metric,
         "total_reward": res['total_reward'],
         "intrinsic_reward": cvg_metric,
         "duration": 0, "steps": res['steps'], "final_dist": res['final_dist'],
-        "video_path": res['video_path'],
+        # [MODIFIED] Removed "video_path"
+        # "video_path": res['video_path'],
         "elapsed_time": time.time() - manager.start_time, "current_timestamp": time.time(),
         "state_coverage": cov, "distinct_crashes": dist_crash,
         "final_x": res['final_x'], "final_y": res['final_y'],
@@ -635,7 +675,8 @@ def main():
     parser.add_argument("--suite", default="straight")
     parser.add_argument("--num_vehicles", type=int, default=30)
     parser.add_argument("--max_run", type=int, default=100)
-    parser.add_argument("--num_tasks", type=int, default=5)
+    # [MODIFIED] 默认值设为 100，以匹配您的需求
+    parser.add_argument("--num_tasks", type=int, default=100)
     parser.add_argument("--seed", type=int, default=2024)
     # [修改] 单位：小时
     parser.add_argument("--time_budget", type=float, default=None, help="Fuzzing time budget in HOURS (Phase 2 only).")
@@ -651,41 +692,53 @@ def main():
     total_spawns = len(manager.spawn_points)
     weather_list = [1, 3, 6, 8]
     
-    print(f">>> [Phase 1] Seed Collection (Target: {args.num_tasks} seeds)")
+    # [MODIFIED] 生成所有 组合 (routes * weathers) 并随机打乱
+    all_combinations = []
+    if tasks:
+        for t_idx, (start_id, target_id) in enumerate(tasks):
+            for w_id in weather_list:
+                all_combinations.append((t_idx, start_id, target_id, w_id))
+        random.shuffle(all_combinations)
+        print(f">>> [Phase 1] Generated and shuffled {len(all_combinations)} combinations.")
+    
+    print(f">>> [Phase 1] Seed Collection (Target: {args.num_tasks} successful seeds)")
+    
     collected_seeds = 0
-    task_idx = 0
+    attempt_idx = 0
+    combo_iterator = iter(all_combinations)
     
     try:
-        while collected_seeds < args.num_tasks and task_idx < len(tasks):
-            start_id, target_id = tasks[task_idx]
+        # [MODIFIED] 遍历组合，直到收集够种子或组合耗尽
+        while collected_seeds < args.num_tasks:
+            try:
+                task_idx, start_id, target_id, weather_id = next(combo_iterator)
+            except StopIteration:
+                print(f"[WARNING] Exhausted all {len(all_combinations)} combinations. Found {collected_seeds} successful seeds.")
+                break
+                
+            attempt_idx += 1
             if start_id >= total_spawns or target_id >= total_spawns:
-                task_idx += 1
                 continue
                 
-            start_pose = manager.spawn_points[start_id]
-            target_pose = manager.spawn_points[target_id]
-            current_seed = args.seed + task_idx
-            rng = random.Random(current_seed)
-            weather_id = rng.choice(weather_list)
+            # 使用唯一ID，避免重复
+            current_seed = args.seed + attempt_idx
+            run_name = f"phase1_try{attempt_idx:03d}_task{task_idx}_w{weather_id}"
             
-            run_name = f"seed_{collected_seeds}_task{task_idx}"
-            print(f"  Attempting Task {task_idx}: {start_id}->{target_id} (Weather {weather_id})...")
+            print(f"  Attempting Seed #{collected_seeds+1} (Try {attempt_idx}): Task {task_idx} ({start_id}->{target_id}, W{weather_id})...")
             
-            res = run_episode(manager, start_pose, target_pose, weather_id, run_name, "Phase1", seed=current_seed)
+            res = run_episode(manager, manager.spawn_points[start_id], manager.spawn_points[target_id], weather_id, run_name, "Phase1", seed=current_seed)
             
             if res:
                 seq_np = np.array(res['sequence'])
                 cvg = 0
                 if len(seq_np) > 5: cvg = manager.fuzzer.state_coverage(seq_np)
 
-                # [修改] 使用辅助函数生成 input_post (Phase 1 pre 为 None)
-                # res['npc_info'] 包含了初始生成的 NPC Transform
-                input_post_str = get_full_state_str(start_pose, res['npc_info'])
+                input_post_str = get_full_state_str(manager.spawn_points[start_id], res['npc_info'])
                 log_result(manager, run_name, "Phase1", weather_id, start_id, target_id, res, cvg, 0, 0, "None", input_post_str)
                 
                 if res['success'] and not res['collision']:
                     print(f"    -> Success! Added to corpus.")
-                    pose_tuple = (start_pose, res['npc_info'])
+                    pose_tuple = (manager.spawn_points[start_id], res['npc_info'])
                     env_setting = [start_id, target_id, weather_id]
                     manager.fuzzer.further_mutation(
                         pose_tuple, res['total_reward'], res['entropy'], cvg, pose_tuple, env_setting, 
@@ -693,11 +746,9 @@ def main():
                     )
                     collected_seeds += 1
                 else:
-                    print(f"    -> Failed (Success={res['success']}, Col={res['collision']}, Reason={res['stop_reason']}).")
+                    print(f"    -> Failed (Success={res['success']}, Col={res['collision']}).")
             else:
                 print(f"    -> Failed (Initial Crash or Spawn Error).")
-                
-            task_idx += 1
 
         print(f">>> [Phase 2] Fuzzing Loop (Corpus Size: {len(manager.fuzzer.corpus)})")
         

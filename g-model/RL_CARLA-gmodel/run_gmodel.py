@@ -7,7 +7,7 @@ import random
 import numpy as np
 import argparse
 import pandas as pd
-import cv2
+# [MODIFIED] Removed cv2 import
 import queue
 import pickle
 import copy
@@ -200,6 +200,7 @@ class BehaviorDiversityManager:
 
 # --- Constants & Config ---
 AGENT_NAME = "carl_roach_0" 
+# [MODIFIED] Removed Video Constants usage for recording, but keeping FPS for sim step
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 600
 VIDEO_FPS = 20.0
@@ -448,22 +449,10 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     collision_queue = queue.Queue()
     collision_sensor.listen(collision_queue.put)
 
-    camera_bp = world.get_blueprint_library().find('sensor.camera.rgb')
-    camera_bp.set_attribute('image_size_x', str(VIDEO_WIDTH))
-    camera_bp.set_attribute('image_size_y', str(VIDEO_HEIGHT))
-    camera_bp.set_attribute('fov', '110')
-    camera_bp.set_attribute('sensor_tick', str(1.0 / VIDEO_FPS))
-    
-    camera_transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-8.0))
-    camera_sensor = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
-    image_queue = queue.Queue()
-    camera_sensor.listen(image_queue.put)
-    
-    video_dir = results_dir / "videos"
-    video_dir.mkdir(parents=True, exist_ok=True)
-    video_path = video_dir / f"{run_name}.mp4"
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
-    video_writer = cv2.VideoWriter(str(video_path), fourcc, VIDEO_FPS, (VIDEO_WIDTH, VIDEO_HEIGHT))
+    # [MODIFIED] Removed Camera and Video Setup
+    # camera_bp = ...
+    # camera_sensor = ...
+    # video_writer = ...
 
     wrapper_initialized = False
     if env_manager.map_wrapper:
@@ -482,7 +471,7 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             if not collision_queue.empty(): 
                 collision_queue.get()
                 initial_collision = True
-            if not image_queue.empty(): image_queue.get()
+            # [MODIFIED] Removed image_queue processing
             if wrapper_initialized: env_manager.map_wrapper.tick()
     except Exception:
         pass
@@ -492,11 +481,8 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         if wrapper_initialized: env_manager.map_wrapper.clear()
         
         if collision_sensor: collision_sensor.destroy()
-        if camera_sensor: camera_sensor.destroy()
-        if video_writer: video_writer.release()
-        if os.path.exists(video_path): 
-            try: os.remove(video_path) 
-            except: pass
+        # if camera_sensor: camera_sensor.destroy()
+        # if video_writer: video_writer.release()
         if vehicle: vehicle.destroy()
         if npc_ids: client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         return "INITIAL_CRASH"
@@ -506,6 +492,11 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     
     episode_speeds = []
     episode_steers = []
+    # [NEW] Action sequence
+    episode_actions = []
+    # [NEW] Reward history
+    reward_history = []
+    
     final_x = 0.0
     final_y = 0.0
     
@@ -523,8 +514,8 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         stop_reason = "Agent_Init_Fail"
         if wrapper_initialized: env_manager.map_wrapper.clear()
         if collision_sensor: collision_sensor.destroy()
-        if camera_sensor: camera_sensor.destroy()
-        if video_writer: video_writer.release()
+        # if camera_sensor: camera_sensor.destroy()
+        # if video_writer: video_writer.release()
         if vehicle: vehicle.destroy()
         if npc_ids: client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         return None
@@ -544,14 +535,11 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         while step < max_steps:
             world.tick()
             
-            try:
-                img_data = image_queue.get(timeout=2.0)
-                array = np.frombuffer(img_data.raw_data, dtype=np.dtype("uint8"))
-                array = np.reshape(array, (img_data.height, img_data.width, 4))
-                array = array[:, :, :3] 
-                video_writer.write(array)
-            except queue.Empty:
-                print("[Warning] Camera frame dropped!")
+            # [MODIFIED] Removed image/video loop
+            # try:
+            #     img_data = image_queue.get(timeout=2.0)
+            #     ...
+            # except queue.Empty: ...
 
             obs_birdview = None
             if wrapper_initialized:
@@ -588,6 +576,10 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
                 if control: 
                     vehicle.apply_control(control)
                     episode_steers.append(control.steer)
+                    # [NEW] Record full action
+                    episode_actions.append([control.steer, control.throttle, control.brake])
+                else:
+                    episode_actions.append([0.0, 0.0, 0.0])
             except ValueError as ve:
                 print(f"[Warn] Agent distribution error (NaNs): {ve}")
                 stop_reason = "Agent_Crash_NaN"
@@ -611,6 +603,8 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             
             reward = calculate_reward(prev_distance, cur_distance, collided, invaded, cur_speed, prev_speed)
             total_reward += reward
+            # [NEW] Record reward
+            reward_history.append(reward)
             seq_entropy += entropy
             
             current_command = 2.0 
@@ -651,8 +645,10 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
 
         env_manager.behavior_manager.record_episode(avg_speed, steer_std, is_failure)
 
-        if 'video_writer' in locals() and video_writer: video_writer.release()
-        if 'camera_sensor' in locals() and camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
+        # [MODIFIED] Removed Camera/Video cleanup
+        # if 'video_writer' in locals() and video_writer: video_writer.release()
+        # if 'camera_sensor' in locals() and camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
+        
         if 'collision_sensor' in locals() and collision_sensor and collision_sensor.is_alive: collision_sensor.destroy()
         if wrapper_initialized: 
             try: env_manager.map_wrapper.clear()
@@ -669,6 +665,34 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         if os.path.exists(route_file): 
             try: os.remove(route_file)
             except: pass
+            
+        # [NEW] Save Trajectory
+        if len(sequence) > 0 and len(episode_actions) > 0:
+            try:
+                # Create trajectories dir
+                traj_dir = results_dir / "trajectories"
+                traj_dir.mkdir(parents=True, exist_ok=True)
+                traj_path = traj_dir / f"{run_name}.npz"
+                
+                # Align lengths
+                min_len = min(len(sequence), len(episode_actions), len(reward_history))
+                
+                np.savez_compressed(
+                    traj_path,
+                    states=np.array(sequence[:min_len]),
+                    actions=np.array(episode_actions[:min_len]),
+                    rewards=np.array(reward_history[:min_len]),
+                    is_collision=(stop_reason == "Collision"),
+                    stop_reason=stop_reason,
+                    metadata={
+                        "weather_idx": generated_config.weather,
+                        "avg_speed": avg_speed,
+                        "start_id": start_id,
+                        "target_id": target_id
+                    }
+                )
+            except Exception as e:
+                print(f"[Error] Failed to save trajectory: {e}")
     
     # [修改] 从 diversity_manager 获取更新后的 metrics
     cov, dist_failures = env_manager.diversity_manager.get_metrics()
@@ -682,7 +706,7 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         "generated_config": generated_config,
         "steps": step,
         "duration": step / VIDEO_FPS,
-        "video_path": str(video_path),
+        # [MODIFIED] Removed "video_path" from return
         "start_id": start_id,
         "target_id": target_id,
         "state_coverage": cov,
@@ -726,13 +750,14 @@ def run_generation_loop(args):
         results_dir.mkdir(parents=True, exist_ok=True)
         summary_csv = results_dir / "summary.csv"
         
-        # [修改] 使用 input_post 并移除 physical_params
+        # [修改] 使用 input_post 并移除 physical_params, 移除了 video_path
         columns = [
             "task_id", "method", "success", "collision", "stop_reason", 
             "total_reward", "duration", "steps", 
             "start_id", "target_id", "weather", 
             "start_x_off", "start_y_off", "start_yaw_off",
-            "video_path", "density", "sensitivity", "novelty",
+            # "video_path", # REMOVED
+            "density", "sensitivity", "novelty",
             "state_coverage", "distinct_crashes", 
             "behavior_count", "fault_behavior_count",
             "final_x", "final_y", "elapsed_time",
@@ -828,7 +853,7 @@ def run_generation_loop(args):
                             "start_x_off": carla_env.start_pose_x,
                             "start_y_off": carla_env.start_pose_y,
                             "start_yaw_off": carla_env.start_pose_yaw,
-                            "video_path": res['video_path'],
+                            # "video_path": res['video_path'], # REMOVED
                             "density": density,
                             "sensitivity": sensitivity,
                             "novelty": novelty,
@@ -899,7 +924,7 @@ def run_generation_loop(args):
                                 "start_x_off": carla_env.start_pose_x,
                                 "start_y_off": carla_env.start_pose_y,
                                 "start_yaw_off": carla_env.start_pose_yaw,
-                                "video_path": res['video_path'],
+                                # "video_path": res['video_path'], # REMOVED
                                 "density": density,
                                 "sensitivity": sensitivity,
                                 "novelty": novelty,
