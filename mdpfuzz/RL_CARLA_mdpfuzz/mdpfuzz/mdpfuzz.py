@@ -78,14 +78,12 @@ class Fuzzer():
                 attempts += 1
         return mutate_states
 
-    # [修改] 传递 phase
     def mdp(self, state: np.ndarray, policy: Any = None, generation: int = 0, parent_input: Any = None, phase: str = "Phase1") -> Tuple[float, bool, bool, np.ndarray, float]:
         episode_reward, crash, success, obs_seq, exec_time = self.executor.execute_policy(
             state, policy, generation=generation, parent_input=parent_input, phase=phase
         )
         return episode_reward, crash, success, obs_seq, exec_time
 
-    # [修改] 传递 phase
     def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, generation: int = 0, parent_input: Any = None, phase: str = "Phase1", **kwargs) -> Tuple[float, float, bool, bool, List[np.ndarray], float]:
         perturbed_state = self.mutate_validate(state, **kwargs)
         perturbation = np.linalg.norm(state - perturbed_state)
@@ -98,7 +96,6 @@ class Fuzzer():
             success = None
             exec_time = None
 
-        # 扰动计算也属于同一阶段
         acc_reward_perturbed, crash_perturbed, success_perturbed, state_sequence_perturbed, exec_time_perturbed = self.mdp(
             perturbed_state, policy, generation=generation, parent_input=state, phase=phase
         )
@@ -154,7 +151,6 @@ class Fuzzer():
         for state in initial_inputs:
             self.generation_map[self._get_key(state)] = 0
             
-            # [修改] 传递 phase="Phase1"
             sensitivity, acc_reward, oracle, success, state_sequence, exec_time = self.sentivity(
                 state, policy=policy, generation=0, parent_input=None, phase="Phase1", **kwargs
             )
@@ -204,7 +200,6 @@ class Fuzzer():
         
         print(f"[Info] Initialization finished. Total Init Executions: {total_init_executions}")
 
-        # Phase 2: Fuzzing
         fuzz_start_time = time.time()
         fuzz_iterations = 0
 
@@ -242,7 +237,6 @@ class Fuzzer():
                 
                 mutant = self.mutate_validate(input, **kwargs)
                 
-                # [修改] 传递 phase="Phase2"
                 acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(
                     mutant, policy, generation=current_gen, parent_input=input, phase="Phase2"
                 )
@@ -270,7 +264,6 @@ class Fuzzer():
                     if local_sensitivity:
                         sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                     else:
-                        # [修改] 传递 phase="Phase2"
                         sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(
                             mutant, acc_reward=acc_reward_mutant, policy=policy, generation=current_gen, parent_input=input, phase="Phase2", **kwargs
                         )
@@ -349,7 +342,6 @@ class Fuzzer():
             state = np.array(initial_inputs[input_idx])
             input_idx += 1
             
-            # [修改] 传递 phase="Phase1"
             acc_reward, oracle, is_success, state_sequence, exec_time = self.mdp(
                 state, policy, generation=0, parent_input=None, phase="Phase1"
             )
@@ -359,7 +351,6 @@ class Fuzzer():
                 self.evaluated_solutions.append(state.tolist())
             
             if is_success:
-                # [修改] 传递 phase="Phase1"
                 sensitivity, _, _, _, _, _ = self.sentivity(
                     state, 
                     acc_reward=acc_reward, 
@@ -395,7 +386,6 @@ class Fuzzer():
         print(f"[Info] Initialization finished. Total Init Executions: {total_init_executions} (Target Success: {n})")
         print("[Info] Note: Initialization cost is NOT deducted from Fuzzing budget.")
 
-        # Phase 2: Fuzzing
         fuzz_start_time = time.time()
         fuzz_iterations = 0
 
@@ -431,7 +421,6 @@ class Fuzzer():
             current_gen = parent_gen + 1
             
             mutant = self.mutate_validate(input, **kwargs)
-            # [修改] 传递 phase="Phase2"
             acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(
                 mutant, policy, generation=current_gen, parent_input=input, phase="Phase2"
             )
@@ -446,7 +435,6 @@ class Fuzzer():
                 if local_sensitivity:
                     sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                 else:
-                    # [修改] 传递 phase="Phase2"
                     sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(
                         mutant, acc_reward=acc_reward_mutant, policy=policy, generation=current_gen, parent_input=input, phase="Phase2", **kwargs
                     )
@@ -525,12 +513,32 @@ class Fuzzer():
         check_redundant_input = kwargs.get('check_redundant_input', True)
 
         self.config['name'] = 'RT'
-        self.config['test_budget'] = n
+        
+        target_budget_time = kwargs.get('test_budget_in_seconds', None)
+        
+        if target_budget_time is not None:
+            self.config['test_budget_in_seconds'] = target_budget_time
+            self.config['test_budget'] = None # Explicitly set to None to avoid confusion
+            pbar = tqdm.tqdm(total=target_budget_time, unit='s', desc="Random Testing (Time)")
+        else:
+            self.config['test_budget'] = n
+            pbar = tqdm.tqdm(total=n, desc="Random Testing (Iter)")
+            
         self.logger = FuzzerLogger(path + '_logs.txt')
         self.logger.write_columns()
-        pbar = tqdm.tqdm(total=n)
+        
+        start_time = time.time()
         i = 0
-        while i < n:
+        
+        while True:
+            if target_budget_time:
+                current_duration = time.time() - start_time
+                if current_duration > target_budget_time:
+                    print(f"[Info] Time budget reached: {current_duration:.2f}s > {target_budget_time}s")
+                    break
+            elif i >= n:
+                break
+
             execute = True
             random_input = self.sampling(1)
 
@@ -542,8 +550,11 @@ class Fuzzer():
                     execute = False
 
             if execute:
-                # [修改] 虽然 Random Testing 通常不分 Phase，但为了接口一致，传递 Phase1 或 RT
                 acc_reward, oracle, success, state_sequence, exec_time = self.mdp(random_input, policy, phase="RT")
+
+                coverage = 0.0
+                coverage_time = 0.0
+
                 episode_length = len(state_sequence)
                 self.logger.log(
                     input=random_input,
@@ -551,10 +562,21 @@ class Fuzzer():
                     reward=acc_reward,
                     episode_length=episode_length,
                     test_exec_time=exec_time,
+                    coverage=coverage, 
+                    coverage_time=coverage_time,
                     run_time=time.time()
                 )
-                pbar.update(1)
+                
                 i += 1
+            
+            if target_budget_time:
+                current_elapsed_int = int(time.time() - start_time)
+                increment = current_elapsed_int - pbar.n
+                if increment > 0:
+                    pbar.update(increment)
+            else:
+                if execute:
+                    pbar.update(1)
 
         pbar.close()
         self.save_configuration(path)

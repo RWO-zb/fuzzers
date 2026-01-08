@@ -8,22 +8,16 @@ import argparse
 import pandas as pd
 import carla
 import torch
-# [MODIFIED] Removed cv2 import
 import pickle
 import queue
 from pathlib import Path
 
-# [环境配置] 强制使用 dummy 视频驱动 (Headless 模式)
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
-# ==============================================================================
-# [路径修正]
-# ==============================================================================
 current_dir = os.path.dirname(os.path.abspath(__file__))
 workspace_dir = os.path.dirname(current_dir)
 pcla_dir = os.path.join(workspace_dir, 'PCLA')
 
-# 1. 添加 PCLA 路径
 if os.path.exists(pcla_dir):
     if pcla_dir not in sys.path:
         sys.path.insert(0, pcla_dir)
@@ -31,20 +25,14 @@ else:
     alt_pcla = os.path.join(current_dir, "../PCLA")
     if os.path.exists(alt_pcla) and alt_pcla not in sys.path:
         sys.path.insert(0, alt_pcla)
-        print(f"[INFO] Using PCLA from relative path: {alt_pcla}")
 
-# 2. 添加当前目录
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-# 3. 添加 analysis 目录到 sys.path
 analysis_dir = os.path.join(current_dir, 'analysis')
 if os.path.exists(analysis_dir) and analysis_dir not in sys.path:
     sys.path.insert(0, analysis_dir)
 
-# ==============================================================================
-# [导入模块]
-# ==============================================================================
 try:
     from PCLA import PCLA 
     from pcla_functions import location_to_waypoint, route_maker 
@@ -53,8 +41,6 @@ try:
     from analysis.tapnet.predict_siamese import load_tapnet_mode, predict_one
     from bird_view.utils import map_utils
 except ImportError as e:
-    print(f"[ERROR] 模块导入失败: {e}")
-    traceback.print_exc()
     sys.exit(1)
 
 import pygame
@@ -62,41 +48,24 @@ def patch_map_utils():
     pass
 patch_map_utils()
 
-# ==============================================================================
-# [新增] 辅助函数：序列化完整状态
-# ==============================================================================
 def get_full_state_str(ego_transform, npc_info_list):
-    """
-    将自我车辆和NPC的状态序列化为字符串，保留2位小数以便去重比较。
-    格式: Ego:[x,y,yaw]|NPCs:(x1,y1),(x2,y2)...
-    """
-    # 1. 序列化 Ego State
     if ego_transform is None:
         ego_str = "None"
     else:
-        # 保留2位小数
         ego_str = f"[{ego_transform.location.x:.2f},{ego_transform.location.y:.2f},{ego_transform.rotation.yaw:.2f}]"
 
-    # 2. 序列化 NPC State
-    # npc_info_list 结构通常为: [(bp_id, transform, color, driver_id), ...]
     if not npc_info_list:
         npc_str = "None"
     else:
         npc_coords = []
         for item in npc_info_list:
-            # item[1] 是 carla.Transform
             t = item[1]
             npc_coords.append(f"({t.location.x:.2f},{t.location.y:.2f})")
-        
-        # 排序 NPC 坐标，防止因为列表顺序不同但内容相同导致的误判
         npc_coords.sort() 
         npc_str = ",".join(npc_coords)
 
     return f"Ego:{ego_str}|NPCs:{npc_str}"
 
-# ==============================================================================
-# [对齐] Diversity Manager Classes
-# ==============================================================================
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
         self.x_min, self.x_max = x_range
@@ -156,11 +125,7 @@ class BehaviorDiversityManager:
     def get_metrics(self):
         return len(self.behavior_archive), len(self.fault_archive)
 
-# ==============================================================================
-# 全局设置与工具
-# ==============================================================================
 AGENT_NAME = "carl_roach_0"
-# [MODIFIED] Removed Video Constants usage for recording, but keeping FPS for sim step
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 600
 VIDEO_FPS = 20.0
@@ -212,13 +177,9 @@ def save_replayer_pickle(replayer_obj, log_dir):
     try:
         with open(filepath, 'wb') as handle:
             pickle.dump(replayer_obj, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"[INFO] Replayer data saved to {filepath}")
-    except Exception as e:
-        print(f"[ERROR] Failed to save replayer: {e}")
+    except Exception:
+        pass
 
-# ==============================================================================
-# 环境管理器
-# ==============================================================================
 class SeqFuzzManager:
     def __init__(self, args, result_dir):
         self.args = args
@@ -231,7 +192,6 @@ class SeqFuzzManager:
         self.map_wrapper = map_utils.Wrapper 
         
         if args.town not in self.map.name:
-            print(f"[INFO] Loading world: {args.town}")
             self.client.load_world(args.town)
             self.world = self.client.get_world()
             self.map = self.world.get_map()
@@ -255,8 +215,6 @@ class SeqFuzzManager:
         self.fuzzer = fuzzing()
         self.replayer = replayer()
         
-        # TapNet
-        print("[INFO] Loading TapNet Model...")
         self.tapnet = load_tapnet_mode()
         if torch.cuda.is_available(): self.tapnet.cuda()
             
@@ -264,18 +222,9 @@ class SeqFuzzManager:
         if os.path.exists(weights_path):
             try:
                 self.tapnet.load_state_dict(torch.load(weights_path))
-            except RuntimeError as e:
-                print(f"[ERROR] TapNet Weights Mismatch: {e}")
-                print("[INFO] Continuing without loading weights. Fix Hyperparameter.py if needed.")
-        else:
-            print(f"[WARNING] 权重文件未找到: {weights_path}")
+            except RuntimeError:
+                pass
 
-        # 目录结构
-        # [MODIFIED] Removed "videos" directory creation
-        # (self.result_dir / "videos").mkdir(parents=True, exist_ok=True)
-        (self.result_dir / "reward_logs").mkdir(parents=True, exist_ok=True)
-        
-        # [NEW] 创建轨迹数据保存目录
         (self.result_dir / "trajectories").mkdir(parents=True, exist_ok=True)
 
         self.summary_csv = self.result_dir / "summary.csv"
@@ -284,11 +233,9 @@ class SeqFuzzManager:
         if not self.summary_csv.exists():
             columns = [
                 "task_id", "phase", "weather_id", "start_id", "target_id",
-                "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
-                "duration", "steps", "final_dist", 
-                # [MODIFIED] Removed "video_path" column
-                # "video_path",
-                "elapsed_time", "current_timestamp",
+                "success", "stop_reason", "collision", "total_reward", 
+                "steps", "final_dist", 
+                "elapsed_time",
                 "state_coverage", "distinct_crashes", "final_x", "final_y",
                 "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
                 "mutation_generation", "input_pre", "input_post",
@@ -300,11 +247,9 @@ class SeqFuzzManager:
         base_path = Path(current_dir) / "benchmark"
         task_file = base_path / "corl2017" / "0915" / f"{suite_type}_{town_name}.txt"
         if not task_file.exists():
-            print(f"[WARNING] 任务文件未找到: {task_file}")
             task_file = base_path / f"{suite_type}_{town_name}.txt"
             if not task_file.exists(): return []
         
-        print(f"[INFO] 加载任务文件: {task_file}")
         tasks = []
         with open(task_file, 'r') as f:
             for line in f:
@@ -332,7 +277,6 @@ class SeqFuzzManager:
             
             bp = rng.choice(blueprints)
             bp.set_attribute('role_name', 'autopilot')
-            # 记录 NPC 信息以便后续变异和日志记录
             npc_info_list.append((bp.id, transform, None, None))
             
             cmd = carla.command.SpawnActor(bp, transform).then(
@@ -344,9 +288,6 @@ class SeqFuzzManager:
         npc_ids = [r.actor_id for r in results if not r.error]
         return npc_ids, npc_info_list
 
-# ==============================================================================
-# 单次 Episode 运行
-# ==============================================================================
 def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phase, npc_data=None, seed=None):
     if seed is not None:
         random.seed(seed)
@@ -356,7 +297,6 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
     client = env_manager.client
     world = env_manager.world
     
-    # 1. 严格清理
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('vehicle.*')])
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
     for _ in range(5): world.tick()
@@ -370,14 +310,12 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
     try: env_manager.map_wrapper.clear()
     except: pass
 
-    # 2. 设置环境
     world.set_weather(WEATHERS.get(weather_id, carla.WeatherParameters.ClearNoon))
     settings = world.get_settings()
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = 1.0 / VIDEO_FPS
     world.apply_settings(settings)
     
-    # 3. 生成 Ego Vehicle
     bp = world.get_blueprint_library().find('vehicle.lincoln.mkz_2017')
     bp.set_attribute('role_name', 'hero')
     spawn_trans = carla.Transform(start_pose.location + carla.Location(z=0.2), start_pose.rotation)
@@ -388,7 +326,6 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
         vehicle = world.try_spawn_actor(bp, spawn_trans)
         if not vehicle: return None
 
-    # 4. 生成 NPC
     npc_ids = []
     current_npc_info = []
     
@@ -410,15 +347,10 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
     else:
         npc_ids, current_npc_info = env_manager.init_traffic(env_manager.args.num_vehicles, start_pose, seed=seed)
 
-    # 5. 传感器
     collision_bp = world.get_blueprint_library().find('sensor.other.collision')
     collision_sensor = world.spawn_actor(collision_bp, carla.Transform(), attach_to=vehicle)
     collision_queue = queue.Queue()
     collision_sensor.listen(collision_queue.put)
-
-    # [MODIFIED] Removed Camera/Video setup
-    # camera_sensor = None
-    # video_writer = None
 
     wrapper_initialized = False
     try:
@@ -427,7 +359,6 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
     except Exception: 
         wrapper_initialized = False
 
-    # 预热
     initial_collision = False
     try:
         for _ in range(5):
@@ -439,13 +370,11 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
     if initial_collision:
         if wrapper_initialized: env_manager.map_wrapper.clear()
         if collision_sensor: collision_sensor.destroy()
-        # if camera_sensor: camera_sensor.destroy()
         if vehicle: vehicle.destroy()
         client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         world.tick()
         return None
 
-    # 6. Agent
     try:
         route_file = f"route_{run_name}.xml"
         waypoints = location_to_waypoint(client, start_pose.location, target_pose.location)
@@ -457,7 +386,6 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
     sequence = []
     episode_speeds = []
     episode_steers = []
-    # [NEW] Action sequence
     episode_actions = []
     reward_history = []
     total_reward = 0
@@ -496,7 +424,6 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
                 if phase != "Phase1":
                     cl = vehicle.get_location()
                     env_manager.diversity_manager.record_crash(cl.x, cl.y)
-                    print(f"[DEBUG] Collision Recorded at: x={cl.x:.1f}, y={cl.y:.1f}")
                 stop_reason = "Collision"
                 break
             
@@ -505,7 +432,6 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
                 if control: 
                     vehicle.apply_control(control)
                     episode_steers.append(control.steer)
-                    # [NEW] Record full action
                     episode_actions.append([control.steer, control.throttle, control.brake])
                 else:
                     episode_actions.append([0.0, 0.0, 0.0])
@@ -535,9 +461,6 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
             
             prev_dist = cur_dist
             prev_speed = cur_speed_vec
-            
-            # [MODIFIED] Removed Image queue processing
-            # while not image_queue.empty(): ...
 
             if cur_dist < ARRIVAL_DISTANCE:
                 success = True
@@ -552,13 +475,10 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
             env_manager.behavior_manager.record_episode(avg_speed, steer_std, not success)
             
     except KeyboardInterrupt:
-        print("\n[INFO] Episode interrupted by user.")
         raise
-    except Exception as e:
-        print(f"[ERROR] Episode Exception: {e}")
+    except Exception:
         stop_reason = "Exception"
     finally:
-        # 补录：Phase2 且 未成功 -> 记录为 Crash/Failure
         final_x = 0.0
         final_y = 0.0
         if 'cur_loc' in locals():
@@ -574,31 +494,21 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
         if phase != "Phase1" and not success:
             env_manager.diversity_manager.record_crash(final_x, final_y)
 
-        # [MODIFIED] Removed Camera Cleanup
-        # if camera_sensor and camera_sensor.is_alive: camera_sensor.stop()
-        
         if collision_sensor and collision_sensor.is_alive: collision_sensor.stop()
         if wrapper_initialized: 
             try: env_manager.map_wrapper.clear()
             except: pass
             
-        # [MODIFIED] Removed Camera Destroy
-        # if camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
-        
         if collision_sensor and collision_sensor.is_alive: collision_sensor.destroy()
         if vehicle and vehicle.is_alive: vehicle.destroy()
         if npc_ids: client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         try: world.tick()
         except: pass
         
-        # [MODIFIED] Removed Video Writer Release
-        # if video_writer: video_writer.release()
-        
         if os.path.exists(route_file): 
             try: os.remove(route_file)
             except: pass
         
-        # [NEW] Save trajectory data (.npz)
         if len(sequence) > 0 and len(episode_actions) > 0:
             min_len = min(len(sequence), len(episode_actions), len(reward_history))
             rewards_array = [r['total_reward'] for r in reward_history[:min_len]]
@@ -620,11 +530,8 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
                         "avg_speed": avg_speed if 'avg_speed' in locals() else 0.0
                     }
                 )
-            except Exception as e:
-                print(f"[ERROR] Saving trajectory failed: {e}")
-
-        if reward_history:
-            pd.DataFrame(reward_history).to_csv(env_manager.result_dir / "reward_logs" / f"{run_name}.csv", index=False)
+            except Exception:
+                pass
 
     return {
         "success": success,
@@ -636,7 +543,6 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
         "final_state": sequence[-1] if sequence else np.zeros(17),
         "steps": step,
         "final_dist": prev_dist,
-        # [MODIFIED] Removed "video_path" from return
         "npc_info": current_npc_info,
         "final_x": final_x, "final_y": final_y,
         "avg_speed": avg_speed if 'avg_speed' in locals() else 0.0,
@@ -653,11 +559,8 @@ def log_result(manager, task_id, phase, weather, start, target, res, cvg_metric,
         "success": res['success'], "stop_reason": res['stop_reason'],
         "collision": res['collision'], 
         "total_reward": res['total_reward'],
-        "intrinsic_reward": cvg_metric,
-        "duration": 0, "steps": res['steps'], "final_dist": res['final_dist'],
-        # [MODIFIED] Removed "video_path"
-        # "video_path": res['video_path'],
-        "elapsed_time": time.time() - manager.start_time, "current_timestamp": time.time(),
+        "steps": res['steps'], "final_dist": res['final_dist'],
+        "elapsed_time": time.time() - manager.start_time,
         "state_coverage": cov, "distinct_crashes": dist_crash,
         "final_x": res['final_x'], "final_y": res['final_y'],
         "behavior_count": b_cnt, "fault_behavior_count": f_cnt,
@@ -675,11 +578,9 @@ def main():
     parser.add_argument("--suite", default="straight")
     parser.add_argument("--num_vehicles", type=int, default=30)
     parser.add_argument("--max_run", type=int, default=100)
-    # [MODIFIED] 默认值设为 100，以匹配您的需求
     parser.add_argument("--num_tasks", type=int, default=100)
     parser.add_argument("--seed", type=int, default=2024)
-    # [修改] 单位：小时
-    parser.add_argument("--time_budget", type=float, default=None, help="Fuzzing time budget in HOURS (Phase 2 only).")
+    parser.add_argument("--time_budget", type=float, default=None)
     args = parser.parse_args()
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -687,44 +588,34 @@ def main():
     os.makedirs(res_dir, exist_ok=True)
     
     manager = SeqFuzzManager(args, res_dir)
-    print(f">>> Loading tasks for {args.town} ({args.suite})...")
     tasks = manager.load_suite_tasks(args.town, args.suite)
     total_spawns = len(manager.spawn_points)
     weather_list = [1, 3, 6, 8]
     
-    # [MODIFIED] 生成所有 组合 (routes * weathers) 并随机打乱
     all_combinations = []
     if tasks:
         for t_idx, (start_id, target_id) in enumerate(tasks):
             for w_id in weather_list:
                 all_combinations.append((t_idx, start_id, target_id, w_id))
         random.shuffle(all_combinations)
-        print(f">>> [Phase 1] Generated and shuffled {len(all_combinations)} combinations.")
-    
-    print(f">>> [Phase 1] Seed Collection (Target: {args.num_tasks} successful seeds)")
     
     collected_seeds = 0
     attempt_idx = 0
     combo_iterator = iter(all_combinations)
     
     try:
-        # [MODIFIED] 遍历组合，直到收集够种子或组合耗尽
         while collected_seeds < args.num_tasks:
             try:
                 task_idx, start_id, target_id, weather_id = next(combo_iterator)
             except StopIteration:
-                print(f"[WARNING] Exhausted all {len(all_combinations)} combinations. Found {collected_seeds} successful seeds.")
                 break
                 
             attempt_idx += 1
             if start_id >= total_spawns or target_id >= total_spawns:
                 continue
                 
-            # 使用唯一ID，避免重复
             current_seed = args.seed + attempt_idx
-            run_name = f"phase1_try{attempt_idx:03d}_task{task_idx}_w{weather_id}"
-            
-            print(f"  Attempting Seed #{collected_seeds+1} (Try {attempt_idx}): Task {task_idx} ({start_id}->{target_id}, W{weather_id})...")
+            run_name = f"seed_{attempt_idx:03d}"
             
             res = run_episode(manager, manager.spawn_points[start_id], manager.spawn_points[target_id], weather_id, run_name, "Phase1", seed=current_seed)
             
@@ -737,7 +628,6 @@ def main():
                 log_result(manager, run_name, "Phase1", weather_id, start_id, target_id, res, cvg, 0, 0, "None", input_post_str)
                 
                 if res['success'] and not res['collision']:
-                    print(f"    -> Success! Added to corpus.")
                     pose_tuple = (manager.spawn_points[start_id], res['npc_info'])
                     env_setting = [start_id, target_id, weather_id]
                     manager.fuzzer.further_mutation(
@@ -745,45 +635,30 @@ def main():
                         generation=0, final_state=res['final_state']
                     )
                     collected_seeds += 1
-                else:
-                    print(f"    -> Failed (Success={res['success']}, Col={res['collision']}).")
-            else:
-                print(f"    -> Failed (Initial Crash or Spawn Error).")
 
-        print(f">>> [Phase 2] Fuzzing Loop (Corpus Size: {len(manager.fuzzer.corpus)})")
-        
         fuzz_start_time = time.time()
         fuzz_idx = 0
         
         while True:
-            # 检查时间预算 (小时)
             if args.time_budget is not None:
                 elapsed_hours = (time.time() - fuzz_start_time) / 3600.0
                 if elapsed_hours >= args.time_budget:
-                    print(f"\n[INFO] Time budget ({args.time_budget} hours) exceeded. Stopping.")
                     break
             elif fuzz_idx >= args.max_run:
-                print(f"\n[INFO] Max runs ({args.max_run}) reached. Stopping.")
                 break
 
             if not manager.fuzzer.corpus: 
-                print("[INFO] Corpus empty. Stopping.")
                 break
             
-            # 1. 获取种子
             seed_pose = manager.fuzzer.get_pose()
             cur_gen = manager.fuzzer.current_generation
             
-            # [修改] 捕获变异前的状态 (input_pre)
-            # manager.fuzzer.get_vehicle_info() 返回当前种子的 NPC 列表 (在 vehicle_mutate 调用前)
             seed_npc = manager.fuzzer.get_vehicle_info()
             input_pre_str = get_full_state_str(seed_pose, seed_npc)
 
-            # 2. 执行变异
             mut_start = manager.fuzzer.mutation(seed_pose)
             mut_npc = manager.fuzzer.vehicle_mutate(seed_npc)
             
-            # [修改] 捕获变异后的状态 (input_post)
             input_post_str = get_full_state_str(mut_start, mut_npc)
             
             env_setting = manager.fuzzer.current_envsetting
@@ -807,9 +682,7 @@ def main():
             
             new_gen = cur_gen + 1
             
-            # 3. 记录日志 (传入 pre 和 post)
             log_result(manager, run_name, "Phase2", w_id, s_id, t_id, res, cvg, is_anomaly, new_gen, input_pre_str, input_post_str)
-            print(f"ID:{run_name} | R:{res['total_reward']:.1f} | CVG:{cvg:.3f} | Anom:{is_anomaly} | Gen:{new_gen}")
             
             if res['collision']:
                 manager.replayer.store(
@@ -831,10 +704,9 @@ def main():
             fuzz_idx += 1
 
     except KeyboardInterrupt:
-        print("\n\n[INFO] Test Interrupted by User (Ctrl+C). Saving Data...")
+        pass
     finally:
         save_replayer_pickle(manager.replayer, res_dir)
-        print("[INFO] Done.")
 
 if __name__ == "__main__":
     main()

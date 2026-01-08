@@ -7,14 +7,9 @@ import pandas as pd
 
 from typing import Tuple, Union, Dict, List
 
-
 EXPERIMENT_SEEDS = [0]
 POP_SIZES = [100, 250, 500]
 ITERATIONS = [50, 20, 10]
-
-
-###############################################################################################
-################################## CELL AND GRID HELPERS ######################################
 
 def compute_cell(behavior: np.ndarray, xedges: np.ndarray, yedges: np.ndarray) -> np.ndarray:
     cell = []
@@ -26,7 +21,6 @@ def compute_cell(behavior: np.ndarray, xedges: np.ndarray, yedges: np.ndarray) -
         else:
             cell.append(np.argmax(v < b) - 1)
     return np.array(cell)
-
 
 def compute_cells(behaviors: np.ndarray, xedges: np.ndarray, yedges: np.ndarray) -> np.ndarray:
     cells = []
@@ -42,14 +36,7 @@ def compute_cells(behaviors: np.ndarray, xedges: np.ndarray, yedges: np.ndarray)
         cells.append(np.array(cell))
     return np.array(cells)
 
-
 def compute_grid_edges(bins: int = 50, mins: np.ndarray = None, maxs: np.ndarray = None, behaviors: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    '''
-    Returns the cell edges structure used by the regular grid.
-    The edges are bins + 1 numpy arrays where the first and last value are the minimum and maximum, respectively.
-    Besides, the extrema can be provided instead of the behaviors.
-    '''
-    # I don't know how to handle this... the function's signature is soo bad
     if behaviors is None:
         assert (mins is not None) and (maxs is not None), 'Either behaviors or extrema have to be provided.'
 
@@ -61,20 +48,28 @@ def compute_grid_edges(bins: int = 50, mins: np.ndarray = None, maxs: np.ndarray
     edges = np.array([np.linspace(min, max, num=(bins + 1)) for min, max in zip(mins, maxs)])
     return edges, mins, maxs
 
-
 def get_histogram(behaviors: np.ndarray, xedges: np.ndarray, yedges: np.ndarray) -> np.ndarray:
-    '''Returns the histogram of the behaviors (i.e., the behavior points distribution in the space).'''
-    # the issue is that some behaviors found during the search might be outside of the edges.
-    # this is handled by the archive, but not here.
     return np.histogram2d(behaviors[:, 0], behaviors[:, 1], bins=(xedges, yedges))[0]
 
-
-#################################################################################################
-################################## RESULTS READING HELPERS ######################################
-
+# ==================== ADDED FOR CARLA COMPATIBILITY ====================
+def get_edges(env_seed: int, descriptors: List[int]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Returns the grid edges for CARLA behavior space.
+    0: Average Speed (0 - 15 m/s)
+    1: Steer Std Dev (0 - 0.5)
+    """
+    x_min, x_max = 0.0, 15.0  # Speed
+    y_min, y_max = 0.0, 0.5   # Steer Std
+    
+    bins = 50 
+    
+    xedges = np.linspace(x_min, x_max, num=bins + 1)
+    yedges = np.linspace(y_min, y_max, num=bins + 1)
+    
+    return xedges, yedges
+# =======================================================================
 
 def process_txt_log(filename: str):
-    '''Reads a log file (.txt, lines of "key:value,") of an execution and returns the results as a DataFrame (a row describes the log of an iteration).'''
     if not filename.endswith('.txt'):
         filename += '.txt'
     assert os.path.isfile(filename)
@@ -83,7 +78,6 @@ def process_txt_log(filename: str):
     dicts = []
     with open(filename, 'r') as f:
         for line in f.readlines():
-            # dirty...
             try:
                 splits = line.split(',')
                 str_dict = dict(s.strip().split(':') for s in splits)
@@ -97,20 +91,7 @@ def process_txt_log(filename: str):
     process_time = time.time() - t0
     return df, process_time
 
-
 def retrieve_result(filepath: str, **kwargs) -> Dict[str, Union[np.ndarray, pd.DataFrame]]:
-    '''
-    Returns the results of a testing methodology at @filepath as a dictionary of:
-    - 3 numpy arrays (inputs, behaviors and cells).
-    - DataFrame of the logs.
-    - DataFrame of the internal data of the Framework class.
-    - Dictionary of the (experimental) configuration.
-
-    Raise an error if any of the expected file is missing.
-    Kwargs:
-    - "include_final_states", the dictionary has the latter at the key 'final_states'.
-    - "is_ns"; the dictionaries have particular NS logs at the key 'ns_logs'.
-    '''
     filepaths = [f'{filepath}_{k}.txt' for k in ['inputs', 'behaviors', 'cells']]
     filepaths.append(f'{filepath}_logs.txt')
     filepaths.append(f'{filepath}_data.csv')
@@ -126,7 +107,6 @@ def retrieve_result(filepath: str, **kwargs) -> Dict[str, Union[np.ndarray, pd.D
             result['config'] = json.load(f)
     except:
         result['config'] = {}
-        # print(f'No configuration found at {filepath}.')
 
     include_final_states = kwargs.get('include_final_states', False)
     if include_final_states:
@@ -140,23 +120,14 @@ def retrieve_result(filepath: str, **kwargs) -> Dict[str, Union[np.ndarray, pd.D
             result['ns_logs'] = process_txt_log(ns_logs_fp)[0]
     return result
 
-
 def read_results_from_folder(results_folder: str, **kwargs) -> List[Dict]:
-    '''
-    Returns all the results found in @results_folder as a list of dictionaries.
-    Kwargs:
-        - "include_final_states"; the dictionaries have the latter at the key 'final_states'.
-        - "is_ns"; the dictionaries have particular NS logs at the key 'ns_logs'.
-    '''
     assert os.path.isdir(results_folder)
     if not results_folder.endswith('/'):
         results_folder += '/'
 
     results_filepathes = [results_folder + fp for fp in set(f.split('_')[0] for f in os.listdir(results_folder))]
-
     config = kwargs.get('config', {})
     name_key = kwargs.get('name_key', None)
-
     dicts = []
 
     for fp in results_filepathes:

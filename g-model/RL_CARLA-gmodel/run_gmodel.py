@@ -7,30 +7,24 @@ import random
 import numpy as np
 import argparse
 import pandas as pd
-# [MODIFIED] Removed cv2 import
 import queue
-import pickle
 import copy
 from pathlib import Path
 import carla
-import pygame 
+import pygame
 
-# --- PCLA Path Setup ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# 1. Add RL_CARLA to path to find bird_view
 rl_carla_path = os.path.abspath(os.path.join(current_dir, '..', 'RL_CARLA'))
 if os.path.exists(rl_carla_path) and rl_carla_path not in sys.path:
     sys.path.append(rl_carla_path)
 
-# 2. Add PCLA to path
-pcla_folder = os.path.join(os.path.dirname(current_dir), 'PCLA') 
+pcla_folder = os.path.join(os.path.dirname(current_dir), 'PCLA')
 if not os.path.exists(pcla_folder):
     pcla_folder = os.path.join(current_dir, 'PCLA')
 if os.path.exists(pcla_folder) and os.path.isdir(pcla_folder):
     if pcla_folder not in sys.path:
         sys.path.append(pcla_folder)
 
-# --- Local Modules ---
 try:
     from interfaces import normalize_data, Memory, Density, compute_sensitivity, compute_novelty, Grid, Carla_ENV
     from diffusion import Diffusion
@@ -39,14 +33,11 @@ except ImportError:
     from interfaces import normalize_data, Memory, Density, compute_sensitivity, compute_novelty, Grid, Carla_ENV
     from diffusion import Diffusion
 
-# --- Bird View & Map Utils ---
 try:
     from bird_view.utils import map_utils
-except ImportError as e:
-    print(f"[ERROR] Could not import map_utils: {e}")
-    map_utils = None 
+except ImportError:
+    map_utils = None
 
-# --- PCLA Import ---
 try:
     from PCLA.PCLA import PCLA, route_maker, location_to_waypoint
 except ImportError:
@@ -55,14 +46,11 @@ except ImportError:
     except ImportError:
         pass
 
-# ==============================================================================
-# [PATCH] PyGame Off-screen Rendering Patch 
-# ==============================================================================
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 def patch_map_utils():
     if map_utils is None: return
-    print("[INFO] Applying Robust Off-screen Rendering Patch to map_utils...")
+    
     @classmethod
     def patched_init(cls, client, world, carla_map, player):
         pygame.init()
@@ -99,48 +87,30 @@ def patch_map_utils():
 
 patch_map_utils()
 
-# ==============================================================================
-# [新增] 辅助函数：序列化完整状态 (input_post)
-# ==============================================================================
 def get_full_state_str(ego_transform, npc_info_list):
-    """
-    将自我车辆和NPC的状态序列化为字符串，保留2位小数以便去重比较。
-    格式: Ego:[x,y,yaw]|NPCs:(x1,y1),(x2,y2)...
-    """
-    # 1. 序列化 Ego State
     if ego_transform is None:
         ego_str = "None"
     else:
-        # 保留2位小数
         ego_str = f"[{ego_transform.location.x:.2f},{ego_transform.location.y:.2f},{ego_transform.rotation.yaw:.2f}]"
 
-    # 2. 序列化 NPC State
-    # npc_info_list 结构在这里为: [(bp_id, transform), ...]
     if not npc_info_list:
         npc_str = "None"
     else:
         npc_coords = []
         for item in npc_info_list:
-            # item[1] 是 carla.Transform
             t = item[1]
             npc_coords.append(f"({t.location.x:.2f},{t.location.y:.2f})")
-        
-        # 排序 NPC 坐标，防止因为列表顺序不同但内容相同导致的误判
-        npc_coords.sort() 
+        npc_coords.sort()
         npc_str = ",".join(npc_coords)
 
     return f"Ego:{ego_str}|NPCs:{npc_str}"
 
-# ==============================================================================
-# Diversity Managers (Modified)
-# ==============================================================================
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
         self.x_min, self.x_max = x_range
         self.y_min, self.y_max = y_range
         self.num_bins = num_bins
         self.visited_states = set()
-        # [修改] 改为 failure_states，存储所有失败（碰撞或未完成）的网格
         self.failure_states = set()
         
     def get_grid_id(self, x, y):
@@ -158,7 +128,6 @@ class DiversityManager:
         grid_id = self.get_grid_id(x, y)
         self.visited_states.add(grid_id)
 
-    # [修改] 使用 record_failure 替代 record_crash
     def record_failure(self, x, y):
         grid_id = self.get_grid_id(x, y)
         self.failure_states.add(grid_id)
@@ -166,7 +135,6 @@ class DiversityManager:
     def get_metrics(self):
         total_grids = self.num_bins * self.num_bins
         coverage = len(self.visited_states) / total_grids
-        # [修改] 返回不同失败位置的数量
         distinct_failures = len(self.failure_states)
         return coverage, distinct_failures
 
@@ -198,11 +166,7 @@ class BehaviorDiversityManager:
         fault_diversity_count = len(self.fault_archive)
         return behavior_count, fault_diversity_count
 
-# --- Constants & Config ---
-AGENT_NAME = "carl_roach_0" 
-# [MODIFIED] Removed Video Constants usage for recording, but keeping FPS for sim step
-VIDEO_WIDTH = 800
-VIDEO_HEIGHT = 600
+AGENT_NAME = "carl_roach_0"
 VIDEO_FPS = 20.0
 ARRIVAL_DISTANCE = 5.0
 RND_INPUT_SIZE = 18
@@ -303,7 +267,6 @@ class BenchmarkEnv:
             self.map_wrapper = map_utils.Wrapper
         else:
             self.map_wrapper = None
-            print("[WARNING] Running without map_utils wrapper!")
 
         self.routes = self._load_routes(args.town)
 
@@ -312,10 +275,8 @@ class BenchmarkEnv:
             "Town02": ((-20, 200), (-20, 320)),
         }
         current_bounds = map_bounds.get(args.town, ((-500, 500), (-500, 500)))
-        # [Info] DiversityManager 实例化
         self.diversity_manager = DiversityManager(current_bounds[0], current_bounds[1], num_bins=100)
         self.behavior_manager = BehaviorDiversityManager(speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20)
-        print(f"[INFO] Diversity Managers initialized for {args.town}")
 
     def _load_routes(self, town_name):
         base_route_path = os.path.join(os.getcwd(), 'benchmark', 'corl2017', '0915')
@@ -323,14 +284,12 @@ class BenchmarkEnv:
         
         routes = []
         if os.path.exists(route_file):
-            print(f"[INFO] Loading routes from {route_file}")
             with open(route_file, 'r') as f:
                 for line in f:
                     parts = line.strip().split()
                     if len(parts) >= 2:
                         routes.append((int(parts[0]), int(parts[1])))
         else:
-            print(f"[WARNING] Route file {route_file} not found. Using random fallback.")
             for i in range(100):
                 routes.append((i, (i + 50) % 100))
         return routes
@@ -354,7 +313,7 @@ class BenchmarkEnv:
         potential_spawns = self.map.get_spawn_points()
         
         batch = []
-        npc_info_list = [] # [修改] 存储 NPC 信息
+        npc_info_list = []
         
         veh_config = getattr(generated_config, 'vehicles', [])
         
@@ -380,15 +339,13 @@ class BenchmarkEnv:
                 carla.command.SetAutopilot(carla.command.FutureActor, True, self.tm_port))
             batch.append(cmd)
             
-            # [修改] 保存 spawn_point (即 transform) 以便生成 input_post
             npc_info_list.append((blueprint.id, spawn_point))
             
             count += 1
             
         results = self.client.apply_batch_sync(batch, True)
         npc_ids = [r.actor_id for r in results if not r.error]
-        return npc_ids, npc_info_list # [修改] 返回 npc_info_list
-
+        return npc_ids, npc_info_list
 
 def run_episode(env_manager, generated_config, run_name, results_dir):
     world = env_manager.world
@@ -407,19 +364,20 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     start_pose = spawn_points[start_id]
     target_pose = spawn_points[target_id]
     
-    print(f"[Run] {run_name} | Route Idx: {route_idx} (Start: {start_id} -> End: {target_id})")
-
-    # 1. Weather
     weather_idx = generated_config.weather
     weather_param = PRESET_WEATHERS.get(weather_idx, carla.WeatherParameters.ClearNoon)
     world.set_weather(weather_param)
+
+    traffic_lights = world.get_actors().filter('traffic.traffic_light')
+    if traffic_lights:
+        for tl in traffic_lights:
+            tl.set_state(carla.TrafficLightState.Green)
+            tl.freeze(True)
     
-    # 2. Cleanup
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('vehicle.*')])
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
     for _ in range(5): world.tick()
     
-    # 3. Spawn Ego
     bp = world.get_blueprint_library().find('vehicle.lincoln.mkz_2017')
     bp.set_attribute('role_name', 'hero')
     
@@ -433,37 +391,26 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         world.tick()
         vehicle = world.try_spawn_actor(bp, start_pose)
         if not vehicle:
-            print("[Error] Failed to spawn ego vehicle")
             return None 
         
-    # 4. Spawn NPCs
-    # [修改] 接收 npc_infos 并生成 input_post_str
     npc_ids, npc_infos = env_manager.init_generated_traffic(generated_config, start_pose, env_manager.args.num_vehicles)
-    input_post_str = get_full_state_str(start_pose, npc_infos) # 生成物理状态字符串
+    input_post_str = get_full_state_str(start_pose, npc_infos)
 
     world.tick()
     
-    # 5. Setup Sensors
     collision_bp = world.get_blueprint_library().find('sensor.other.collision')
     collision_sensor = world.spawn_actor(collision_bp, carla.Transform(), attach_to=vehicle)
     collision_queue = queue.Queue()
     collision_sensor.listen(collision_queue.put)
-
-    # [MODIFIED] Removed Camera and Video Setup
-    # camera_bp = ...
-    # camera_sensor = ...
-    # video_writer = ...
 
     wrapper_initialized = False
     if env_manager.map_wrapper:
         try:
             env_manager.map_wrapper.init(client, world, env_manager.map, vehicle)
             wrapper_initialized = True
-        except Exception as e:
-            print(f"[Warning] Map wrapper init failed: {e}")
+        except Exception:
             wrapper_initialized = False
     
-    # Warmup
     initial_collision = False
     try:
         for _ in range(10): 
@@ -471,18 +418,13 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             if not collision_queue.empty(): 
                 collision_queue.get()
                 initial_collision = True
-            # [MODIFIED] Removed image_queue processing
             if wrapper_initialized: env_manager.map_wrapper.tick()
     except Exception:
         pass
         
     if initial_collision:
-        print("[Info] Initial collision detected")
         if wrapper_initialized: env_manager.map_wrapper.clear()
-        
         if collision_sensor: collision_sensor.destroy()
-        # if camera_sensor: camera_sensor.destroy()
-        # if video_writer: video_writer.release()
         if vehicle: vehicle.destroy()
         if npc_ids: client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         return "INITIAL_CRASH"
@@ -492,10 +434,9 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     
     episode_speeds = []
     episode_steers = []
-    # [NEW] Action sequence
+    
     episode_actions = []
-    # [NEW] Reward history
-    reward_history = []
+    rewards_list = []
     
     final_x = 0.0
     final_y = 0.0
@@ -509,13 +450,10 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             def patched_get_action(self): return self.get_action(), 0.0
             agent.get_action_with_entropy = patched_get_action.__get__(agent)
             
-    except Exception as e:
-        print(f"[Error] Agent init failed (Faulty Route?): {e}")
+    except Exception:
         stop_reason = "Agent_Init_Fail"
         if wrapper_initialized: env_manager.map_wrapper.clear()
         if collision_sensor: collision_sensor.destroy()
-        # if camera_sensor: camera_sensor.destroy()
-        # if video_writer: video_writer.release()
         if vehicle: vehicle.destroy()
         if npc_ids: client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
         return None
@@ -534,12 +472,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
     try:
         while step < max_steps:
             world.tick()
-            
-            # [MODIFIED] Removed image/video loop
-            # try:
-            #     img_data = image_queue.get(timeout=2.0)
-            #     ...
-            # except queue.Empty: ...
 
             obs_birdview = None
             if wrapper_initialized:
@@ -553,7 +485,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             
             cur_loc = vehicle.get_location()
             
-            # [修改] 碰撞时记录坐标并退出，但不立即调用 DiversityManager
             if collided:
                 stop_reason = "Collision"
                 final_x = cur_loc.x
@@ -567,7 +498,6 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             v_vec = vehicle.get_velocity()
             speed_ms = math.sqrt(v_vec.x**2 + v_vec.y**2 + v_vec.z**2)
             if speed_ms > 50.0: 
-                print(f"[Warn] Extreme physics detected ({speed_ms*3.6:.1f} km/h). Stopping.")
                 stop_reason = "Physics_Explosion"
                 break
 
@@ -576,16 +506,14 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
                 if control: 
                     vehicle.apply_control(control)
                     episode_steers.append(control.steer)
-                    # [NEW] Record full action
                     episode_actions.append([control.steer, control.throttle, control.brake])
                 else:
                     episode_actions.append([0.0, 0.0, 0.0])
-            except ValueError as ve:
-                print(f"[Warn] Agent distribution error (NaNs): {ve}")
+                    
+            except ValueError:
                 stop_reason = "Agent_Crash_NaN"
                 break
-            except RuntimeError as re:
-                print(f"[Warn] Runtime/CUDA error: {re}")
+            except RuntimeError:
                 stop_reason = "Agent_Crash_Runtime"
                 break
             
@@ -603,8 +531,8 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
             
             reward = calculate_reward(prev_distance, cur_distance, collided, invaded, cur_speed, prev_speed)
             total_reward += reward
-            # [NEW] Record reward
-            reward_history.append(reward)
+            rewards_list.append(reward)
+            
             seq_entropy += entropy
             
             current_command = 2.0 
@@ -628,7 +556,7 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
                 break
             step += 1
             
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
         stop_reason = "Error"
     
@@ -636,19 +564,35 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         avg_speed = np.mean(episode_speeds) if episode_speeds else 0.0
         steer_std = np.std(episode_steers) if episode_steers else 0.0
         
-        # [修改] 判断是否失败 (只要不是 Success 就算失败)
         is_failure = (stop_reason != "Success")
         
-        # [修改] 只有在失败时，才将最终位置记录为“失败点”
         if is_failure:
             env_manager.diversity_manager.record_failure(final_x, final_y)
 
         env_manager.behavior_manager.record_episode(avg_speed, steer_std, is_failure)
 
-        # [MODIFIED] Removed Camera/Video cleanup
-        # if 'video_writer' in locals() and video_writer: video_writer.release()
-        # if 'camera_sensor' in locals() and camera_sensor and camera_sensor.is_alive: camera_sensor.destroy()
-        
+        if len(sequence) > 0 and len(episode_actions) > 0:
+            min_len = min(len(sequence), len(episode_actions), len(rewards_list))
+            traj_path = results_dir / "trajectories" / f"{run_name}.npz"
+            traj_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            try:
+                np.savez_compressed(
+                    traj_path,
+                    states=np.array(sequence[:min_len]),       
+                    actions=np.array(episode_actions[:min_len]), 
+                    rewards=np.array(rewards_list[:min_len]),           
+                    is_collision=(stop_reason == "Collision"),         
+                    stop_reason=stop_reason,                   
+                    metadata={                                 
+                        "task_id": run_name,
+                        "weather": generated_config.weather,
+                        "avg_speed": avg_speed if 'avg_speed' in locals() else 0.0
+                    }
+                )
+            except Exception:
+                pass
+
         if 'collision_sensor' in locals() and collision_sensor and collision_sensor.is_alive: collision_sensor.destroy()
         if wrapper_initialized: 
             try: env_manager.map_wrapper.clear()
@@ -665,36 +609,7 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         if os.path.exists(route_file): 
             try: os.remove(route_file)
             except: pass
-            
-        # [NEW] Save Trajectory
-        if len(sequence) > 0 and len(episode_actions) > 0:
-            try:
-                # Create trajectories dir
-                traj_dir = results_dir / "trajectories"
-                traj_dir.mkdir(parents=True, exist_ok=True)
-                traj_path = traj_dir / f"{run_name}.npz"
-                
-                # Align lengths
-                min_len = min(len(sequence), len(episode_actions), len(reward_history))
-                
-                np.savez_compressed(
-                    traj_path,
-                    states=np.array(sequence[:min_len]),
-                    actions=np.array(episode_actions[:min_len]),
-                    rewards=np.array(reward_history[:min_len]),
-                    is_collision=(stop_reason == "Collision"),
-                    stop_reason=stop_reason,
-                    metadata={
-                        "weather_idx": generated_config.weather,
-                        "avg_speed": avg_speed,
-                        "start_id": start_id,
-                        "target_id": target_id
-                    }
-                )
-            except Exception as e:
-                print(f"[Error] Failed to save trajectory: {e}")
     
-    # [修改] 从 diversity_manager 获取更新后的 metrics
     cov, dist_failures = env_manager.diversity_manager.get_metrics()
     b_cnt, fb_cnt = env_manager.behavior_manager.get_metrics()
 
@@ -705,20 +620,19 @@ def run_episode(env_manager, generated_config, run_name, results_dir):
         "collided": True if stop_reason == "Collision" else False,
         "generated_config": generated_config,
         "steps": step,
-        "duration": step / VIDEO_FPS,
-        # [MODIFIED] Removed "video_path" from return
         "start_id": start_id,
         "target_id": target_id,
         "state_coverage": cov,
-        "distinct_crashes": dist_failures, # 使用失败计数填充 distinct_crashes 字段
+        "distinct_crashes": dist_failures,
         "behavior_count": b_cnt,
         "fault_behavior_count": fb_cnt,
         "final_x": final_x,
         "final_y": final_y,
         "final_dist": cur_distance,
-        "input_post": input_post_str # [修改] 返回 input_post
+        "input_post": input_post_str,
+        "avg_speed": avg_speed,
+        "steer_std": steer_std
     }
-
 
 def run_generation_loop(args):
     set_global_seed(args.seed)
@@ -746,22 +660,23 @@ def run_generation_loop(args):
         start_time = time.time()
         cur_step = 0
         
-        results_dir = Path(f"./results_gen_{args.method}_{int(time.time())}")
+        results_dir = Path(f"./results/results_gen_{args.method}_{int(time.time())}")
         results_dir.mkdir(parents=True, exist_ok=True)
+        (results_dir / "trajectories").mkdir(parents=True, exist_ok=True)
+        
         summary_csv = results_dir / "summary.csv"
         
-        # [修改] 使用 input_post 并移除 physical_params, 移除了 video_path
         columns = [
             "task_id", "method", "success", "collision", "stop_reason", 
-            "total_reward", "duration", "steps", 
+            "total_reward", "steps", 
             "start_id", "target_id", "weather", 
             "start_x_off", "start_y_off", "start_yaw_off",
-            # "video_path", # REMOVED
             "density", "sensitivity", "novelty",
             "state_coverage", "distinct_crashes", 
             "behavior_count", "fault_behavior_count",
             "final_x", "final_y", "elapsed_time",
-            "final_dist", "input_post" # 使用 input_post 代替 input_vector 和 physical_params
+            "final_dist", "input_post", 
+            "avg_speed", "steer_std"
         ]
         
         pd.DataFrame(columns=columns).to_csv(summary_csv, index=False)
@@ -772,7 +687,6 @@ def run_generation_loop(args):
         while (time.time() - start_time) < 3600 * args.hour:
             
             if cur_step > 0 and cur_step % args.step == 0:
-                print(f"[Info] Training Diffusion Model at step {cur_step}")
                 if len(normal_case_list) > 0:
                     normal_case_arr = np.array(normal_case_list)
                     metric_arr = np.array(metric_list)
@@ -836,8 +750,6 @@ def run_generation_loop(args):
                         metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
                         memory_model.append(generated_vec, density, sensitivity, performance, novelty)
                         
-                        print(f"[{task_id}] Res: {res['stop_reason']} | Rew: {total_reward:.2f} | Behav: {res['behavior_count']}")
-                        
                         row_data = {
                             "task_id": task_id,
                             "method": args.method,
@@ -845,7 +757,6 @@ def run_generation_loop(args):
                             "collision": res['collided'],
                             "stop_reason": res['stop_reason'],
                             "total_reward": total_reward,
-                            "duration": res['duration'],
                             "steps": res['steps'],
                             "start_id": res['start_id'],
                             "target_id": res['target_id'],
@@ -853,7 +764,6 @@ def run_generation_loop(args):
                             "start_x_off": carla_env.start_pose_x,
                             "start_y_off": carla_env.start_pose_y,
                             "start_yaw_off": carla_env.start_pose_yaw,
-                            # "video_path": res['video_path'], # REMOVED
                             "density": density,
                             "sensitivity": sensitivity,
                             "novelty": novelty,
@@ -865,17 +775,18 @@ def run_generation_loop(args):
                             "final_y": res['final_y'],
                             "elapsed_time": time.time() - start_time,
                             "final_dist": res.get('final_dist', 0.0),
-                            "input_post": res['input_post'] # [修改] 记录 input_post
+                            "input_post": res['input_post'],
+                            "avg_speed": res.get('avg_speed', 0.0),
+                            "steer_std": res.get('steer_std', 0.0)
                         }
                         pd.DataFrame([row_data]).to_csv(summary_csv, mode='a', header=False, index=False)
                         
-                    except Exception as e:
+                    except Exception:
                         traceback.print_exc()
                         continue
 
             else:
                 try:
-                    # [Random 阶段]
                     normal_case = np.random.uniform(-1, 1, case_dimension)
                     carla_env = Carla_ENV()
                     carla_env.from_vector(normal_case)
@@ -907,8 +818,6 @@ def run_generation_loop(args):
                             normal_case_list.append(normal_case)
                             metric_list.append([n_d, 1-n_s, n_p, 1-n_n])
                             
-                            print(f"[{task_id}] Rew: {total_reward:.2f}")
-
                             row_data = {
                                 "task_id": task_id,
                                 "method": "random",
@@ -916,7 +825,6 @@ def run_generation_loop(args):
                                 "collision": res['collided'],
                                 "stop_reason": res['stop_reason'],
                                 "total_reward": total_reward,
-                                "duration": res['duration'],
                                 "steps": res['steps'],
                                 "start_id": res['start_id'],
                                 "target_id": res['target_id'],
@@ -924,7 +832,6 @@ def run_generation_loop(args):
                                 "start_x_off": carla_env.start_pose_x,
                                 "start_y_off": carla_env.start_pose_y,
                                 "start_yaw_off": carla_env.start_pose_yaw,
-                                # "video_path": res['video_path'], # REMOVED
                                 "density": density,
                                 "sensitivity": sensitivity,
                                 "novelty": novelty,
@@ -936,11 +843,13 @@ def run_generation_loop(args):
                                 "final_y": res['final_y'],
                                 "elapsed_time": time.time() - start_time,
                                 "final_dist": res.get('final_dist', 0.0),
-                                "input_post": res['input_post'] # [修改] 记录 input_post
+                                "input_post": res['input_post'],
+                                "avg_speed": res.get('avg_speed', 0.0),
+                                "steer_std": res.get('steer_std', 0.0)
                             }
                             pd.DataFrame([row_data]).to_csv(summary_csv, mode='a', header=False, index=False)
 
-                except Exception as e:
+                except Exception:
                     traceback.print_exc()
             
             cur_step += 1
@@ -959,7 +868,7 @@ if __name__ == "__main__":
     parser.add_argument("--method", default="generative", 
                         choices=['generative', 'generative+density', 'generative+sensitivity', 'generative+performance', 'generative+novelty'])
     parser.add_argument("--hour", type=float, default=2.0)
-    parser.add_argument("--step", type=int, default=10, help="Steps before retraining diffusion (controls random vs generation frequency)")
+    parser.add_argument("--step", type=int, default=10, help="Steps before retraining diffusion")
     parser.add_argument("--grid", type=int, default=10, help="Grid size for novelty")
     
     args = parser.parse_args()

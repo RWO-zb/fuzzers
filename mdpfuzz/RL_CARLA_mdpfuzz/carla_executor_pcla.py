@@ -1,29 +1,23 @@
 import os
 import sys
 import time
-import datetime
 import random
 import numpy as np
 import carla
 import queue
-# import cv2  <-- REMOVED
 import pandas as pd
 from pathlib import Path
 from typing import Any, Optional
-import traceback
 import pygame 
 
-# [关键修复] 强制使用 dummy 视频驱动
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
-# --- 路径设置 ---
 CURRENT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = CURRENT_DIR.parent
 
 if str(CURRENT_DIR) not in sys.path:
     sys.path.append(str(CURRENT_DIR))
 
-# 动态定位 PCLA 目录
 pcla_path = ROOT_DIR / 'PCLA'
 if pcla_path.exists():
     if str(pcla_path) not in sys.path:
@@ -40,18 +34,13 @@ try:
         from PCLA.PCLA import PCLA, route_maker, location_to_waypoint
     except ImportError:
         from PCLA import PCLA, route_maker, location_to_waypoint
-except ImportError as e:
-    print(f"[Error] Import failed: {e}. Please check your python path and folder structure.")
+except ImportError:
     sys.exit(1)
 
 from mdpfuzz.executor import Executor
 
-# ==============================================================================
-# PyGame Patch
-# ==============================================================================
 def patch_map_utils():
-    print("[INFO] Applying Robust Off-screen Rendering Patch to map_utils...")
-
+    """Monkey patch map_utils to support headless pygame initialization."""
     @classmethod
     def patched_init(cls, client, world, carla_map, player):
         pygame.init()
@@ -77,17 +66,14 @@ def patch_map_utils():
     @classmethod
     def patched_get_observations(cls):
         road, lane, vehicle, pedestrian, traffic = cls.world_module.get_rendered_surfaces()
-
         result = cls.world_module.get_hero_measurements()
-        result.update(
-            {
-                "road": np.uint8(road),
-                "lane": np.uint8(lane),
-                "vehicle": np.uint8(vehicle),
-                "pedestrian": np.uint8(pedestrian),
-                "traffic": np.uint8(traffic),
-            }
-        )
+        result.update({
+            "road": np.uint8(road),
+            "lane": np.uint8(lane),
+            "vehicle": np.uint8(vehicle),
+            "pedestrian": np.uint8(pedestrian),
+            "traffic": np.uint8(traffic),
+        })
         return result
 
     map_utils.Wrapper.init = patched_init
@@ -100,25 +86,16 @@ if not hasattr(PCLA, 'get_action_with_entropy'):
         return self.get_action(), 0.0
     PCLA.get_action_with_entropy = patched_get_action
 
-# ==============================================================================
-# 辅助函数：序列化输入向量
-# ==============================================================================
 def get_full_state_str(input_vector):
-    """
-    解析 MDPFuzz 的输入向量并序列化为保留2位小数的字符串。
-    向量结构: [weather, target, start, ego_x, ego_y, ego_z, ego_yaw, npc1_x, npc1_y, npc1_z, npc1_yaw, ...]
-    """
     if input_vector is None:
         return "None"
-    
     try:
         if not isinstance(input_vector, np.ndarray):
             input_vector = np.array(input_vector)
-            
+        
         ego_x = input_vector[3]
         ego_y = input_vector[4]
         ego_yaw = input_vector[6]
-        
         ego_str = f"[{ego_x:.2f},{ego_y:.2f},{ego_yaw:.2f}]"
         
         npc_coords = []
@@ -130,12 +107,10 @@ def get_full_state_str(input_vector):
         
         npc_coords.sort()
         npc_str = ",".join(npc_coords) if npc_coords else "None"
-        
         return f"Ego:{ego_str}|NPCs:{npc_str}"
     except Exception as e:
         return f"ErrorParsing:{str(e)}"
 
-# ... (DiversityManager 和 BehaviorDiversityManager 保持不变) ...
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
         self.x_min, self.x_max = x_range
@@ -156,12 +131,10 @@ class DiversityManager:
         return (idx_x, idx_y)
 
     def record_step(self, x, y):
-        grid_id = self.get_grid_id(x, y)
-        self.visited_states.add(grid_id)
+        self.visited_states.add(self.get_grid_id(x, y))
 
     def record_crash(self, x, y):
-        grid_id = self.get_grid_id(x, y)
-        self.crash_states.add(grid_id)
+        self.crash_states.add(self.get_grid_id(x, y))
 
     def get_metrics(self):
         total_grids = self.num_bins * self.num_bins
@@ -193,9 +166,7 @@ class BehaviorDiversityManager:
             self.fault_archive.add(behavior_signature)
 
     def get_metrics(self):
-        behavior_count = len(self.behavior_archive)
-        fault_diversity_count = len(self.fault_archive)
-        return behavior_count, fault_diversity_count
+        return len(self.behavior_archive), len(self.fault_archive)
 
 def set_global_seed(seed):
     random.seed(seed)
@@ -244,10 +215,8 @@ def calculate_reward(prev_distance, cur_distance, cur_collid, cur_invade, cur_sp
     r_speed = 0.2 * (cur_speed_norm - prev_speed_norm)
     r_collision = -100 * cur_speed_norm if cur_collid else 0.0
     r_invade = -cur_speed_norm if cur_invade else 0.0
-    total_reward = r_dist + r_speed + r_collision + r_invade
-    return total_reward
+    return r_dist + r_speed + r_collision + r_invade
 
-# --- PCLAEnv ---
 class PCLAEnv:
     def __init__(self, host, port, town_name, seed=2024):
         self.client = carla.Client(host, port)
@@ -285,7 +254,6 @@ class PCLAEnv:
             
         self.world.tick()
 
-# --- Executor ---
 class PCLAExecutor(Executor):
     def __init__(self, sim_steps: int, env: PCLAEnv, num_vehicles: int = 10, out_dir: str = "./results", init_budget: int = 10) -> None:
         super().__init__(sim_steps, 0)
@@ -296,6 +264,7 @@ class PCLAExecutor(Executor):
         
         self.phase1_count = 0
         self.phase2_count = 0
+        self.rt_count = 0
         
         self.experiment_start_time = time.time()
 
@@ -310,32 +279,20 @@ class PCLAExecutor(Executor):
         self.diversity_manager = DiversityManager(current_bounds[0], current_bounds[1], num_bins=100)
         self.behavior_manager = BehaviorDiversityManager(speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20)
         
-        print(f"[Info] Diversity Managers initialized for {env.town_name}")
-        
         self.start_positions = self._init_start_positions()
         self.num_start_positions = len(self.start_positions)
         
         self.benchmark_tasks = self._load_benchmark_tasks(env.town_name)
-        if not self.benchmark_tasks:
-            print("[Warning] No benchmark tasks loaded! Falling back to random spawn points.")
-        else:
-            print(f"[Info] Loaded {len(self.benchmark_tasks)} tasks from benchmark file.")
 
-        # [MODIFIED] 初始化所有组合并打乱
         self.all_combinations = []
         if self.benchmark_tasks:
-            # 100 routes * 4 weathers = 400 combinations
             for t_idx, (s_idx, tgt_idx) in enumerate(self.benchmark_tasks):
                 for w_idx in range(4):
                     self.all_combinations.append((s_idx, tgt_idx, w_idx))
             random.shuffle(self.all_combinations)
-            print(f"[Info] Generated and shuffled {len(self.all_combinations)} unique task/weather combinations.")
         
         self.combo_iterator = iter(self.all_combinations)
-        
-        # [MODIFIED] 执行缓存，用于避免 Phase1 重复执行
         self.execution_cache = {}
-        # 临时存储最近一次运行的元数据，用于缓存构建
         self.last_run_metadata = {}
 
         self.out_dir = Path(out_dir)
@@ -343,9 +300,6 @@ class PCLAExecutor(Executor):
         self.traj_dir.mkdir(parents=True, exist_ok=True)
         
         self.csv_file = self.out_dir / "summary.csv"
-        
-        print(f"[Info] Executor Output directory: {self.out_dir}")
-        
         if not self.csv_file.exists():
             self._init_csv()
             
@@ -355,7 +309,7 @@ class PCLAExecutor(Executor):
         columns = [
             "task_id", "phase", "global_time", "weather_id", "start_id", "target_id",
             "success", "stop_reason", "collision", "total_reward", 
-            "duration", "steps", "final_dist", 
+            "steps", "final_dist", 
             "state_coverage", "distinct_crashes", "final_x", "final_y",
             "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
             "generation", "parent_input", "current_input"
@@ -374,7 +328,6 @@ class PCLAExecutor(Executor):
              task_file = CURRENT_DIR / "benchmark" / "corl2017" / "0915" / f"straight_{town_name}.txt"
 
         if not task_file.exists():
-            print(f"[Error] Benchmark task file not found: {task_file}")
             return []
         
         tasks = []
@@ -390,7 +343,6 @@ class PCLAExecutor(Executor):
 
     def _create_input_vector(self, s_idx, t_idx, weather_idx, rng):
         start_vec = self.start_positions[s_idx].copy()
-        
         indices = []
         while len(indices) < self.num_vehicles - 1:
             i = rng.choice(self.num_start_positions)
@@ -400,101 +352,69 @@ class PCLAExecutor(Executor):
         npc_vecs = [self.start_positions[i].copy() for i in indices]
         return np.hstack([np.array([weather_idx, t_idx, s_idx]), start_vec] + npc_vecs)
 
-    # [MODIFIED] 生成单个 Input (保留原接口兼容性)
     def generate_input(self, rng: np.random.Generator) -> np.ndarray:
-        # 如果单独调用，尝试从迭代器取，取不到则随机
         try:
             s_idx, t_idx, w_idx = next(self.combo_iterator)
         except StopIteration:
-            # Fallback to random
             s_idx = rng.choice(self.num_start_positions)
             t_idx = rng.choice(self.num_start_positions)
             w_idx = rng.integers(0, 4)
-            
         return self._create_input_vector(s_idx, t_idx, w_idx, rng)
 
-    # [MODIFIED] 核心逻辑：重写 generate_inputs 以实现“搜索直到找到 N 个成功种子”
     def generate_inputs(self, rng: np.random.Generator, n: int) -> np.ndarray:
         valid_inputs = []
-        attempt_count = 0
-        
-        print(f"[Info] Phase 1 Search: Scanning shuffled combinations to find {n} successful seeds...")
-        
         while len(valid_inputs) < n:
             try:
                 s_idx, t_idx, w_idx = next(self.combo_iterator)
             except StopIteration:
-                print(f"[Warning] Exhausted all combinations. Found {len(valid_inputs)}/{n} valid seeds.")
                 break
             
-            attempt_count += 1
             input_vec = self._create_input_vector(s_idx, t_idx, w_idx, rng)
-            
-            # 使用特殊 Phase 标记进行预执行
-            # execute_policy 会运行仿真并返回标准结果 (total_reward, is_collision, is_success, sequence, duration)
-            # 同时它会将详细数据存入 self.last_run_metadata
             res = self.execute_policy(input_vec, None, phase="Phase1_Search")
-            
             is_success = res[2]
             is_collision = res[1]
             
             if is_success and not is_collision:
                 valid_inputs.append(input_vec)
-                # 缓存成功结果
                 state_key = get_full_state_str(input_vec)
-                # 缓存结构: (标准返回结果, 详细元数据)
                 self.execution_cache[state_key] = (res, self.last_run_metadata)
-                print(f"  [Search] Found Seed #{len(valid_inputs)} (Attempt {attempt_count}): W={w_idx}, S={s_idx}, T={t_idx}")
-            else:
-                # 失败用例不计入 valid_inputs，继续搜索
-                pass
                 
         return np.array(valid_inputs)
 
     def mutate(self, input: np.ndarray, rng: np.random.Generator, **kwargs) -> np.ndarray:
         mutant = input.copy()
-        mutant[3] += rng.uniform(-0.15, 0.15)  # Ego X
-        mutant[4] += rng.uniform(-0.15, 0.15)  # Ego Y
-        mutant[6] += rng.uniform(-5, 5)        # Ego Yaw
+        mutant[3] += rng.uniform(-0.15, 0.15) 
+        mutant[4] += rng.uniform(-0.15, 0.15) 
+        mutant[6] += rng.uniform(-5, 5)       
         
         start_npc_idx = 7
         for i in range(start_npc_idx, len(mutant), 4):
-            mutant[i] += rng.uniform(-0.1, 0.1)    # NPC X
-            mutant[i+1] += rng.uniform(-0.1, 0.1)  # NPC Y
+            mutant[i] += rng.uniform(-0.1, 0.1)  
+            mutant[i+1] += rng.uniform(-0.1, 0.1) 
         return mutant
 
     def load_policy(self):
         return None
 
     def execute_policy(self, input: np.ndarray, policy: Any, generation: int = 0, parent_input: Optional[np.ndarray] = None, phase: str = "Phase1") -> tuple:
-        
         current_input_str = get_full_state_str(input)
         parent_input_str = get_full_state_str(parent_input)
         
-        # [MODIFIED] 检查缓存 (仅针对 Fuzzer 正式调用 Phase1 时)
         if phase == "Phase1" and current_input_str in self.execution_cache:
-            print(f"[Info] Cache Hit for Phase 1 Seed (Skipping Re-simulation): {current_input_str[:50]}...")
-            
-            # 恢复数据
             cached_res, metadata = self.execution_cache[current_input_str]
             total_reward, is_collision, is_success, sequence, duration = cached_res
             
-            # 确定新的 task_id
             task_id = f"seed_{self.phase1_count:03d}"
-            
-            # 补写日志
             current_global_time = time.time() - self.experiment_start_time
             self._log_result(
                 task_id, phase, current_global_time, metadata['weather_idx'], metadata['start_idx'], metadata['target_idx'],
                 is_success, metadata['stop_reason'], is_collision, total_reward,
-                duration, metadata['step'], metadata['final_dist'],
+                metadata['step'], metadata['final_dist'],
                 metadata['cov'], metadata['dist_crashes'], metadata['final_x'], metadata['final_y'],
                 metadata['b_cnt'], metadata['fb_cnt'], metadata['avg_speed'], metadata['steer_std'],
                 generation, parent_input_str, current_input_str
             )
             
-            # 补存 .npz (重命名或重新保存)
-            # 为简单起见，利用元数据重新保存一份
             if len(sequence) > 0 and len(metadata['episode_actions']) > 0:
                 traj_path = self.traj_dir / f"{task_id}.npz"
                 try:
@@ -512,19 +432,13 @@ class PCLAExecutor(Executor):
                             "total_reward": total_reward
                         }
                     )
-                except Exception as e:
-                    print(f"Error saving cached trajectory: {e}")
+                except Exception:
+                    pass
             
-            # 计数器递增
             self.phase1_count += 1
-            
-            # 释放缓存以节省内存
             del self.execution_cache[current_input_str]
-            
             return cached_res
 
-        # ================== 以下为正常执行逻辑 (Simulation) ==================
-        
         weather_idx = int(input[0])
         target_idx = int(input[1])
         start_idx = int(input[2]) 
@@ -552,22 +466,21 @@ class PCLAExecutor(Executor):
         episode_actions = []
         episode_rewards = []
         
-        # 确定 task_id
         if phase == "Phase1":
             task_id = f"seed_{self.phase1_count:03d}"
             run_seed = self.env_seed + self.phase1_count
         elif phase == "Phase1_Search":
-            # 搜索阶段使用临时 ID，不占用计数器
-            # 使用 input 的 hash 或者随机数作为 seed 偏移，保证确定性
             run_seed = self.env_seed + int(input.sum() * 100) % 100000
             task_id = f"search_{run_seed}"
+        elif phase == "RT":
+            task_id = f"rt_{self.rt_count:03d}"
+            run_seed = self.env_seed + 200000 + self.rt_count
         else:
             task_id = f"fuzz_{self.phase2_count:04d}"
             run_seed = self.env_seed + 100000 + self.phase2_count
         
         try:
             self.env.reset_world()
-            
             set_global_seed(run_seed)
             self.env.traffic_manager.set_random_device_seed(run_seed)
 
@@ -577,7 +490,7 @@ class PCLAExecutor(Executor):
                     tl.set_state(carla.TrafficLightState.Green)
                     tl.freeze(True)
                 self.env.world.tick()
-            except Exception as e:
+            except Exception:
                 pass
 
             weathers = {
@@ -627,7 +540,6 @@ class PCLAExecutor(Executor):
             
             waypoints = location_to_waypoint(self.env.client, ego_transform.location, target_transform.location)
             if not waypoints:
-                print(f"[Error] No waypoints found for Task {task_id}")
                 raise RuntimeError("Empty Waypoints")
             route_maker(waypoints, route_file)
             
@@ -644,8 +556,8 @@ class PCLAExecutor(Executor):
             try:
                 self.env.map_wrapper.init(self.env.client, self.env.world, self.env.map, vehicle)
                 wrapper_initialized = True
-            except Exception as e:
-                print(f"[Warning] Map wrapper init failed: {e}")
+            except Exception:
+                pass
 
             sequence = []
             start_time = time.time()
@@ -685,7 +597,7 @@ class PCLAExecutor(Executor):
                     else:
                         vehicle.apply_control(carla.VehicleControl(brake=1.0))
                         episode_actions.append([0.0, 0.0, 1.0])
-                except Exception as e:
+                except Exception:
                     stop_reason = "agent_error"
                     episode_actions.append([0.0, 0.0, 1.0])
                     break
@@ -698,7 +610,6 @@ class PCLAExecutor(Executor):
                 episode_visited_states.append((cur_loc.x, cur_loc.y))
 
                 cur_distance = cur_loc.distance(target_transform.location)
-                
                 reward = calculate_reward(prev_distance, cur_distance, is_collision, False, cur_speed, prev_speed)
                 total_reward += reward
                 episode_rewards.append(reward)
@@ -729,9 +640,8 @@ class PCLAExecutor(Executor):
                 if 'cur_loc' in locals():
                      episode_crash_pos = (cur_loc.x, cur_loc.y)
 
-        except Exception as e:
-            print(f"[Execution Error] {e}")
-            stop_reason = f"error: {str(e)[:30]}"
+        except Exception:
+            stop_reason = "error"
             is_collision = True 
         
         finally:
@@ -759,7 +669,6 @@ class PCLAExecutor(Executor):
                 final_x = cur_loc.x
                 final_y = cur_loc.y
 
-            # 保存轨迹数据
             if len(sequence) > 0 and len(episode_actions) > 0:
                 min_len = min(len(sequence), len(episode_actions), len(episode_rewards))
                 traj_path = self.traj_dir / f"{task_id}.npz"
@@ -779,11 +688,10 @@ class PCLAExecutor(Executor):
                             "total_reward": total_reward
                         }
                     )
-                except Exception as e:
-                    print(f"Error saving trajectory: {e}")
+                except Exception:
+                    pass
 
-            # 仅 Phase 2 更新多样性
-            if phase == "Phase2":
+            if phase == "Phase2" or phase == "RT":
                 for (x, y) in episode_visited_states:
                     self.diversity_manager.record_step(x, y)
                 if episode_crash_pos:
@@ -792,27 +700,26 @@ class PCLAExecutor(Executor):
                 is_failure = (not is_success)
                 self.behavior_manager.record_episode(avg_speed, steer_std, is_failure)
 
-            # 多样性计算
             cov, dist_crashes = self.diversity_manager.get_metrics()
             b_cnt, fb_cnt = self.behavior_manager.get_metrics()
 
-            # 记录 Log
-            self._log_result(
-                task_id, phase, current_global_time, weather_idx, start_idx, target_idx, 
-                is_success, stop_reason, is_collision, total_reward,
-                duration, step, final_dist, 
-                cov, dist_crashes, final_x, final_y, 
-                b_cnt, fb_cnt, avg_speed, steer_std,
-                generation, parent_input_str, current_input_str
-            )
+            if phase != "Phase1_Search":
+                self._log_result(
+                    task_id, phase, current_global_time, weather_idx, start_idx, target_idx, 
+                    is_success, stop_reason, is_collision, total_reward,
+                    step, final_dist, 
+                    cov, dist_crashes, final_x, final_y, 
+                    b_cnt, fb_cnt, avg_speed, steer_std,
+                    generation, parent_input_str, current_input_str
+                )
 
-            # 计数器递增 (Phase1_Search 不递增 phase1_count)
             if phase == "Phase1":
                 self.phase1_count += 1
             elif phase == "Phase2":
                 self.phase2_count += 1
+            elif phase == "RT":
+                self.rt_count += 1
             
-            # [MODIFIED] 保存 Last Run Metadata 用于缓存
             self.last_run_metadata = {
                 'weather_idx': weather_idx, 'start_idx': start_idx, 'target_idx': target_idx,
                 'stop_reason': stop_reason, 'step': step, 'final_dist': final_dist,
@@ -823,7 +730,7 @@ class PCLAExecutor(Executor):
             
             return total_reward, is_collision, is_success, np.array(sequence) if len(sequence)>0 else np.zeros((1, 19)), duration
 
-    def _log_result(self, task_id, phase, global_time, weather, start, target, success, stop_reason, collision, reward, duration, steps, final_dist, 
+    def _log_result(self, task_id, phase, global_time, weather, start, target, success, stop_reason, collision, reward, steps, final_dist, 
                     coverage, distinct_crashes, final_x, final_y, behavior_count, fault_behavior_count, avg_speed, steer_std,
                     generation, parent_input, current_input):
         row_data = {
@@ -837,7 +744,6 @@ class PCLAExecutor(Executor):
             "stop_reason": stop_reason,
             "collision": collision,
             "total_reward": round(reward, 4),
-            "duration": round(duration, 2),
             "steps": steps,
             "final_dist": round(final_dist, 2),
             "state_coverage": coverage,

@@ -12,7 +12,7 @@ from pathlib import Path
 import carla
 import pygame
 
-# 禁用 SDL 视频驱动，避免在无头服务器上报错
+# 禁用 SDL 视频驱动
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 # 路径设置
@@ -24,7 +24,7 @@ if current_script_path not in sys.path:
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# 尝试导入依赖模块
+# 导入依赖模块
 try:
     from bird_view.utils import map_utils
 except ImportError:
@@ -85,32 +85,26 @@ def patch_map_utils():
 patch_map_utils()
 
 # ==========================================
-# 辅助函数：序列化完整状态 (New)
+# 辅助函数：序列化完整状态
 # ==========================================
 def get_full_state_str(ego_transform, npc_info_list):
     """
     将自我车辆和NPC的状态序列化为字符串，保留2位小数以便去重比较。
     格式: Ego:[x,y,yaw]|NPCs:(x1,y1),(x2,y2)...
     """
-    # 1. 序列化 Ego State
     if ego_transform is None:
         ego_str = "None"
     else:
-        # 保留2位小数
         ego_str = f"[{ego_transform.location.x:.2f},{ego_transform.location.y:.2f},{ego_transform.rotation.yaw:.2f}]"
 
-    # 2. 序列化 NPC State
-    # npc_info_list 结构通常为: [(bp_id, transform, color, driver_id), ...]
     if not npc_info_list:
         npc_str = "None"
     else:
         npc_coords = []
         for item in npc_info_list:
-            # item[1] 是 carla.Transform
             t = item[1]
             npc_coords.append(f"({t.location.x:.2f},{t.location.y:.2f})")
         
-        # 排序 NPC 坐标，防止因为列表顺序不同但内容相同导致的误判
         npc_coords.sort() 
         npc_str = ",".join(npc_coords)
 
@@ -285,11 +279,7 @@ class BenchmarkEnv:
         self.traffic_manager.set_hybrid_physics_mode(False) 
         self.traffic_manager.set_global_distance_to_leading_vehicle(2.0)
 
-        (self.result_dir / "diagnostics").mkdir(parents=True, exist_ok=True)
-        # (self.result_dir / "videos").mkdir(parents=True, exist_ok=True) # REMOVED
-        (self.result_dir / "reward_logs").mkdir(parents=True, exist_ok=True)
-        
-        # [NEW] 创建轨迹数据保存目录
+        # 创建轨迹数据保存目录
         (self.result_dir / "trajectories").mkdir(parents=True, exist_ok=True) 
 
         self.summary_csv = self.result_dir / "summary.csv"
@@ -305,8 +295,7 @@ class BenchmarkEnv:
                 "task_id", "phase", "weather_id", "start_id", "target_id",
                 "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
                 "steps", "final_dist", 
-                # "video_path", # REMOVED from columns
-                "elapsed_time", "current_timestamp",
+                "elapsed_time",
                 "state_coverage", "distinct_crashes", "final_x", "final_y",
                 "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
                 "mutation_generation", "input_pre", "input_post"
@@ -318,7 +307,6 @@ class BenchmarkEnv:
         base_path = Path(current_script_path) / "benchmark"
         possible_paths = [
             base_path / "corl2017" / "0915" / f"{suite_type}_{town_name}.txt",
-            base_path / "carla100" / "0915" / f"{suite_type}_{town_name}.txt",
             Path(f"benchmark/corl2017/0915/{suite_type}_{town_name}.txt") 
         ]
         task_file = None
@@ -455,14 +443,8 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         return "INITIAL_CRASH" 
 
     route_file = f"route_{run_name}.xml"
-    # [MODIFIED] Removed Camera/Video variables
-    # camera_sensor = None 
-    # video_writer = None 
-
     episode_speeds = []
     episode_steers = []
-    
-    # [NEW] 初始化动作序列
     episode_actions = []
 
     try:
@@ -512,10 +494,8 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
             if control: 
                 vehicle.apply_control(control)
                 episode_steers.append(control.steer)
-                # [NEW] 记录完整动作 (Steer, Throttle, Brake)
                 episode_actions.append([control.steer, control.throttle, control.brake])
             else:
-                # [NEW] 记录空动作以对齐时间步
                 episode_actions.append([0.0, 0.0, 0.0])
             
             v = vehicle.get_velocity()
@@ -554,8 +534,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
             prev_distance = cur_distance
             prev_speed = cur_speed
             
-            # [MODIFIED] Removed Image Queue Processing
-
             if cur_distance < ARRIVAL_DISTANCE:
                 is_success = True
                 stop_reason = "Success"
@@ -581,7 +559,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         if vehicle: vehicle.destroy()
     
     finally:
-        # [MODIFIED] Removed Camera Cleanup
         if collision_sensor and collision_sensor.is_alive: collision_sensor.stop()
         if wrapper_initialized: 
             try: env_manager.map_wrapper.clear()
@@ -601,7 +578,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
             try: os.remove(route_file)
             except: pass
         
-        # [NEW] 保存完整的轨迹数据 (.npz)
+        # 保存完整的轨迹数据 (.npz)
         if len(sequence) > 0 and len(episode_actions) > 0:
             min_len = min(len(sequence), len(episode_actions), len(reward_history))
             rewards_array = [r['total_reward'] for r in reward_history[:min_len]]
@@ -626,13 +603,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
             except Exception as e:
                 print(f"Error saving trajectory: {e}")
 
-        if reward_history:
-            try:
-                df_log = pd.DataFrame(reward_history)
-                cols = ['step', 'total_reward', 'dist_reward', 'speed_reward', 'collision_penalty', 'invade_penalty', 'cur_speed', 'cur_dist', 'collided', 'invaded']
-                df_log[cols].to_csv(env_manager.result_dir / "reward_logs" / f"{run_name}_rewards.csv", index=False)
-            except Exception: pass
-
     final_x = 0.0
     final_y = 0.0
     if 'cur_loc' in locals():
@@ -649,7 +619,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         "stop_reason": stop_reason,
         "steps": step,
         "final_dist": cur_distance if 'cur_distance' in locals() else 0,
-        # "video_path": "None", # REMOVED from return dict
         "npc_info": current_npc_info,
         "start_pose": start_pose,
         "target_pose": target_pose,
@@ -679,20 +648,18 @@ def run_benchmark_suite(args):
     tasks = env_manager.load_suite_tasks(args.town, args.suite)
     weather_list = [1, 3, 6, 8]
     
-    # [MODIFIED] 生成所有 400 种组合 (100 routes * 4 weathers)
+    # 生成所有 400 种组合 (100 routes * 4 weathers)
     all_combinations = []
     for task_idx, (start_id, target_id) in enumerate(tasks):
         for w_id in weather_list:
             all_combinations.append((task_idx, start_id, target_id, w_id))
     
-    # [MODIFIED] 随机打乱组合
     random.shuffle(all_combinations)
     
     collected_seeds_count = 0
     attempt_idx = 0
     combo_iterator = iter(all_combinations)
     
-    # Phase 1: Seed Generation (Modified Logic)
     print(f"Starting Phase 1: Exploring up to {len(all_combinations)} combinations to find {args.num_tasks} successful seeds...")
     
     while collected_seeds_count < args.num_tasks:
@@ -710,16 +677,15 @@ def run_benchmark_suite(args):
         start_pose = env_manager.spawn_points[start_id]
         target_pose = env_manager.spawn_points[target_id]
         
-        # 使用 attempt_idx 确保每次尝试的随机种子不同
         current_attempt_seed = args.seed + attempt_idx 
         
-        run_name = f"phase1_try{attempt_idx:03d}_task{task_idx:03d}_w{weather_id:02d}"
+        # 修改这里：task_id 格式改为 seed_001
+        run_name = f"seed_{attempt_idx:03d}"
         
         res = run_single(env_manager, start_pose, target_pose, weather_id, run_name, "Phase1", npc_count=args.num_vehicles, seed=current_attempt_seed)
         
         intrinsic_reward = 0
         
-        # Check if successful
         is_success_run = False
         if isinstance(res, dict):
             if res['success'] and not res['collision']:
@@ -753,7 +719,6 @@ def run_benchmark_suite(args):
             dummy_res = {
                 'success': False, 'stop_reason': "InitialCrash", 'collision': True,
                 'total_reward': 0, 'steps': 0, 'final_dist': 0, 
-                # 'video_path': "None", # REMOVED
                 'final_x': 0, 'final_y': 0, 'avg_speed': 0, 'steer_std': 0
             }
             log_result(env_manager, run_name, "Phase1", weather_id, start_id, target_id, dummy_res, 0, mutation_generation=0, input_pre="None", input_post="None")
@@ -769,22 +734,18 @@ def run_benchmark_suite(args):
         current_fuzz_seed = args.seed + 100000 + fuzz_idx
         set_global_seed(current_fuzz_seed)
         
-        # [MODIFIED] Step 1: Capture Pre-Mutation State
+        # Step 1: Capture Pre-Mutation State
         seed_pose = env_manager.fuzzer.get_pose() 
         current_generation = env_manager.fuzzer.current_generation
-        
-        # NOTE: fuzzer.current_vehicle_info contains the UN-MUTATED NPC info for this seed
         seed_npc_info = env_manager.fuzzer.current_vehicle_info
         
         input_pre_str = get_full_state_str(seed_pose, seed_npc_info)
         
-        # [MODIFIED] Step 2: Perform Mutation
+        # Step 2: Perform Mutation
         mutated_start_pose = env_manager.fuzzer.mutation(seed_pose)
-        
-        # This updates fuzzer.current_vehicle_info internally, so we capture the return value
         mutated_vehicles = env_manager.fuzzer.vehicle_mutate(seed_npc_info)
         
-        # [MODIFIED] Step 3: Capture Post-Mutation State
+        # Step 3: Capture Post-Mutation State
         input_post_str = get_full_state_str(mutated_start_pose, mutated_vehicles)
         
         env_setting = env_manager.fuzzer.current_envsetting
@@ -850,8 +811,7 @@ def log_result(env_manager, task_id, phase, weather, start, target, res, intrins
         "task_id", "phase", "weather_id", "start_id", "target_id",
         "success", "stop_reason", "collision", "total_reward", "intrinsic_reward", 
         "steps", "final_dist", 
-        # "video_path", # REMOVED from columns
-        "elapsed_time", "current_timestamp",
+        "elapsed_time",
         "state_coverage", "distinct_crashes", "final_x", "final_y",
         "behavior_count", "fault_behavior_count", "avg_speed", "steer_std",
         "mutation_generation", "input_pre", "input_post"
@@ -865,8 +825,7 @@ def log_result(env_manager, task_id, phase, weather, start, target, res, intrins
         "collision": res['collision'], 
         "total_reward": res['total_reward'], "intrinsic_reward": intrinsic,
         "steps": res['steps'], "final_dist": res['final_dist'],
-        # "video_path": res['video_path'], # REMOVED from row_data
-        "elapsed_time": elapsed_time, "current_timestamp": current_time,
+        "elapsed_time": elapsed_time,
         "state_coverage": coverage, "distinct_crashes": distinct_crashes,
         "final_x": final_x, "final_y": final_y,
         "behavior_count": behavior_count, "fault_behavior_count": fault_behavior_count,
@@ -882,12 +841,11 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=2000)
     parser.add_argument("--town", default="Town01")
-    parser.add_argument("--suite", default="straight")
-    parser.add_argument("--num_vehicles", type=int, default=20)
-    # [MODIFIED] 默认值设为 100，以匹配您的需求
+    parser.add_argument("--suite", default="full")
+    parser.add_argument("--num_vehicles", type=int, default=30)
     parser.add_argument("--num_tasks", type=int, default=100)
-    parser.add_argument("--fuzz_hours", type=float, default=2.0)
-    parser.add_argument("--seed", type=int, default=2024)
+    parser.add_argument("--fuzz_hours", type=float, default=12.0)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threshold_intrinsic", type=float, default=100.0)
     parser.add_argument("--threshold_entropy", type=float, default=100.0)
     

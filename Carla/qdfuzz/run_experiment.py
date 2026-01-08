@@ -1,32 +1,38 @@
 import os
-import torch
+import argparse
+import time
 from framework import MAPElitesFramework
 from carla_common import load_model
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="QD Fuzzing for CARLA (Aligned with CURE)")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=3000)
+    parser.add_argument("--town", default="Town01")
+    parser.add_argument("--suite", default="full")
+    parser.add_argument("--num_vehicles", type=int, default=30)
+    parser.add_argument("--fuzz_hours", type=float, default=12.0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--init_budget", type=int, default=100)
+    
+    args = parser.parse_args()
+
     # Settings
-    main_seed = 2024
-    env_seed = 2024
-    
-    # 2 hours test
-    time_budget_hours = 2.0 
-    init_budget = 50 # Initial random samples
     cell_granularity = 50
-    
-    # Dummy descriptors (logic handled inside carla_common/framework)
     descriptors = [0, 1] 
-
-    results_fp = 'results_carla_qd'
-    if not os.path.isdir(results_fp):
-        os.mkdir(results_fp)
-
-    print(f"--- Running MAP-Elites on CARLA for {time_budget_hours} hours ---")
     
-    # Init Env
-    env_manager = load_model()
+    # Create Result Directory (Timestamped like CURE)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    results_fp = os.path.join("results", f"{timestamp}_QD_{args.town}_seed{args.seed}")
+
+    print(f"--- Running MAP-Elites on CARLA for {args.fuzz_hours} hours ---")
+    print(f"Results will be saved to: {results_fp}")
+    
+    # Init Env (Logs initialized inside)
+    env_manager = load_model(args, results_fp)
     
     # Init Framework
-    f = MAPElitesFramework(main_seed, cell_granularity, descriptors=descriptors, name='MAP-Elites-CARLA')
+    f = MAPElitesFramework(args.seed, cell_granularity, descriptors=descriptors, name='MAP-Elites-CARLA')
     
     # Run
-    f.test_policy(env_manager, env_seed, time_budget_hours, init_budget, results_fp)
+    f.test_policy(env_manager, args.seed, args.fuzz_hours, args.init_budget, results_fp)

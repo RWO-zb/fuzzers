@@ -147,6 +147,10 @@ class Carla_ENV:
         self.yaw_scope = 5
         self.weather_scope = 13
         self.target_scope = 101
+        
+        # 定义偏移范围标准
+        self.ego_pos_range = 0.15  # 主车位置偏移 ±0.15 米
+        self.npc_pos_range = 0.1   # 背景车位置偏移 ±0.1 米
 
     def from_vector(self, vector_info):
         # Flatten input if needed
@@ -160,8 +164,11 @@ class Carla_ENV:
         if self.start_pose in [39,40,41,42,43,48,51,68,79]:
             self.start_pose = 1
 
-        self.start_pose_x = vector_info[1]
-        self.start_pose_y = vector_info[2]
+        # 应用主车位置偏移系数 (范围 [-0.15, 0.15])
+        self.start_pose_x = vector_info[1] * self.ego_pos_range
+        self.start_pose_y = vector_info[2] * self.ego_pos_range
+        
+        # 主车角度偏移 (范围 [-5, 5])
         self.start_pose_yaw = vector_info[3] * self.yaw_scope
 
         self.target_pose = int(((vector_info[4] -  self.min) /  (self.max -  self.min)) * self.target_scope)
@@ -173,8 +180,9 @@ class Carla_ENV:
         for i in range(100):
             # Check range to avoid index error
             if 6 + i * 2 + 1 < len(vector_info):
-                v_x = vector_info[6 + i * 2]
-                v_y = vector_info[7 + i * 2] 
+                # 应用背景车位置偏移系数 (范围 [-0.1, 0.1])
+                v_x = vector_info[6 + i * 2] * self.npc_pos_range
+                v_y = vector_info[7 + i * 2] * self.npc_pos_range
                 self.vehicles.append((v_x, v_y))
 
 class Density:
