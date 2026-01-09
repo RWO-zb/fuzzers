@@ -6,6 +6,7 @@ import seaborn as sns
 from matplotlib.ticker import MaxNLocator
 from sklearn.manifold import TSNE
 import time
+from collections import Counter # 新增引入
 
 # ==========================================
 # 全局配置与风格设置
@@ -23,8 +24,9 @@ COLORS = {
 
 # 路径配置
 # 注意：请根据 test_gen.py 实际生成的文件夹名称修改此处
-RESULT_DIR = os.path.join("results", "generative+novelty_50_seed_0")
+RESULT_DIR = os.path.join("results", "generative+novelty_5_seed_0")
 LOG_FILENAME = os.path.join(RESULT_DIR, "all_test_cases_log.pkl")
+PLOT_5_FILE = os.path.join(RESULT_DIR, '5_behaviour_coverage_heatmap.png') # 新增
 
 def load_data():
     """加载日志数据"""
@@ -163,14 +165,13 @@ def plot_total_crashes_over_time(log_data):
     plt.close()
 
 # ==========================================
-# 新增 t-SNE 相关功能
+# t-SNE 相关功能
 # ==========================================
 
 def run_tsne(data, n_samples):
     """
     运行 t-SNE 降维
     """
-    # 如果样本太少，动态调整 perplexity 以避免报错
     if n_samples < 50:
         print(f"数据点较少 ({n_samples}个)，自动调整 Perplexity。")
         perplexity_value = max(5, n_samples - 1)
@@ -181,13 +182,11 @@ def run_tsne(data, n_samples):
     
     start_time = time.time()
     
-    # 【修改】：使用 max_iter 替代 n_iter，并移除可能不兼容的 init 和 learning_rate 参数
-    # 以匹配 curefuzzplot.py 的配置
     tsne = TSNE(
         n_components=2,
         verbose=1,
         perplexity=perplexity_value,
-        max_iter=1000,  # 修复处：n_iter -> max_iter
+        max_iter=1000, 
         random_state=42
     )
     tsne_results = tsne.fit_transform(data)
@@ -274,6 +273,104 @@ def plot_tsne_distribution(log_data):
     print(f"图表已保存: {filename}")
     plt.close()
 
+# ==========================================
+# [新增] Behaviour Diversity / Coverage 相关功能
+# ==========================================
+def calculate_behaviour_diversity(log_data, grid_size=(50, 50)):
+    """
+    [新增] 计算基于 2D 网格 (Distance, Hull Angle) 的行为多样性 (覆盖率)。
+    这对应于 Behaviour Diversity 和 Fault Diversity 指标。
+    """
+    print(f"\n{'='*40}\n       Behaviour Diversity Analysis\n{'='*40}")
+    
+    # 1. 提取行为特征 (BDs)
+    dists = []
+    angles = []
+    is_crash_list = []
+    
+    found_bd = False
+    
+    for entry in log_data:
+        # 使用 .get 以兼容旧日志文件
+        d = entry.get('bd_distance')
+        a = entry.get('bd_mean_angle')
+        c = entry.get('is_crash', False)
+        
+        if d is not None and a is not None:
+            dists.append(d)
+            angles.append(a)
+            is_crash_list.append(c)
+            found_bd = True
+            
+    if not found_bd:
+        print("Warning: No behavior descriptors ('bd_distance', 'bd_mean_angle') found in log.")
+        print("Please rerun test_gen.py with the modified code to generate these metrics.")
+        return
+
+    dists = np.array(dists)
+    angles = np.array(angles)
+    
+    # 2. 定义网格边界
+    min_dist, max_dist = np.min(dists), np.max(dists)
+    min_angle, max_angle = np.min(angles), np.max(angles)
+    
+    # 给边界加一点缓冲
+    max_dist += 1e-5
+    max_angle += 1e-5
+    
+    print(f"  Distance Range: [{min_dist:.2f}, {max_dist:.2f}]")
+    print(f"  Angle Range:    [{min_angle:.2f}, {max_angle:.2f}]")
+    
+    # 3. 映射到网格
+    filled_bins = set()
+    filled_crash_bins = set()
+    
+    # 归一化并计算索引 [0, grid_size)
+    if max_dist > min_dist:
+        dist_indices = ((dists - min_dist) / (max_dist - min_dist) * grid_size[0]).astype(int)
+    else:
+        dist_indices = np.zeros_like(dists, dtype=int)
+        
+    if max_angle > min_angle:
+        angle_indices = ((angles - min_angle) / (max_angle - min_angle) * grid_size[1]).astype(int)
+    else:
+        angle_indices = np.zeros_like(angles, dtype=int)
+    
+    # 安全裁剪索引范围
+    dist_indices = np.clip(dist_indices, 0, grid_size[0] - 1)
+    angle_indices = np.clip(angle_indices, 0, grid_size[1] - 1)
+    
+    # 构建热力图矩阵
+    heatmap = np.zeros(grid_size)
+
+    for i in range(len(dists)):
+        bin_id = (dist_indices[i], angle_indices[i])
+        filled_bins.add(bin_id)
+        heatmap[dist_indices[i], angle_indices[i]] += 1
+        
+        if is_crash_list[i]:
+            filled_crash_bins.add(bin_id)
+            
+    # 4. 输出报告
+    total_bins = grid_size[0] * grid_size[1]
+    print(f"  Behaviour Coverage (State Coverage):    {len(filled_bins)} / {total_bins} ({len(filled_bins)/total_bins:.2%})")
+    print(f"  Fault Diversity (Unique Crash Types):   {len(filled_crash_bins)}")
+    print(f"{'='*40}\n")
+    
+    # 5. 绘制覆盖率热力图
+    plt.figure(figsize=(10, 8))
+    # 使用 log1p (log(1+x)) 使得低频和高频格子都能看清
+    plt.imshow(np.log1p(heatmap).T, origin='lower', aspect='auto', cmap='viridis', 
+               extent=[min_dist, max_dist, min_angle, max_angle])
+    plt.colorbar(label='Log(Count)')
+    plt.title(f'Behaviour Space Coverage (Filled Bins: {len(filled_bins)})')
+    plt.xlabel('Distance')
+    plt.ylabel('Mean Hull Angle')
+    
+    plt.savefig(PLOT_5_FILE, dpi=300)
+    print(f"图表已保存: {PLOT_5_FILE}")
+    plt.close()
+
 def main():
     # 检查结果目录是否存在
     if not os.path.exists(RESULT_DIR):
@@ -292,8 +389,11 @@ def main():
         # 2. 绘制时间曲线图 (Total Only - Time in Hours)
         plot_total_crashes_over_time(log_data)
         
-        # 3. 绘制 t-SNE 输入空间分布图 (新增)
+        # 3. 绘制 t-SNE 输入空间分布图
         plot_tsne_distribution(log_data)
+
+        # 4. [新增] 绘制行为多样性热力图与计算覆盖率
+        calculate_behaviour_diversity(log_data)
         
     print("\n=== 所有绘图任务完成 ===")
 

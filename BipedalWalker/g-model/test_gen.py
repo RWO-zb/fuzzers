@@ -13,11 +13,26 @@ from datetime import datetime
 from interfaces import normalize_data, Memory, Density, compute_sensitivity, case_clip, compute_novelty, Grid
 from diffusion import Diffusion
 
+# --- [新增] 辅助函数：获取底层环境以访问 hull 数据 ---
+def get_real_unwrapped_env(env):
+    """
+    穿透 VecEnv 和 Monitor 等包装器，获取底层的 BipedalWalker 环境实例，
+    以便访问 hull.position 和 hull.angle。
+    """
+    current_env = env
+    while hasattr(current_env, 'venv'):
+        current_env = current_env.venv
+    
+    if hasattr(current_env, 'envs'):
+        # 对于 DummyVecEnv，通常取第一个环境
+        return current_env.envs[0].unwrapped
+    
+    return current_env.unwrapped
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", help="environment ID", type=str, default="BipedalWalkerHardcore-v3")
-    parser.add_argument("-f", "--folder", help="Log folder", type=str, default="rl-trained-agents")
+    parser.add_argument("-f", "--folder", help="Log folder", type=str, default="../rl-trained-agents")
     parser.add_argument("--algo", help="RL Algorithm", default="tqc", type=str, required=False, choices=list(ALGOS.keys()))
     parser.add_argument("-n", "--n-timesteps", help="number of timesteps", default=300, type=int)
     parser.add_argument("--num-threads", help="Number of threads for PyTorch (-1 to use default)", default=-1, type=int)
@@ -241,7 +256,6 @@ def main():
         memory_model.clear()
         
     # --- 阶段 3：正式测试循环 (Main Loop) ---
-    # [修改点 1] 记录测试开始时间
     start_time = time.time()
     current_time = time.time()
     
@@ -249,7 +263,7 @@ def main():
     all_test_cases_log = []
 
     print("--- Stage 2: Main Testing Loop ---")
-    while current_time - start_time < 3600 * 12: # 使用参数控制时间
+    while current_time - start_time < 3600 * 0.05: # 使用参数控制时间
 
         if cur_step > 0 and cur_step % args.step == 0:
             # --- 扩散模型微调与生成阶段 ---
@@ -284,25 +298,46 @@ def main():
                 obs = env.reset(test_case)
                 sequences = [obs[0]]
                 episode_reward = 0.0
+                
+                # [新增] 行为多样性统计变量
+                total_x_pos_sum = 0.0
+                total_abs_angle_sum = 0.0
+                episode_steps = 0
 
                 for _ in range(args.n_timesteps):
                     action, state = model.predict(obs, state=state, deterministic=deterministic)
                     obs, reward, done, infos = env.step(action)
+                    
+                    # [新增] 获取底层数据以计算 Diversity
+                    real_env = get_real_unwrapped_env(env)
+                    if hasattr(real_env, 'hull'):
+                        raw_x_pos = real_env.hull.position[0]
+                        raw_angle = real_env.hull.angle
+                        total_x_pos_sum += raw_x_pos
+                        total_abs_angle_sum += abs(raw_angle)
+                        episode_steps += 1
+                    
                     sequences.append(obs[0])
                     episode_reward += reward[0]
                     if done:
                         break
                 
-                # [修改点 2] 计算时间差并保存
+                # [新增] 计算行为特征
+                bd_dist = total_x_pos_sum / max(1, episode_steps)
+                bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
+
                 is_crash = (done or episode_reward < 10)
                 elapsed_time = time.time() - start_time
                 
+                # [新增] 记录 bd_distance 和 bd_mean_angle
                 all_test_cases_log.append({
                     "input": test_case.tolist(), 
                     "is_crash": bool(is_crash),
                     "source": "generative",
                     "step": cur_step,
-                    "time": elapsed_time # <--- 增加的时间戳字段
+                    "time": elapsed_time,
+                    "bd_distance": bd_dist,      # 新增
+                    "bd_mean_angle": bd_mean_angle # 新增
                 })
 
                 if is_crash:
@@ -347,24 +382,45 @@ def main():
             sequences = [obs[0]]
             episode_reward = 0.0
             
+            # [新增] 行为多样性统计变量
+            total_x_pos_sum = 0.0
+            total_abs_angle_sum = 0.0
+            episode_steps = 0
+            
             for _ in range(args.n_timesteps):
                 action, state = model.predict(obs, state=state, deterministic=deterministic)
                 obs, reward, done, infos = env.step(action)
+                
+                # [新增] 获取底层数据以计算 Diversity
+                real_env = get_real_unwrapped_env(env)
+                if hasattr(real_env, 'hull'):
+                    raw_x_pos = real_env.hull.position[0]
+                    raw_angle = real_env.hull.angle
+                    total_x_pos_sum += raw_x_pos
+                    total_abs_angle_sum += abs(raw_angle)
+                    episode_steps += 1
+                
                 sequences.append(obs[0])
                 episode_reward += reward[0]
                 if done:
                     break
             
-            # [修改点 3] 随机生成阶段同样记录时间
+            # [新增] 计算行为特征
+            bd_dist = total_x_pos_sum / max(1, episode_steps)
+            bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
+
             is_crash = (done or episode_reward < 10)
             elapsed_time = time.time() - start_time
             
+            # [新增] 记录 bd_distance 和 bd_mean_angle
             all_test_cases_log.append({
                 "input": normal_case.tolist(), 
                 "is_crash": bool(is_crash),
                 "source": "random",
                 "step": cur_step,
-                "time": elapsed_time # <--- 增加的时间戳字段
+                "time": elapsed_time,
+                "bd_distance": bd_dist,      # 新增
+                "bd_mean_angle": bd_mean_angle # 新增
             })
 
             normal_case_list.append(normal_case)
