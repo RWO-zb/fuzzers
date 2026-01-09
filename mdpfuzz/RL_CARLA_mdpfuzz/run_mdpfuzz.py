@@ -114,7 +114,7 @@ def main():
             n=budget_arg, 
             policy=None,
             path=str(log_path),
-            check_redundant_input=True,
+            check_redundant_input=False,
             **kwargs
         )
     else:

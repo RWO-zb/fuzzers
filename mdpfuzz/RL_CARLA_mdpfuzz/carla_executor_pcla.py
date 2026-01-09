@@ -466,6 +466,11 @@ class PCLAExecutor(Executor):
         episode_actions = []
         episode_rewards = []
         
+        # [修改点1]：在 try 之前初始化变量，防止 UnboundLocalError
+        sequence = []
+        start_time = time.time()
+        cur_loc = None
+        
         if phase == "Phase1":
             task_id = f"seed_{self.phase1_count:03d}"
             run_seed = self.env_seed + self.phase1_count
@@ -479,7 +484,7 @@ class PCLAExecutor(Executor):
             task_id = f"fuzz_{self.phase2_count:04d}"
             run_seed = self.env_seed + 100000 + self.phase2_count
         
-        # FIX: Initialize variable before try block to avoid UnboundLocalError in finally block
+        # [修改点2]：保持 wrapper_initialized 的初始化
         wrapper_initialized = False
 
         try:
@@ -561,8 +566,9 @@ class PCLAExecutor(Executor):
                 wrapper_initialized = True
             except Exception:
                 pass
-
-            sequence = []
+            
+            # [修改点3]：start_time 已在 try 外初始化，此处可重置以更精确（如果 reset_world 耗时较久）
+            # 或者，如果希望包含 reset_world 的耗时，可以不在此处重置。通常为了计算 episode 耗时，可以重置。
             start_time = time.time()
             prev_distance = ego_transform.location.distance(target_transform.location)
             prev_speed = np.array([0, 0, 0])
@@ -640,7 +646,7 @@ class PCLAExecutor(Executor):
                     break
 
             if not is_success and not is_collision:
-                if 'cur_loc' in locals():
+                if cur_loc is not None:
                      episode_crash_pos = (cur_loc.x, cur_loc.y)
 
         except Exception:
@@ -657,6 +663,7 @@ class PCLAExecutor(Executor):
             if route_file and os.path.exists(route_file): os.remove(route_file)
 
             current_global_time = time.time() - self.experiment_start_time
+            # [修改点4]：此时 start_time 肯定已被定义
             duration = time.time() - start_time
             
             avg_speed = 0.0
@@ -668,10 +675,12 @@ class PCLAExecutor(Executor):
 
             final_x = 0.0
             final_y = 0.0
-            if 'cur_loc' in locals():
+            # [修改点5]：安全地检查 cur_loc
+            if cur_loc is not None:
                 final_x = cur_loc.x
                 final_y = cur_loc.y
 
+            # [修改点6]：安全地检查 sequence
             if len(sequence) > 0 and len(episode_actions) > 0:
                 min_len = min(len(sequence), len(episode_actions), len(episode_rewards))
                 traj_path = self.traj_dir / f"{task_id}.npz"
