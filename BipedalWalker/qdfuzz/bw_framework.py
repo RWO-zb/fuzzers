@@ -83,7 +83,7 @@ class Framework():
     def save_state(self, filepath: str):
         '''
         Saves the current state of the framework to possibly resume execution.
-        MODIFIED: Saves the input vector as a single list object (which pandas converts to string).
+        MODIFIED: Saves the input vector as a JSON string to ensure correct CSV serialization.
         '''
         cell_dfs = []
         
@@ -94,19 +94,33 @@ class Framework():
         all_columns = base_columns + ['input', 'mutation_count', 'elapsed_time']
 
         for i, cell_data in enumerate(self.cells_data):
-            # a record consist of a score, the oracle result, the cell index, the cell and behavior point
+            # 准备数据，显式将 input 转为 JSON 字符串
+            records = []
+            for item in cell_data:
+                _input, score, is_faulty, behavior, mutation_count, elapsed_time = item
+                # 构建一行数据
+                record = [
+                    score, 
+                    is_faulty, 
+                    i, 
+                    self.cells[i][0], self.cells[i][1], # cell 坐标
+                    behavior[0], behavior[1],           # behavior 特征
+                    json.dumps(_input.tolist()),        # input (序列化为字符串)
+                    mutation_count,
+                    elapsed_time
+                ]
+                records.append(record)
+
             cell_dfs.append(
                 pd.DataFrame.from_records(
-                    # MODIFIED: 解包 6 元素元组
-                    data=[[score, is_faulty, i] + self.cells[i] + behavior.tolist() + [_input.tolist()] + [mutation_count] + [elapsed_time]
-                          for (_input, score, is_faulty, behavior, mutation_count, elapsed_time) in cell_data],
-                    # MODIFIED: 使用新的列定义
+                    data=records,
                     columns=all_columns
                     )
                 )
         
         if cell_dfs: # 确保列表不为空
             pd.concat(cell_dfs, ignore_index=True).to_csv(f'{filepath}_data.csv', index=0)
+            print(f"Saved state to {filepath}_data.csv")
         else:
             print("No data in cells_data to save.")
             
@@ -137,7 +151,7 @@ class Framework():
     def load_state(self, filepath: str):
         '''
         Loads a state of an instance to resume testing and returns the number of test cases loaded.
-        MODIFIED: Loads the input vector from a single string column (that represents a list).
+        MODIFIED: Loads the input vector from a JSON string column.
         '''
         df_fp = f'{filepath}_data.csv'
 
@@ -148,14 +162,15 @@ class Framework():
         df = pd.read_csv(df_fp)
 
         # 确定单元格和行为列
-        cell_cols = [c for c in df.columns.to_list() if c.startswith('cell')]
+        cell_cols = [c for c in df.columns.to_list() if c.startswith('cell') and 'index' not in c]
         behavior_cols = [c for c in df.columns.to_list() if c.startswith('behavior')]
 
         assert len(cell_cols) > 0, "CSV 中未找到 Cell 列"
         assert len(behavior_cols) > 0, "CSV 中未找到 Behavior 列"
 
-        # 检查是否存在 elapsed_time 列（为了兼容旧数据）
+        # 检查是否存在 elapsed_time 和 mutation_count 列（为了兼容旧数据）
         has_elapsed_time = 'elapsed_time' in df.columns
+        has_mutation_count = 'mutation_count' in df.columns
 
         for i, row in df.iterrows():
             # MODIFIED: 从行中提取数据
@@ -165,13 +180,18 @@ class Framework():
             behavior = row[behavior_cols].values
             
             # MODIFIED: 使用 json.loads 将 'input' 列的字符串解析回列表,然后转为 numpy 数组
-            input_vec = np.array(json.loads(row['input']), dtype=int) 
+            try:
+                input_vec = np.array(json.loads(row['input']), dtype=int)
+            except (json.JSONDecodeError, TypeError):
+                # 兼容可能的旧格式或出错情况
+                print(f"Warning: Failed to parse input at row {i}, skipping.")
+                continue
             
             # MODIFIED: 加载 mutation_count
-            mutation_count = row['mutation_count']
+            mutation_count = int(row['mutation_count']) if has_mutation_count else 0
 
             # MODIFIED: 加载 elapsed_time
-            elapsed_time = row['elapsed_time'] if has_elapsed_time else 0.0
+            elapsed_time = float(row['elapsed_time']) if has_elapsed_time else 0.0
             
             # MODIFIED: 调用新的 update_cell
             self.update_cell(cell, input_vec, performance, is_faulty, np.array(behavior), mutation_count, elapsed_time)
@@ -253,6 +273,10 @@ class Framework():
         else:
             filepath = results_fp
 
+        # 确保目录存在
+        if os.path.dirname(filepath):
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
         behaviors_buffer = open(f'{filepath}_behaviors.txt', 'w', buffering=1)
         final_states_buffer = open(f'{filepath}_final_states.txt', 'w', buffering=1)
         inputs_buffer = open(f'{filepath}_inputs.txt', 'w', buffering=1)
@@ -296,7 +320,6 @@ class Framework():
         # 确保即使 init 提前停止，代码也能继续
         if not inputs:
             print("No inputs generated, time budget may be too small.")
-            # ... (关闭所有文件缓冲) ...
             behaviors_buffer.close()
             inputs_buffer.close()
             cells_buffer.close()
@@ -396,6 +419,10 @@ class Framework():
             filepath = f'{results_fp}{self.creation_time}' if results_fp.endswith('/') else f'{results_fp}/{self.creation_time}'
         else:
             filepath = results_fp
+        
+        # 确保目录存在
+        if os.path.dirname(filepath):
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
         behaviors_buffer = open(f'{filepath}_behaviors.txt', 'w', buffering=1)
         final_states_buffer = open(f'{filepath}_final_states.txt', 'w', buffering=1)
@@ -482,6 +509,10 @@ class Framework():
             filepath = f'{results_fp}{self.creation_time}' if results_fp.endswith('/') else f'{results_fp}/{self.creation_time}'
         else:
             filepath = results_fp
+        
+        # 确保目录存在
+        if os.path.dirname(filepath):
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
         # to collect the data during the search, i.e., every model execution
         behaviors_buffer = open(f'{filepath}_behaviors.txt', 'w', buffering=1)
@@ -555,7 +586,6 @@ class Framework():
         # 检查 evaluate 是否因时间耗尽而提前退出
         if not pop_behaviors.any():
              print("Time budget reached before initial population could be evaluated.")
-             # ... (关闭所有文件缓冲) ...
              ns_logs_buffer.close()
              nov_scores_buffer.close()
              behaviors_buffer.close()
@@ -677,10 +707,10 @@ if __name__ == '__main__':
 
     # experimental parameters
     # MODIFIED: 定义时间预算
-    time_budget_hours = 12
+    time_budget_hours = 0.05
     
     # MODIFIED: test_policy 仍需要 init_budget
-    init_budget = 1000
+    init_budget = 100
     cell_granularity = 50
 
     # MODIFIED: novelty_search 仍需要这些参数
@@ -689,8 +719,8 @@ if __name__ == '__main__':
     novelty_threshold = 0.005
 
     results_fp = 'results/bw'
-    if not os.path.isdir(results_fp):
-        os.mkdir(results_fp)
+    if not os.path.exists(results_fp):
+        os.makedirs(results_fp)
 
     for seed in EXPERIMENT_SEEDS:
         print(f'Seed {seed} starts.')

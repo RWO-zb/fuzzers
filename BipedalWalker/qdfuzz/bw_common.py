@@ -63,7 +63,7 @@ def generate_inputs(rng: np.random.Generator, n: int):
 
 
 def load_model():
-    return TQC.load('rl-trained-agents/tqc/BipedalWalkerHardcore-v3_1/BipedalWalkerHardcore-v3.zip',
+    return TQC.load('../rl-trained-agents/tqc/BipedalWalkerHardcore-v3_1/BipedalWalkerHardcore-v3.zip',
                     custom_objects={
                         "learning_rate": lambda _: 3e-4,
                         "lr_schedule": lambda _: 3e-4,
