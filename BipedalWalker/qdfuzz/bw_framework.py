@@ -707,10 +707,11 @@ if __name__ == '__main__':
 
     # experimental parameters
     # MODIFIED: 定义时间预算
-    time_budget_hours = 0.05
+    time_budget_hours = 12
     
     # MODIFIED: test_policy 仍需要 init_budget
-    init_budget = 100
+    init_budget = 1000
+    test_budget=5000
     cell_granularity = 50
 
     # MODIFIED: novelty_search 仍需要这些参数
@@ -728,7 +729,7 @@ if __name__ == '__main__':
             print(f"--- Running MAP-Elites for {time_budget_hours} hours ---")
             f = MAPElitesFramework(seed, cell_granularity, descriptors=expert_indices, name='MAP-Elites')
             # MODIFIED: 更新了方法调用
-            f.test_policy(model, env_seed, time_budget_hours, init_budget, results_fp)
+            f.test_policy(model, env_seed, test_budget, init_budget, results_fp)
             
             #print(f"--- Running Novelty Search for {time_budget_hours} hours ---")
             #f = Framework(seed, cell_granularity, descriptors=expert_indices, name=f'Novelty Search')

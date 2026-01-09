@@ -202,7 +202,7 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 100
+    seeds_num = 1000
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     
@@ -278,7 +278,7 @@ def main():
     seedcount = 0
     
     # --- Fuzzing Loop ---
-    while current_time - start_fuzz_time < 3600 * 0.5 and len(fuzzer.corpus) > 0 :
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<5000:
         is_crash = False
         seedcount+=1
         output_obs = []

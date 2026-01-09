@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=2, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=1000, type=int)
     
     args = parser.parse_args()
     
@@ -207,7 +207,7 @@ def main():
     print("\nStarting Fuzzing Loop...")
 
     # --- Fuzzing Loop ---
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0:
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 and seedcount<5000:
         seedcount += 1
         selected_info = fuzzer.get_pose()
         states = selected_info['seed_state']

@@ -7,7 +7,7 @@ from carla_common import load_model
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="QD Fuzzing for CARLA (Aligned with CURE)")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=3000)
+    parser.add_argument("--port", type=int, default=2000)
     parser.add_argument("--town", default="Town01")
     parser.add_argument("--suite", default="full")
     parser.add_argument("--num_vehicles", type=int, default=30)

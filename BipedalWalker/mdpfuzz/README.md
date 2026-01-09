@@ -1,13 +1,7 @@
 ##  RL BipedalWalker
 
-#### Instructions on launching *MDPFuzz* for   Reinforcement Learning models for BipedalWalker
 
-
-----
-
-#### Notes:
-
-The core component of *MDPFuzz* is in the folder `./rl-baselines3-zoo/fuzz/`.
+The core *CureFuzz* is in the folder `./rl-baselines3-zoo/fuzz/cure_fuzz.py`.
 
 The RL algorithm is in the folder `./rl-baselines3-zoo`.
 
@@ -37,14 +31,7 @@ git clone https://github.com/DLR-RM/rl-trained-agents
 
 #### Fuzz testing:
 
-Check the default path of the model is correct in `./enjoy.py`. 
+Check the default path of the model is correct in `./enjoy_cure.py`. 
 
-Run `python test_gen.py --method generative+novelty --hour 12 --step 50` to start fuzz testing.
+Run `python test_rl.py data_rq2/ 0 bw` to start fuzz testing.
 
-----
-
-#### Root cause:
-
-Run `python Tsne.py` to see the visualization results of projecting states to 2-dimentional spaces using TSNE.
-
-We provide our crash-triggering and normal data in folder `./results/`, and you can also use the states selected by your own and use `Tsne.py` to plot the figures.

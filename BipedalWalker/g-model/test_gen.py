@@ -263,7 +263,7 @@ def main():
     all_test_cases_log = []
 
     print("--- Stage 2: Main Testing Loop ---")
-    while current_time - start_time < 3600 * 0.05: # 使用参数控制时间
+    while current_time - start_time < 3600 * 12 and len(all_test_cases_log) < 5000: # 使用参数控制时间
 
         if cur_step > 0 and cur_step % args.step == 0:
             # --- 扩散模型微调与生成阶段 ---

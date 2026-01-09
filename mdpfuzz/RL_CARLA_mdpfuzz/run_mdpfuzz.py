@@ -14,7 +14,7 @@ from mdpfuzz.mdpfuzz import Fuzzer
 def main():
     parser = argparse.ArgumentParser(description="MDPFuzz / Random Testing with PCLA Agent")
     parser.add_argument("--host", default="127.0.0.1", help="CARLA host")
-    parser.add_argument("--port", type=int, default=4000, help="CARLA port")
+    parser.add_argument("--port", type=int, default=3000, help="CARLA port")
     parser.add_argument("--town", default="Town01", help="Map name")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--sim-steps", type=int, default=200, help="Max simulation steps per episode")
