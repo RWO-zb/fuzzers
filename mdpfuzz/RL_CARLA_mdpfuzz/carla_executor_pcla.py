@@ -479,6 +479,9 @@ class PCLAExecutor(Executor):
             task_id = f"fuzz_{self.phase2_count:04d}"
             run_seed = self.env_seed + 100000 + self.phase2_count
         
+        # FIX: Initialize variable before try block to avoid UnboundLocalError in finally block
+        wrapper_initialized = False
+
         try:
             self.env.reset_world()
             set_global_seed(run_seed)
@@ -552,7 +555,7 @@ class PCLAExecutor(Executor):
             collision_sensor.listen(collision_queue.put)
             sensor_list.append(collision_sensor)
             
-            wrapper_initialized = False
+            # wrapper_initialized is already initialized to False at the start of the block
             try:
                 self.env.map_wrapper.init(self.env.client, self.env.world, self.env.map, vehicle)
                 wrapper_initialized = True

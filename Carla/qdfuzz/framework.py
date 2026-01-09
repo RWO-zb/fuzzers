@@ -105,25 +105,48 @@ class Framework():
         filepath = str(model.result_dir / self.name)
         time_budget_seconds = time_budget_hours * 3600
         
-        print("Starting Initialization (Phase 1)...")
+        print("Starting Initialization (Phase 1: Valid Seed Collection)...")
         start_time = time.time()
         
-        # Phase 1: 初始化 Archive
-        for i in tqdm.tqdm(range(init_budget)):
-            run_name = f"seed_{i:03d}"
-            # 生成随机合法的物理场景
-            individual = generate_random_individual(model, seed=env_seed+i)
+        xedges, yedges = get_edges(env_seed, self.descriptors)
+
+        # Phase 1: 初始化 Archive (Modified for filtering)
+        # 循环直到找到 init_budget 个合法的种子 (Success且无碰撞)
+        valid_seeds = 0
+        attempt = 0
+        pbar = tqdm.tqdm(total=init_budget, desc="Finding Seeds")
+        
+        while valid_seeds < init_budget:
+            attempt += 1
+            # 使用包含尝试次数的种子，确保每次生成都是随机且不同的
+            current_seed = env_seed + attempt * 1000
             
-            score, faulty, behavior, _, _, post_str = execute_policy(
+            run_name = f"seed_{attempt:04d}" # 日志记录每次尝试
+            
+            # 生成随机合法的物理场景
+            individual = generate_random_individual(model, seed=current_seed)
+            
+            # 执行策略，接收额外的 stop_reason
+            score, faulty, behavior, _, _, post_str, stop_reason = execute_policy(
                 individual, model, env_seed, 
                 mutation_generation=0, run_name=run_name, phase="Phase1", input_pre="None"
             )
             
-            xedges, yedges = get_edges(env_seed, self.descriptors)
-            cell = compute_cell(behavior, xedges, yedges).tolist()
-            self.update_cell(cell, individual, score, faulty, behavior, 0, time.time()-start_time, post_str)
+            # 过滤逻辑：只有成功的任务 (到达终点) 且无碰撞才作为初始种子
+            # CURE 逻辑参考: if res['success'] and not res['collision']
+            if stop_reason == "Success" and not faulty:
+                cell = compute_cell(behavior, xedges, yedges).tolist()
+                self.update_cell(cell, individual, score, faulty, behavior, 0, time.time()-start_time, post_str)
+                valid_seeds += 1
+                pbar.update(1)
+                # print(f"Found valid seed {valid_seeds}/{init_budget}: {run_name}")
+            else:
+                # 失败的尝试会被记录在CSV中(由execute_policy负责)，但不加入MAP-Elites Archive
+                pass
 
-        print("Starting Fuzzing (Phase 2)...")
+        pbar.close()
+
+        print(f"Starting Fuzzing (Phase 2)... Initialized with {valid_seeds} valid seeds.")
         fuzz_count = 0
         fuzz_start_time = time.time()
         
@@ -142,7 +165,8 @@ class Framework():
             child_ind = self.mutate(parent_ind)
             new_gen = parent_gen + 1
             
-            score, faulty, behavior, _, _, child_post_str = execute_policy(
+            # 注意：此处也需要接收 7 个返回值
+            score, faulty, behavior, _, _, child_post_str, stop_reason = execute_policy(
                 child_ind, model, env_seed,
                 mutation_generation=new_gen, run_name=run_name, phase="Phase2", input_pre=parent_post_str
             )

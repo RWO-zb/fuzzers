@@ -143,7 +143,7 @@ def get_enhanced_state_vector(vehicle, birdview_obs, target_location, command=2)
         final_state = np.hstack((physical_state, target_info, np.zeros(3)))
     return final_state
 
-# ==================== Diversity Managers (保留原样) ====================
+# ==================== Diversity Managers ====================
 
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
@@ -356,6 +356,9 @@ def generate_random_individual(model: CarlaEnvManager, seed: int):
 def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptors=None, sim_steps=200, mutation_generation=0, run_name=None, phase=None, input_pre=None):
     """
     接收 individual (物理对象) 而非 input_vec
+    修改：
+    1. 返回 stop_reason
+    2. distinct_crashes 包含碰撞和未完成任务（超时等）
     """
     # 1. 解包 Individual
     start_pose, npc_info, weather_id, start_id, target_id = individual
@@ -419,7 +422,7 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
         vehicle = world.try_spawn_actor(bp, spawn_transform)
         if not vehicle:
             client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
-            return 0.0, True, np.zeros(2), individual, 0.0, "SpawnFail"
+            return 0.0, True, np.zeros(2), individual, 0.0, "SpawnFail", "SpawnFail"
 
     collision_bp = world.get_blueprint_library().find('sensor.other.collision')
     collision_sensor = world.spawn_actor(collision_bp, carla.Transform(), attach_to=vehicle)
@@ -443,9 +446,9 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
         if collision_sensor: collision_sensor.destroy()
         if vehicle: vehicle.destroy()
         client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
-        return 0.0, True, np.zeros(2), individual, 0.0, "InitialCrash"
+        return 0.0, True, np.zeros(2), individual, 0.0, "InitialCrash", "InitialCrash"
 
-    # 5. 运行 Simulation Loop (保持原有的 Metrics 记录)
+    # 5. 运行 Simulation Loop
     if run_name is None:
         run_id = f"gen{mutation_generation}_{int(time.time()*1000)}"
     else:
@@ -489,7 +492,7 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
                 
             if collided:
                 loc = vehicle.get_location()
-                # [KEEP] Diversity Metric Recording
+                # [KEEP] Diversity Metric Recording: Collision
                 if phase != "Phase1":
                     model.diversity_manager.record_crash(loc.x, loc.y)
                 stop_reason = "Collision"
@@ -510,7 +513,7 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
             cur_loc = vehicle.get_location()
             cur_dist = cur_loc.distance(target_pose.location)
             
-            # [KEEP] Diversity Metric Recording
+            # [KEEP] Diversity Metric Recording: Coverage
             if phase != "Phase1":
                 model.diversity_manager.record_step(cur_loc.x, cur_loc.y)
             
@@ -536,6 +539,13 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
         stop_reason = "Exception"
         
     finally:
+        # [NEW] Record crash/failure for timeouts (not success and not collided)
+        # 确保 distinct_crashes 包含所有失效情况（碰撞 + 任务未完成）
+        if stop_reason != "Success" and stop_reason != "Collision":
+            if 'cur_loc' in locals():
+                if phase != "Phase1":
+                    model.diversity_manager.record_crash(cur_loc.x, cur_loc.y)
+
         exec_time = time.time() - start_time
         
         if wrapper_initialized: map_utils.Wrapper.clear()
@@ -546,11 +556,12 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
 
     avg_speed = np.mean(episode_speeds) if episode_speeds else 0.0
     steer_std = np.std(episode_steers) if episode_steers else 0.0
-    is_faulty = (stop_reason == "Collision")
+    is_faulty = (stop_reason == "Collision") # For CSV 'collision' column
+    is_failure = (stop_reason != "Success")  # For behavior diversity fault tracking
     
     # [KEEP] Behavior Metric Recording
     if phase != "Phase1":
-        model.behavior_manager.record_episode(avg_speed, steer_std, is_faulty)
+        model.behavior_manager.record_episode(avg_speed, steer_std, is_failure)
         
     cov, distinct_crashes = model.diversity_manager.get_metrics()
     b_cnt, fb_cnt = model.behavior_manager.get_metrics()
@@ -595,13 +606,13 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
         "target_id": target_id,
         "success": (stop_reason == "Success"),
         "stop_reason": stop_reason,
-        "collision": is_faulty,
+        "collision": is_faulty, # Keep strictly for collision
         "total_reward": episode_reward,
         "steps": len(sequence),
         "final_dist": prev_distance,
         "elapsed_time": time.time() - model.start_time,
         "state_coverage": cov,
-        "distinct_crashes": distinct_crashes,
+        "distinct_crashes": distinct_crashes, # Now includes timeouts/failures
         "final_x": sequence[-1][0] if sequence else 0.0,
         "final_y": sequence[-1][1] if sequence else 0.0,
         "behavior_count": b_cnt,
@@ -616,4 +627,4 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
     pd.DataFrame([row_data]).to_csv(model.summary_csv, mode='a', header=False, index=False)
     
     behavior = np.array([avg_speed, steer_std])
-    return episode_reward, is_faulty, behavior, individual, exec_time, input_post_str
+    return episode_reward, is_faulty, behavior, individual, exec_time, input_post_str, stop_reason
