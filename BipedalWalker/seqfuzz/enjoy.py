@@ -13,11 +13,29 @@ import joblib
 from tapnet import predict_siamese, Hyperparameter
 import torch
 
+# --- [新增] 获取底层环境以访问物理状态 ---
+def get_real_unwrapped_env(env):
+    current_env = env
+    while hasattr(current_env, 'venv'):
+        current_env = current_env.venv
+    
+    # 处理 Monitor/DummyVecEnv 等包装器
+    while hasattr(current_env, 'env'):
+        current_env = current_env.env
+        
+    if hasattr(current_env, 'envs'):
+        return current_env.envs[0].unwrapped
+    
+    # 最后的尝试
+    if hasattr(current_env, 'unwrapped'):
+        return current_env.unwrapped
+        
+    return current_env
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", help="environment ID", type=str, default="BipedalWalkerHardcore-v3")
-    parser.add_argument("-f", "--folder", help="Log folder", type=str, default="rl-trained-agents/")
+    parser.add_argument("-f", "--folder", help="Log folder", type=str, default="../rl-trained-agents/")
     parser.add_argument("--algo", help="RL Algorithm", default="tqc", type=str, required=False, choices=list(ALGOS.keys()))
     parser.add_argument("-n", "--n_timesteps", help="number of timesteps", default=300, type=int)
     parser.add_argument("--num-threads", help="Number of threads for PyTorch (-1 to use default)", default=-1, type=int)
@@ -55,7 +73,8 @@ def main():
     )
     parser.add_argument("--em", action="store_true", default=True)
     args = parser.parse_args()
-    # --- 新增代码：在这里创建基于种子和时间戳的唯一文件夹 ---
+    
+    # --- 创建结果文件夹 ---
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
     result_path = os.path.join('results', result_folder)
@@ -64,7 +83,7 @@ def main():
     f = open(log_file_path, 'w', buffering=1)
     sys.stdout = f
     sys.stderr = f
-    # Going through custom gym packages to let them register in the global registory
+    
     for env_module in args.gym_packages:
         importlib.import_module(env_module)
 
@@ -76,7 +95,6 @@ def main():
         args.exp_id = get_latest_run_id(os.path.join(folder, algo), env_id)
         print(f"Loading latest experiment, id={args.exp_id}")
 
-    # Sanity checks
     if args.exp_id > 0:
         log_path = os.path.join(folder, algo, f"{env_id}_{args.exp_id}")
     else:
@@ -123,7 +141,7 @@ def main():
     args_path = os.path.join(log_path, env_id, "args.yml")
     if os.path.isfile(args_path):
         with open(args_path, "r") as f:
-            loaded_args = yaml.load(f, Loader=yaml.UnsafeLoader)  # pytype: disable=module-attr
+            loaded_args = yaml.load(f, Loader=yaml.UnsafeLoader)
             if loaded_args["env_kwargs"] is not None:
                 env_kwargs = loaded_args["env_kwargs"]
     if args.env_kwargs is not None:
@@ -162,38 +180,21 @@ def main():
     states = np.random.randint(low=1, high=4, size=15)
     obs = env.reset(states)
 
-    '''
-    video_length = args.n_timesteps
-    env = VecVideoRecorder(
-    env,
-    "./recording/test",
-    record_video_trigger=lambda x: x == 0,
-    video_length=video_length,
-    name_prefix=f"{algo}-{env_id}",
-    )
-    obs = env.reset(states)
-    '''
-
     siamese_model = predict_siamese.load_tapnet_mode()
     siamese_model.cuda()
     siamese_model.load_state_dict(torch.load(r'./tapnet/data/weights/tapnet.pkl'))
     siamese_model.eval()
     bench_noCrash = Hyperparameter.bench_noCrash
     if len(bench_noCrash) == 0:
-    # 如果为空，创建一个合适的占位符张量
         bench_noCrash = torch.zeros((1, Hyperparameter.Step, Hyperparameter.Dimension)).cuda()
     else:
          bench_noCrash = torch.FloatTensor(np.array(bench_noCrash)).cuda()
          if len(bench_noCrash.shape) == 2:
-            bench_noCrash = bench_noCrash.unsqueeze(0)  # 添加batch维度
+            bench_noCrash = bench_noCrash.unsqueeze(0)
    
-
     print('nodel:')
     print(siamese_model)
 
-
-
-    # Deterministic by default except for atari games
     stochastic = args.stochastic or is_atari and not args.deterministic
     deterministic = not stochastic
 
@@ -201,16 +202,17 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 1000
+    seeds_num = 100
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
+    
+    # --- Corpus Generation Loop ---
     while i < seeds_num:
         states = np.random.randint(low=1, high=4, size=15)
         state = None
         episode_reward = 0.0
         obs = env.reset(states)
         sequences = [obs[0]]
-        # print('states ', states)
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, infos = env.step(action)
@@ -253,9 +255,10 @@ def main():
         pickle.dump(fuzzer.entropy, handle, protocol=pickle.HIGHEST_PROTOCOL)
     with open(os.path.join(result_path, 'cvg_EM.pkl'), 'wb') as handle:
         pickle.dump(fuzzer.coverage, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        
     fuzzer.count = [5] * len(fuzzer.corpus)
     fuzzer.original = copy.deepcopy(fuzzer.corpus)
-    mutation_log = [] # <--- 新增：初始化变异日志列表
+    mutation_log = [] 
 
     # HACK: start fuzzing
     start_fuzz_time = time.time()
@@ -273,24 +276,42 @@ def main():
     noCrashF_40 = open(os.path.join(result_path, 'noCrashStateSeqV2_40.txt'), mode='a')
     timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
     seedcount = 0
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 :
-    # while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0:
+    
+    # --- Fuzzing Loop ---
+    while current_time - start_fuzz_time < 3600 * 0.5 and len(fuzzer.corpus) > 0 :
         is_crash = False
         seedcount+=1
         output_obs = []
         temp1_time = time.time()
         states = fuzzer.get_pose()
         mutate_states = fuzzer.mutation(states)
-        current_gen = fuzzer.current_generation + 1 # <--- 新增：计算当前变异的代数
+        current_gen = fuzzer.current_generation + 1 
         state = None
         episode_reward = 0.0
         obs = env.reset(mutate_states)
         sequences = [obs[0]]
+        
+        # --- [新增] 初始化行为特征统计变量 ---
+        total_x_pos_sum = 0.0
+        total_abs_angle_sum = 0.0
+        episode_steps = 0
+        
         for _ in range(args.n_timesteps):
-            # print(_)
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, infos = env.step(action)
             sequences.append(obs[0])
+            
+            # --- [新增] 收集行为特征 (Distance & Angle) ---
+            real_env = get_real_unwrapped_env(env)
+            if real_env is not None and hasattr(real_env, 'hull'):
+                # Box2D BipedalWalker 的 hull 位置和角度
+                raw_x_pos = real_env.hull.position[0]
+                raw_angle = real_env.hull.angle
+                total_x_pos_sum += raw_x_pos
+                total_abs_angle_sum += abs(raw_angle)
+            episode_steps += 1
+            # ---------------------------------------------
+            
             if not args.no_render:
                 env.render("human")
             episode_reward += reward[0]
@@ -300,9 +321,13 @@ def main():
                 ret = predict_siamese.predict_once(siamese_model, bench_noCrash, output_obs)
                 if ret == 1:
                     print('end')
-                    # break
                 else:
                     print('continue')
+
+        # --- [新增] 计算本回合的 BD 指标 ---
+        bd_dist = total_x_pos_sum / max(1, episode_steps)
+        bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
+        # --------------------------------
 
         temp2_time = time.time()
         time_of_env += temp2_time - temp1_time
@@ -380,14 +405,11 @@ def main():
                 timeStamp.write(str(current_time))
                 timeStamp.write('\n')
 
-
-
             if cvg < cvg_threshold or episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
         else:
-
             if len(output_obs) == Hyperparameter.Step:
                 for i in range(len(output_obs)):
                     outputStr = ''
@@ -423,15 +445,19 @@ def main():
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
-        # --- 新增：记录本次变异的日志 ---
+        
+        # --- [新增] 记录日志包含行为特征 ---
         log_entry = {
-            'state': copy.deepcopy(mutate_states), # 记录变异的 state
-            'generation': current_gen,             # 记录它是第几代
-            'crashed': is_crash,                   # 记录是否导致 crash
-            'timestamp': time.time() - start_fuzz_time # <--- 新增：记录相对时间戳
+            'state': copy.deepcopy(mutate_states), 
+            'generation': current_gen,             
+            'crashed': is_crash,
+            'timestamp': time.time() - start_fuzz_time,
+            'bd_distance': bd_dist,      # [New]
+            'bd_mean_angle': bd_mean_angle # [New]
         }
         mutation_log.append(log_entry)
         # --- 日志记录结束 ---
+        
         current_time = time.time()
         time_of_fuzzer += current_time - temp2_time
         print('total reward: ', episode_reward, ', coverage: ', cvg, ', passed time: ', current_time - start_fuzz_time, ', corpus size: ', len(fuzzer.corpus), 'time_of_fuzzer: ', time_of_fuzzer, 'time_of_env: ', time_of_env)
@@ -442,7 +468,8 @@ def main():
         file_name = os.path.join(result_path, 'crash_noEM.pkl')
     with open(file_name, 'wb') as handle:
         pickle.dump(fuzzer.result, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    # --- 新增：保存完整的变异日志 ---
+    
+    # --- 保存完整的变异日志 ---
     with open(os.path.join(result_path, 'all_run_seeds_0.pkl'), 'wb') as handle:
         pickle.dump(mutation_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
     # --- 保存结束 ---
@@ -471,8 +498,6 @@ def main():
 
 
 if __name__ == "__main__":
-    #f = open('./results/fuzz.txt', 'w', buffering=1)
-    #sys.stdout = f
     start_time = datetime.now()
     start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"--- start time: {start_time_str} ---")
