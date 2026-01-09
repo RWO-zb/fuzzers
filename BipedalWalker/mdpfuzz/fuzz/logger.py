@@ -8,15 +8,6 @@ from typing import Optional, List, Dict, Union
 class Logger:
     '''
     A class for logging data values to a .txt file in a specific format.
-
-    Args:
-    - filepath (str): The path to the log file.
-
-    Usage:
-    - Initialize the logger with a file path.
-    - Write the header with the write_columns method before logging.
-    - Use the log method to add a new log entry.
-    - Use load_logs to load logs into a Pandas DataFrame.
     '''
 
     def __init__(self, filepath: str, columns: List[str] = None, delimiter: str = '; ') -> None:
@@ -51,9 +42,6 @@ class Logger:
     def load_logs(self) -> pd.DataFrame:
         '''
         Load logs from the file and return as a Pandas DataFrame.
-
-        Returns:
-        - pd.DataFrame: DataFrame containing the logged data.
         '''
         data = []
         with open(self.filepath, 'r') as file:
@@ -97,7 +85,12 @@ class FuzzerLogger:
 
     def __init__(self, filepath: str) -> None:
         self.filepath = filepath
-        self.columns = ['Input', 'Oracle', 'Reward', 'EpisodeLength', 'Sensitivity', 'Coverage', 'Generation', 'TestExecTime', 'CoverageTime', 'RunTime']
+        # [新增] 增加了 BD_Distance 和 BD_MeanAngle
+        self.columns = [
+            'Input', 'Oracle', 'Reward', 'EpisodeLength', 'Sensitivity', 
+            'Coverage', 'Generation', 'TestExecTime', 'CoverageTime', 'RunTime',
+            'BD_Distance', 'BD_MeanAngle'
+        ]
         self.delimiter = '; '
 
     def log(self,
@@ -110,25 +103,15 @@ class FuzzerLogger:
             Generation: Optional[int] = None,
             run_time: Optional[float] = None,
             test_exec_time: Optional[float] = None,
-            coverage_time: Optional[float] = None
+            coverage_time: Optional[float] = None,
+            # [新增] 参数
+            bd_distance: Optional[float] = None,
+            bd_mean_angle: Optional[float] = None
         ) -> None:
         '''
         Log values to the file.
-
-        Args:
-        - input (Optional[np.ndarray]): Input value as a NumPy array.
-        - oracle (Optional[bool]): Oracle value as a boolean.
-        - reward (Optional[float]): Reward value as a floating-point number.
-        - episode_length (Optional[int]): Episode length (positive integer).
-        - sensitivity (Optional[float]): Sensitivity value as a floating-point number.
-        - coverage (Optional[float]): Coverage value as a floating-point number.
-        - run_time (Optional[float]): Run time value as a floating-point number.
-        - test_exec_time (Optional[float]): Test execution time value as a floating-point number.
-        - coverage_time (Optional[float]): Time to compute a coverage value as a floating-point number.
         '''
         log_data = {
-            #TODO: compared to the pool np.savetxt(.), np.array2string is less accurate
-            # It would be problematic if the precision difference causes reproducibility issue...
             'Input': np.array2string(input, separator=',').replace('\n', '') if input is not None else 'None',
             'Oracle': str(oracle) if oracle is not None else 'None',
             'Reward': str(reward) if reward is not None else 'None',
@@ -138,9 +121,12 @@ class FuzzerLogger:
             'Generation': str(Generation) if Generation is not None else 'None',
             'RunTime': str(run_time) if run_time is not None else 'None',
             'TestExecTime': str(test_exec_time) if test_exec_time is not None else 'None',
-            'CoverageTime': str(coverage_time) if coverage_time is not None else 'None'
+            'CoverageTime': str(coverage_time) if coverage_time is not None else 'None',
+            # [新增] 序列化逻辑
+            'BD_Distance': str(bd_distance) if bd_distance is not None else 'None',
+            'BD_MeanAngle': str(bd_mean_angle) if bd_mean_angle is not None else 'None'
         }
-        # ensures correct ordering by using the columns (weakness found when Python version is 3.5)
+        
         log_line = self.delimiter.join([log_data[k] for k in self.columns])
 
         with open(self.filepath, 'a') as file:
@@ -150,46 +136,38 @@ class FuzzerLogger:
     def load_logs(self) -> pd.DataFrame:
         '''
         Load logs from the file and return as a Pandas DataFrame.
-
-        Returns:
-        - pd.DataFrame: DataFrame containing the logged data.
         '''
         data = []
         malformed_lines = []
         with open(self.filepath, 'r') as file:
             header_line = file.readline().strip()
+            # 确保头部匹配新增的列
             assert header_line.split(self.delimiter) == self.columns, header_line.split(self.delimiter)
+            
             for num_line, line in enumerate(file):
                 try:
                     values = [v.strip() for v in line.strip().split(self.delimiter)]
-                    input = np.array(eval('np.array(' + values[0] + ')')) if values[0] != 'None' else None
-                    oracle = values[1] == 'True' if values[1] != 'None' else None
-                    reward = float(values[2]) if values[2] != 'None' else None
-                    episode_length = int(values[3]) if values[3] != 'None' else None
-                    sensitivity = float(values[4]) if values[4] != 'None' else None
-                    coverage = float(values[5]) if values[5] != 'None' else None
-                    Generation = int(values[6]) if values[6] != 'None' else None
-                    test_exec_time = float(values[7]) if values[7] != 'None' else None
-                    coverage_time = float(values[8]) if values[8] != 'None' else None
-                    run_time = float(values[9]) if values[9] != 'None' else None
-
-                    data.append([input, oracle, reward, episode_length, sensitivity, coverage, Generation,test_exec_time, coverage_time, run_time])
-                except:
-                    malformed_lines.append('\tLine {}: "{}"'.format(num_line, line.strip()))
-        # if malformed_lines != []:
-        #     print('Found malformed lines in file "{}"'.format(self.filepath))
-        #     for info in malformed_lines:
-        #         print(info)
+                    # 动态解析，避免索引硬编码错误
+                    row_dict = {}
+                    for i, col in enumerate(self.columns):
+                        val_str = values[i]
+                        if col == 'Input':
+                             val = np.array(eval('np.array(' + val_str + ')')) if val_str != 'None' else None
+                        elif col == 'Oracle':
+                             val = val_str == 'True' if val_str != 'None' else None
+                        elif col in ['EpisodeLength', 'Generation']:
+                             val = int(val_str) if val_str != 'None' else None
+                        else:
+                             val = float(val_str) if val_str != 'None' else None
+                        row_dict[col] = val
+                    
+                    data.append([row_dict[c] for c in self.columns])
+                except Exception as e:
+                    malformed_lines.append(f'\tLine {num_line}: "{line.strip()}" - Error: {e}')
+        
         return pd.DataFrame(data, columns=self.columns)
 
 
     def write_columns(self):
         with open(self.filepath, 'w') as file:
             file.write(self.delimiter.join(self.columns) + '\n')
-
-
-if __name__ == '__main__':
-    log_file_example_path = 'log_file_example.txt'
-    logger = FuzzerLogger(log_file_example_path)
-    df = logger.load_logs()
-    print(df.head(10))
