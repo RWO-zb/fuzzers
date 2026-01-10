@@ -110,36 +110,60 @@ class Framework():
         
         xedges, yedges = get_edges(env_seed, self.descriptors)
 
-        # Phase 1: 初始化 Archive (Modified for filtering)
+        # ==========================================
+        # [修改] 预生成所有唯一的 路线+天气 组合
+        # ==========================================
+        all_combinations = []
+        for t_idx in range(len(model.tasks)):
+            for w_id in model.weathers:
+                all_combinations.append((t_idx, w_id))
+        
+        # 确定性地打乱组合顺序，保证每次运行顺序随机但不可重复
+        # 使用 self.rng (基于 env_seed 初始化) 保证可复现性
+        self.rng.shuffle(all_combinations)
+        
+        # 创建迭代器
+        combo_iterator = iter(all_combinations)
+        total_combos = len(all_combinations)
+        
+        print(f"Generated {total_combos} unique Task/Weather combinations for initialization.")
+
+        # Phase 1: 初始化 Archive
         # 循环直到找到 init_budget 个合法的种子 (Success且无碰撞)
         valid_seeds = 0
         attempt = 0
         pbar = tqdm.tqdm(total=init_budget, desc="Finding Seeds")
         
         while valid_seeds < init_budget:
+            # [修改] 尝试获取下一个唯一的组合
+            try:
+                t_idx, w_id = next(combo_iterator)
+            except StopIteration:
+                # 如果所有组合都试完了，还没有攒够 init_budget，则提前结束
+                print(f"\n[Warning] Exhausted all {total_combos} unique combinations. Stopping initialization early.")
+                break
+
             attempt += 1
-            # 使用包含尝试次数的种子，确保每次生成都是随机且不同的
+            # 使用包含尝试次数的种子，确保每次生成都是随机且不同的 (主要影响背景车辆分布)
             current_seed = env_seed + attempt * 1000
             
             run_name = f"seed_{attempt:04d}" # 日志记录每次尝试
             
-            # 生成随机合法的物理场景
-            individual = generate_random_individual(model, seed=current_seed)
+            # [修改] 生成随机合法的物理场景 (传入指定的 t_idx, w_id 以确保不重复)
+            individual = generate_random_individual(model, seed=current_seed, task_idx=t_idx, weather_id=w_id)
             
-            # 执行策略，接收额外的 stop_reason
+            # 执行策略
             score, faulty, behavior, _, _, post_str, stop_reason = execute_policy(
                 individual, model, env_seed, 
                 mutation_generation=0, run_name=run_name, phase="Phase1", input_pre="None"
             )
             
             # 过滤逻辑：只有成功的任务 (到达终点) 且无碰撞才作为初始种子
-            # CURE 逻辑参考: if res['success'] and not res['collision']
             if stop_reason == "Success" and not faulty:
                 cell = compute_cell(behavior, xedges, yedges).tolist()
                 self.update_cell(cell, individual, score, faulty, behavior, 0, time.time()-start_time, post_str)
                 valid_seeds += 1
                 pbar.update(1)
-                # print(f"Found valid seed {valid_seeds}/{init_budget}: {run_name}")
             else:
                 # 失败的尝试会被记录在CSV中(由execute_policy负责)，但不加入MAP-Elites Archive
                 pass
@@ -155,7 +179,9 @@ class Framework():
             fuzz_count += 1
             run_name = f"fuzz_{fuzz_count:04d}"
             
-            if len(self.cells) == 0: continue
+            if len(self.cells) == 0: 
+                print("[Error] No valid seeds in archive. Stopping.")
+                break
             
             # Phase 2: 选择 + 变异
             cell_idx = self.select_cell()

@@ -330,20 +330,33 @@ def load_model(args, result_dir):
 
 # ==================== NEW / MODIFIED FUNCTIONS ====================
 
-def generate_random_individual(model: CarlaEnvManager, seed: int):
+def generate_random_individual(model: CarlaEnvManager, seed: int, task_idx: int = None, weather_id: int = None):
     """
-    Phase 1: 使用原来的 init_traffic 生成随机合法位置，然后捕获为 individual 对象
+    Phase 1: 生成随机初始个体。
+    [修改点]: 增加了 task_idx 和 weather_id 可选参数。
+    如果提供了这两个参数，将强制使用指定的路线和天气，从而支持外部的去重逻辑。
+    如果未提供，则保持原有的随机行为。
     """
     rng = random.Random(seed)
-    task_idx = rng.randint(0, len(model.tasks) - 1)
+    
+    # [修改] 如果未指定 task_idx，则随机选择（兼容旧逻辑或Phase 2）
+    if task_idx is None:
+        task_idx = rng.randint(0, len(model.tasks) - 1)
+    
     start_id, target_id = model.tasks[task_idx]
     
+    # 边界检查
     if start_id >= len(model.spawn_points): start_id = 0
     if target_id >= len(model.spawn_points): target_id = 1
     
     start_pose = model.spawn_points[start_id]
-    weather_id = rng.choice(model.weathers)
     
+    # [修改] 如果未指定 weather_id，则随机选择
+    if weather_id is None:
+        weather_id = rng.choice(model.weathers)
+    
+    # 生成交通流的种子依旧保持随机变化，以确保即使路线相同，车流也是多样化的
+    # 使用 seed 派生出一个新的种子，避免直接复用 seed
     traffic_seed = seed + rng.randint(0, 10000)
     
     # 临时生成一次以获取合法的随机位置，然后清理
@@ -531,7 +544,8 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
             
             if cur_dist < 5.0:
                 stop_reason = "Success"
-                episode_reward += 100
+                # [MODIFIED] Removed the explicit +100 reward bonus to match RL_CARLA logic
+                # episode_reward += 100 
                 break
                 
     except Exception as e:
