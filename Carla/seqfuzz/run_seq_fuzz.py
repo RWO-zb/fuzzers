@@ -12,8 +12,10 @@ import pickle
 import queue
 from pathlib import Path
 
+# 禁用 SDL 视频驱动
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
+# 路径设置
 current_dir = os.path.dirname(os.path.abspath(__file__))
 workspace_dir = os.path.dirname(current_dir)
 pcla_dir = os.path.join(workspace_dir, 'PCLA')
@@ -47,6 +49,21 @@ import pygame
 def patch_map_utils():
     pass
 patch_map_utils()
+
+# ==========================================
+# 全局设置与工具 (参照 RL_CARLA 添加)
+# ==========================================
+def set_global_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except ImportError: pass
 
 def get_full_state_str(ego_transform, npc_info_list):
     if ego_transform is None:
@@ -290,8 +307,8 @@ class SeqFuzzManager:
 
 def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phase, npc_data=None, seed=None):
     if seed is not None:
-        random.seed(seed)
-        np.random.seed(seed)
+        # 修改：使用更严格的 set_global_seed 替代简单的 random.seed
+        set_global_seed(seed)
         env_manager.traffic_manager.set_random_device_seed(seed)
 
     client = env_manager.client
@@ -583,6 +600,9 @@ def main():
     parser.add_argument("--time_budget", type=float, default=None)
     args = parser.parse_args()
 
+    # 修改：在程序入口处立即设置全局种子，确保任务洗牌（shuffle）的确定性
+    set_global_seed(args.seed)
+
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     res_dir = os.path.join(current_dir, "results_seqfuzz", f"{timestamp}_{args.town}_{args.suite}")
     os.makedirs(res_dir, exist_ok=True)
@@ -592,13 +612,18 @@ def main():
     total_spawns = len(manager.spawn_points)
     weather_list = [1, 3, 6, 8]
     
+    # 参照 RL_CARLA：生成所有组合列表
     all_combinations = []
     if tasks:
         for t_idx, (start_id, target_id) in enumerate(tasks):
             for w_id in weather_list:
                 all_combinations.append((t_idx, start_id, target_id, w_id))
+        
+        # 因为前面调用了 set_global_seed(args.seed)，这里的 shuffle 现在是确定性的
         random.shuffle(all_combinations)
     
+    print(f"Starting Phase 1: Exploring up to {len(all_combinations)} combinations to find {args.num_tasks} successful seeds...")
+
     collected_seeds = 0
     attempt_idx = 0
     combo_iterator = iter(all_combinations)
@@ -606,8 +631,10 @@ def main():
     try:
         while collected_seeds < args.num_tasks:
             try:
+                # 遍历列表，绝无重复（除非任务文件本身有重复）
                 task_idx, start_id, target_id, weather_id = next(combo_iterator)
             except StopIteration:
+                print(f"Warning: Exhausted all {len(all_combinations)} combinations.")
                 break
                 
             attempt_idx += 1
@@ -635,6 +662,7 @@ def main():
                         generation=0, final_state=res['final_state']
                     )
                     collected_seeds += 1
+                    print(f"Found successful seed #{collected_seeds}: {run_name}")
 
         fuzz_start_time = time.time()
         fuzz_idx = 0
