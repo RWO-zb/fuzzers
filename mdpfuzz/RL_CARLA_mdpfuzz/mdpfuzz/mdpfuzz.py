@@ -147,102 +147,29 @@ class Fuzzer():
         pbar_init = tqdm.tqdm(total=n, desc="Initializing (Phase 1)")
         model_initialized = False
         total_init_executions = 0
+        stop_fuzzing = False # Flag to control interruption
 
+        # [Modified] Phase 1 Loop with try-except for KeyboardInterrupt
         for state in initial_inputs:
-            self.generation_map[self._get_key(state)] = 0
-            
-            sensitivity, acc_reward, oracle, success, state_sequence, exec_time = self.sentivity(
-                state, policy=policy, generation=0, parent_input=None, phase="Phase1", **kwargs
-            )
-            
-            total_init_executions += 1
-            if str(state.tolist()) not in [str(x) for x in self.evaluated_solutions]:
-                self.evaluated_solutions.append(state.tolist())
-            
-            if not model_initialized:
-                if len(state_sequence) > self.k + 1:
-                    self.coverage_model.initialize(state_sequence)
-                    model_initialized = True
-                    print('[Info] Coverage model initialized with first valid run.')
-                else:
-                    print('[Warning] Run too short to initialize coverage model, waiting for next...')
-
-            coverage = 0.0
-            if model_initialized:
-                state_sequence_conc = self._concatenate_state_sequence(state_sequence)
-                t0 = time.time()
-                coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
-                coverage_time = time.time() - t0
-            else:
-                coverage_time = 0.0
-
-            pool.add(state, acc_reward, coverage, sensitivity, oracle)
-            
-            if self.logger is not None:
-                episode_length = len(state_sequence)
-                self.logger.log(
-                    input=state,
-                    oracle=oracle,
-                    reward=acc_reward,
-                    episode_length=episode_length,
-                    sensitivity=sensitivity,
-                    coverage=coverage,
-                    test_exec_time=exec_time,
-                    coverage_time=coverage_time,
-                    run_time=time.time()
-                )
-
-            if oracle:
-                pool.add_crash(state)
-
-            pbar_init.update(1)
-        pbar_init.close()
-        
-        print(f"[Info] Initialization finished. Total Init Executions: {total_init_executions}")
-
-        fuzz_start_time = time.time()
-        fuzz_iterations = 0
-
-        target_budget_iter = kwargs.get('test_budget', None)
-        target_budget_time = kwargs.get('test_budget_in_seconds', None)
-        
-        if target_budget_time is not None:
-            self.config['test_budget_in_seconds'] = target_budget_time
-            pbar = tqdm.tqdm(total=target_budget_time, unit='s', desc="Fuzzing (Time)")
-        else:
-            self.config['test_budget'] = target_budget_iter
-            pbar = tqdm.tqdm(total=target_budget_iter, desc="Fuzzing (Iter)")
-            
-        try:
-            while True:
-                if target_budget_time:
-                    current_fuzz_duration = time.time() - fuzz_start_time
-                    if current_fuzz_duration > target_budget_time:
-                        print(f"[Info] Time budget reached: {current_fuzz_duration:.2f}s > {target_budget_time}s")
-                        break
-                elif target_budget_iter:
-                    if fuzz_iterations >= target_budget_iter:
-                        print(f"[Info] Iteration budget reached: {fuzz_iterations} >= {target_budget_iter}")
-                        break
-
-                if len(pool.inputs) == 0:
-                    print("[Error] Pool is empty, cannot fuzz.")
-                    break
-
-                input, acc_reward_input = pool.select(self.rng)
+            try:
+                self.generation_map[self._get_key(state)] = 0
                 
-                parent_key = self._get_key(input)
-                parent_gen = self.generation_map.get(parent_key, 0)
-                current_gen = parent_gen + 1
-                
-                mutant = self.mutate_validate(input, **kwargs)
-                
-                acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(
-                    mutant, policy, generation=current_gen, parent_input=input, phase="Phase2"
+                sensitivity, acc_reward, oracle, success, state_sequence, exec_time = self.sentivity(
+                    state, policy=policy, generation=0, parent_input=None, phase="Phase1", **kwargs
                 )
                 
-                fuzz_iterations += 1
+                total_init_executions += 1
+                if str(state.tolist()) not in [str(x) for x in self.evaluated_solutions]:
+                    self.evaluated_solutions.append(state.tolist())
                 
+                if not model_initialized:
+                    if len(state_sequence) > self.k + 1:
+                        self.coverage_model.initialize(state_sequence)
+                        model_initialized = True
+                        print('[Info] Coverage model initialized with first valid run.')
+                    else:
+                        print('[Warning] Run too short to initialize coverage model, waiting for next...')
+
                 coverage = 0.0
                 if model_initialized:
                     state_sequence_conc = self._concatenate_state_sequence(state_sequence)
@@ -250,33 +177,16 @@ class Fuzzer():
                     coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
                     coverage_time = time.time() - t0
                 else:
-                    if len(state_sequence) > self.k + 1:
-                        self.coverage_model.initialize(state_sequence)
-                        model_initialized = True
-                        print('[Info] Coverage model initialized during Fuzzing phase.')
                     coverage_time = 0.0
 
-                sensitivity = None
-                if oracle:
-                    pool.add_crash(mutant)
-                    self.generation_map[self._get_key(mutant)] = current_gen
-                elif (acc_reward_mutant < acc_reward_input) or (coverage < self.tau):
-                    if local_sensitivity:
-                        sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
-                    else:
-                        sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(
-                            mutant, acc_reward=acc_reward_mutant, policy=policy, generation=current_gen, parent_input=input, phase="Phase2", **kwargs
-                        )
-                    
-                    pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle)
-                    self.generation_map[self._get_key(mutant)] = current_gen
-
+                pool.add(state, acc_reward, coverage, sensitivity, oracle)
+                
                 if self.logger is not None:
                     episode_length = len(state_sequence)
                     self.logger.log(
-                        input=mutant,
+                        input=state,
                         oracle=oracle,
-                        reward=acc_reward_mutant,
+                        reward=acc_reward,
                         episode_length=episode_length,
                         sensitivity=sensitivity,
                         coverage=coverage,
@@ -285,21 +195,127 @@ class Fuzzer():
                         run_time=time.time()
                     )
 
-                if target_budget_time:
-                    current_elapsed_int = int(time.time() - fuzz_start_time)
-                    increment = current_elapsed_int - pbar.n
-                    if increment > 0:
-                        pbar.update(increment)
-                else:
-                    pbar.update(1)
-                        
-        except Exception as e:
-            print(f"[Error in Fuzzing Loop] {e}")
-            import traceback
-            traceback.print_exc()
+                if oracle:
+                    pool.add_crash(state)
 
-        pbar.close()
+                pbar_init.update(1)
+            
+            except KeyboardInterrupt:
+                print("\n[!] User interrupted during Phase 1 (Initialization). Stopping and saving...")
+                stop_fuzzing = True
+                break
+
+        pbar_init.close()
+        
+        if not stop_fuzzing:
+            print(f"[Info] Initialization finished. Total Init Executions: {total_init_executions}")
+
+            fuzz_start_time = time.time()
+            fuzz_iterations = 0
+
+            target_budget_iter = kwargs.get('test_budget', None)
+            target_budget_time = kwargs.get('test_budget_in_seconds', None)
+            
+            if target_budget_time is not None:
+                self.config['test_budget_in_seconds'] = target_budget_time
+                pbar = tqdm.tqdm(total=target_budget_time, unit='s', desc="Fuzzing (Time)")
+            else:
+                self.config['test_budget'] = target_budget_iter
+                pbar = tqdm.tqdm(total=target_budget_iter, desc="Fuzzing (Iter)")
+                
+            try:
+                while True:
+                    if target_budget_time:
+                        current_fuzz_duration = time.time() - fuzz_start_time
+                        if current_fuzz_duration > target_budget_time:
+                            print(f"[Info] Time budget reached: {current_fuzz_duration:.2f}s > {target_budget_time}s")
+                            break
+                    elif target_budget_iter:
+                        if fuzz_iterations >= target_budget_iter:
+                            print(f"[Info] Iteration budget reached: {fuzz_iterations} >= {target_budget_iter}")
+                            break
+
+                    if len(pool.inputs) == 0:
+                        print("[Error] Pool is empty, cannot fuzz.")
+                        break
+
+                    input, acc_reward_input = pool.select(self.rng)
+                    
+                    parent_key = self._get_key(input)
+                    parent_gen = self.generation_map.get(parent_key, 0)
+                    current_gen = parent_gen + 1
+                    
+                    mutant = self.mutate_validate(input, **kwargs)
+                    
+                    acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(
+                        mutant, policy, generation=current_gen, parent_input=input, phase="Phase2"
+                    )
+                    
+                    fuzz_iterations += 1
+                    
+                    coverage = 0.0
+                    if model_initialized:
+                        state_sequence_conc = self._concatenate_state_sequence(state_sequence)
+                        t0 = time.time()
+                        coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
+                        coverage_time = time.time() - t0
+                    else:
+                        if len(state_sequence) > self.k + 1:
+                            self.coverage_model.initialize(state_sequence)
+                            model_initialized = True
+                            print('[Info] Coverage model initialized during Fuzzing phase.')
+                        coverage_time = 0.0
+
+                    sensitivity = None
+                    if oracle:
+                        pool.add_crash(mutant)
+                        self.generation_map[self._get_key(mutant)] = current_gen
+                    elif (acc_reward_mutant < acc_reward_input) or (coverage < self.tau):
+                        if local_sensitivity:
+                            sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
+                        else:
+                            sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(
+                                mutant, acc_reward=acc_reward_mutant, policy=policy, generation=current_gen, parent_input=input, phase="Phase2", **kwargs
+                            )
+                        
+                        pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle)
+                        self.generation_map[self._get_key(mutant)] = current_gen
+
+                    if self.logger is not None:
+                        episode_length = len(state_sequence)
+                        self.logger.log(
+                            input=mutant,
+                            oracle=oracle,
+                            reward=acc_reward_mutant,
+                            episode_length=episode_length,
+                            sensitivity=sensitivity,
+                            coverage=coverage,
+                            test_exec_time=exec_time,
+                            coverage_time=coverage_time,
+                            run_time=time.time()
+                        )
+
+                    if target_budget_time:
+                        current_elapsed_int = int(time.time() - fuzz_start_time)
+                        increment = current_elapsed_int - pbar.n
+                        if increment > 0:
+                            pbar.update(increment)
+                    else:
+                        pbar.update(1)
+            
+            # [Modified] Catch KeyboardInterrupt specifically to allow graceful exit
+            except KeyboardInterrupt:
+                print("\n[!] User interrupted during Phase 2 (Fuzzing). Saving results and exiting...")
+            
+            except Exception as e:
+                print(f"[Error in Fuzzing Loop] {e}")
+                import traceback
+                traceback.print_exc()
+
+            pbar.close()
+
         if path is not None:
+            print("[Info] Saving final configuration and results...")
             self.save_configuration(path)
             np.savetxt(path + '_selected.txt', pool.selected, fmt='%1.0f', delimiter=',')
             if not kwargs.get('save_logs_only', False):
@@ -334,135 +350,149 @@ class Fuzzer():
         successful_seeds = 0
         input_idx = 0
         total_init_executions = 0
+        stop_fuzzing = False
         
+        # [Modified] Phase 1 Loop with try-except for KeyboardInterrupt
         while successful_seeds < n:
-            if input_idx >= len(initial_inputs):
-                initial_inputs.append(self.sampling(1).tolist())
-            
-            state = np.array(initial_inputs[input_idx])
-            input_idx += 1
-            
-            acc_reward, oracle, is_success, state_sequence, exec_time = self.mdp(
-                state, policy, generation=0, parent_input=None, phase="Phase1"
-            )
-            total_init_executions += 1 
+            try:
+                if input_idx >= len(initial_inputs):
+                    initial_inputs.append(self.sampling(1).tolist())
+                
+                state = np.array(initial_inputs[input_idx])
+                input_idx += 1
+                
+                acc_reward, oracle, is_success, state_sequence, exec_time = self.mdp(
+                    state, policy, generation=0, parent_input=None, phase="Phase1"
+                )
+                total_init_executions += 1 
 
-            if str(state.tolist()) not in [str(x) for x in self.evaluated_solutions]:
-                self.evaluated_solutions.append(state.tolist())
-            
-            if is_success:
-                sensitivity, _, _, _, _, _ = self.sentivity(
-                    state, 
-                    acc_reward=acc_reward, 
-                    policy=policy, 
-                    generation=0, 
-                    parent_input=None, 
-                    phase="Phase1",
-                    **kwargs
-                )
+                if str(state.tolist()) not in [str(x) for x in self.evaluated_solutions]:
+                    self.evaluated_solutions.append(state.tolist())
                 
-                if sensitivity == 0:
-                    sensitivity = 1e-6
+                if is_success:
+                    sensitivity, _, _, _, _, _ = self.sentivity(
+                        state, 
+                        acc_reward=acc_reward, 
+                        policy=policy, 
+                        generation=0, 
+                        parent_input=None, 
+                        phase="Phase1",
+                        **kwargs
+                    )
+                    
+                    if sensitivity == 0:
+                        sensitivity = 1e-6
+                    
+                    pool.add(state, acc_reward, 0, sensitivity, oracle)
+                    self.generation_map[self._get_key(state)] = 0
+                    successful_seeds += 1
+                    pbar_init.update(1)
                 
-                pool.add(state, acc_reward, 0, sensitivity, oracle)
-                self.generation_map[self._get_key(state)] = 0
-                successful_seeds += 1
-                pbar_init.update(1)
-            
-            if self.logger is not None:
-                episode_length = len(state_sequence)
-                self.logger.log(
-                    input=state,
-                    oracle=oracle,
-                    reward=acc_reward,
-                    episode_length=episode_length,
-                    sensitivity=0.0, 
-                    test_exec_time=exec_time,
-                    run_time=time.time()
-                )
+                if self.logger is not None:
+                    episode_length = len(state_sequence)
+                    self.logger.log(
+                        input=state,
+                        oracle=oracle,
+                        reward=acc_reward,
+                        episode_length=episode_length,
+                        sensitivity=0.0, 
+                        test_exec_time=exec_time,
+                        run_time=time.time()
+                    )
+            except KeyboardInterrupt:
+                print("\n[!] User interrupted during Phase 1 (Strict). Stopping and saving...")
+                stop_fuzzing = True
+                break
 
         pbar_init.close()
 
-        print(f"[Info] Initialization finished. Total Init Executions: {total_init_executions} (Target Success: {n})")
-        print("[Info] Note: Initialization cost is NOT deducted from Fuzzing budget.")
+        if not stop_fuzzing:
+            print(f"[Info] Initialization finished. Total Init Executions: {total_init_executions} (Target Success: {n})")
+            print("[Info] Note: Initialization cost is NOT deducted from Fuzzing budget.")
 
-        fuzz_start_time = time.time()
-        fuzz_iterations = 0
+            fuzz_start_time = time.time()
+            fuzz_iterations = 0
 
-        target_budget_iter = kwargs.get('test_budget', None)
-        target_budget_time = kwargs.get('test_budget_in_seconds', None)
-        
-        if target_budget_time is not None:
-            self.config['test_budget_in_seconds'] = target_budget_time
-            pbar = tqdm.tqdm(total=target_budget_time, unit='s', desc="Fuzzing (Time)")
-        else:
-            self.config['test_budget'] = target_budget_iter
-            pbar = tqdm.tqdm(total=target_budget_iter, desc="Fuzzing (Iter)")
-
-        while True:
-            if target_budget_time:
-                current_fuzz_duration = time.time() - fuzz_start_time
-                if current_fuzz_duration > target_budget_time:
-                    print(f"[Info] Time budget reached: {current_fuzz_duration:.2f}s > {target_budget_time}s")
-                    break
-            elif target_budget_iter:
-                if fuzz_iterations >= target_budget_iter:
-                    print(f"[Info] Iteration budget reached: {fuzz_iterations} >= {target_budget_iter}")
-                    break
-
-            if len(pool.inputs) == 0:
-                print("[Error] Pool is empty, cannot fuzz.")
-                break
-
-            input, acc_reward_input = pool.select(self.rng)
+            target_budget_iter = kwargs.get('test_budget', None)
+            target_budget_time = kwargs.get('test_budget_in_seconds', None)
             
-            parent_key = self._get_key(input)
-            parent_gen = self.generation_map.get(parent_key, 0)
-            current_gen = parent_gen + 1
-            
-            mutant = self.mutate_validate(input, **kwargs)
-            acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(
-                mutant, policy, generation=current_gen, parent_input=input, phase="Phase2"
-            )
-            
-            fuzz_iterations += 1
-            
-            sensitivity = None
-            if oracle:
-                pool.add_crash(mutant)
-                self.generation_map[self._get_key(mutant)] = current_gen
-            elif acc_reward_mutant < acc_reward_input:
-                if local_sensitivity:
-                    sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
-                else:
-                    sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(
-                        mutant, acc_reward=acc_reward_mutant, policy=policy, generation=current_gen, parent_input=input, phase="Phase2", **kwargs
-                    )
-                
-                pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle)
-                self.generation_map[self._get_key(mutant)] = current_gen
-
-            if self.logger is not None:
-                episode_length = len(state_sequence)
-                self.logger.log(
-                    input=mutant,
-                    oracle=oracle,
-                    reward=acc_reward_mutant,
-                    episode_length=episode_length,
-                    sensitivity=sensitivity,
-                    test_exec_time=exec_time,
-                    run_time=time.time()
-                )
-
-            if target_budget_time:
-                current_elapsed_int = int(time.time() - fuzz_start_time)
-                increment = current_elapsed_int - pbar.n
-                if increment > 0:
-                    pbar.update(increment)
+            if target_budget_time is not None:
+                self.config['test_budget_in_seconds'] = target_budget_time
+                pbar = tqdm.tqdm(total=target_budget_time, unit='s', desc="Fuzzing (Time)")
             else:
-                pbar.update(1)
+                self.config['test_budget'] = target_budget_iter
+                pbar = tqdm.tqdm(total=target_budget_iter, desc="Fuzzing (Iter)")
 
-        pbar.close()
+            # [Modified] Phase 2 Loop with try-except for KeyboardInterrupt
+            try:
+                while True:
+                    if target_budget_time:
+                        current_fuzz_duration = time.time() - fuzz_start_time
+                        if current_fuzz_duration > target_budget_time:
+                            print(f"[Info] Time budget reached: {current_fuzz_duration:.2f}s > {target_budget_time}s")
+                            break
+                    elif target_budget_iter:
+                        if fuzz_iterations >= target_budget_iter:
+                            print(f"[Info] Iteration budget reached: {fuzz_iterations} >= {target_budget_iter}")
+                            break
+
+                    if len(pool.inputs) == 0:
+                        print("[Error] Pool is empty, cannot fuzz.")
+                        break
+
+                    input, acc_reward_input = pool.select(self.rng)
+                    
+                    parent_key = self._get_key(input)
+                    parent_gen = self.generation_map.get(parent_key, 0)
+                    current_gen = parent_gen + 1
+                    
+                    mutant = self.mutate_validate(input, **kwargs)
+                    acc_reward_mutant, oracle, success, state_sequence, exec_time = self.mdp(
+                        mutant, policy, generation=current_gen, parent_input=input, phase="Phase2"
+                    )
+                    
+                    fuzz_iterations += 1
+                    
+                    sensitivity = None
+                    if oracle:
+                        pool.add_crash(mutant)
+                        self.generation_map[self._get_key(mutant)] = current_gen
+                    elif acc_reward_mutant < acc_reward_input:
+                        if local_sensitivity:
+                            sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
+                        else:
+                            sensitivity, _acc_reward_mutant_copy, _none_oracle, _success_flag, _empty_list, _none_exec_time = self.sentivity(
+                                mutant, acc_reward=acc_reward_mutant, policy=policy, generation=current_gen, parent_input=input, phase="Phase2", **kwargs
+                            )
+                        
+                        pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle)
+                        self.generation_map[self._get_key(mutant)] = current_gen
+
+                    if self.logger is not None:
+                        episode_length = len(state_sequence)
+                        self.logger.log(
+                            input=mutant,
+                            oracle=oracle,
+                            reward=acc_reward_mutant,
+                            episode_length=episode_length,
+                            sensitivity=sensitivity,
+                            test_exec_time=exec_time,
+                            run_time=time.time()
+                        )
+
+                    if target_budget_time:
+                        current_elapsed_int = int(time.time() - fuzz_start_time)
+                        increment = current_elapsed_int - pbar.n
+                        if increment > 0:
+                            pbar.update(increment)
+                    else:
+                        pbar.update(1)
+            
+            except KeyboardInterrupt:
+                print("\n[!] User interrupted during Phase 2 (Fuzzing). Saving results and exiting...")
+            
+            pbar.close()
+
         if path is not None:
             self.save_configuration(path)
             np.savetxt(path + '_selected.txt', pool.selected, fmt='%1.0f', delimiter=',')
@@ -530,53 +560,58 @@ class Fuzzer():
         start_time = time.time()
         i = 0
         
-        while True:
-            if target_budget_time:
-                current_duration = time.time() - start_time
-                if current_duration > target_budget_time:
-                    print(f"[Info] Time budget reached: {current_duration:.2f}s > {target_budget_time}s")
+        # [Modified] Loop with try-except for KeyboardInterrupt
+        try:
+            while True:
+                if target_budget_time:
+                    current_duration = time.time() - start_time
+                    if current_duration > target_budget_time:
+                        print(f"[Info] Time budget reached: {current_duration:.2f}s > {target_budget_time}s")
+                        break
+                elif i >= n:
                     break
-            elif i >= n:
-                break
 
-            execute = True
-            random_input = self.sampling(1)
+                execute = True
+                random_input = self.sampling(1)
 
-            if check_redundant_input:
-                tmp = random_input.tolist()
-                if not (tmp in self.evaluated_solutions):
-                    self.evaluated_solutions.append(tmp)
-                else:
-                    execute = False
+                if check_redundant_input:
+                    tmp = random_input.tolist()
+                    if not (tmp in self.evaluated_solutions):
+                        self.evaluated_solutions.append(tmp)
+                    else:
+                        execute = False
 
-            if execute:
-                acc_reward, oracle, success, state_sequence, exec_time = self.mdp(random_input, policy, phase="RT")
-
-                coverage = 0.0
-                coverage_time = 0.0
-
-                episode_length = len(state_sequence)
-                self.logger.log(
-                    input=random_input,
-                    oracle=oracle,
-                    reward=acc_reward,
-                    episode_length=episode_length,
-                    test_exec_time=exec_time,
-                    coverage=coverage, 
-                    coverage_time=coverage_time,
-                    run_time=time.time()
-                )
-                
-                i += 1
-            
-            if target_budget_time:
-                current_elapsed_int = int(time.time() - start_time)
-                increment = current_elapsed_int - pbar.n
-                if increment > 0:
-                    pbar.update(increment)
-            else:
                 if execute:
-                    pbar.update(1)
+                    acc_reward, oracle, success, state_sequence, exec_time = self.mdp(random_input, policy, phase="RT")
+
+                    coverage = 0.0
+                    coverage_time = 0.0
+
+                    episode_length = len(state_sequence)
+                    self.logger.log(
+                        input=random_input,
+                        oracle=oracle,
+                        reward=acc_reward,
+                        episode_length=episode_length,
+                        test_exec_time=exec_time,
+                        coverage=coverage, 
+                        coverage_time=coverage_time,
+                        run_time=time.time()
+                    )
+                    
+                    i += 1
+                
+                if target_budget_time:
+                    current_elapsed_int = int(time.time() - start_time)
+                    increment = current_elapsed_int - pbar.n
+                    if increment > 0:
+                        pbar.update(increment)
+                else:
+                    if execute:
+                        pbar.update(1)
+        
+        except KeyboardInterrupt:
+             print("\n[!] User interrupted during Random Testing. Saving results and exiting...")
 
         pbar.close()
         self.save_configuration(path)

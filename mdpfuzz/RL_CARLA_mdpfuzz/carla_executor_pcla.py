@@ -256,7 +256,8 @@ class PCLAEnv:
 
 class PCLAExecutor(Executor):
     def __init__(self, sim_steps: int, env: PCLAEnv, num_vehicles: int = 10, out_dir: str = "./results", init_budget: int = 10) -> None:
-        super().__init__(sim_steps, 0)
+        # [修改 1] 将 env.seed 传递给父类，而不是传 0
+        super().__init__(sim_steps, env.seed)
         self.env = env
         self.num_vehicles = num_vehicles + 1 
         self.env_seed = env.seed
@@ -289,6 +290,9 @@ class PCLAExecutor(Executor):
             for t_idx, (s_idx, tgt_idx) in enumerate(self.benchmark_tasks):
                 for w_idx in range(4):
                     self.all_combinations.append((s_idx, tgt_idx, w_idx))
+            
+            # [修改 2] 在 shuffle 前设置全局 random 种子，确保任务顺序一致
+            random.seed(self.env_seed)
             random.shuffle(self.all_combinations)
         
         self.combo_iterator = iter(self.all_combinations)
@@ -303,7 +307,9 @@ class PCLAExecutor(Executor):
         if not self.csv_file.exists():
             self._init_csv()
             
-        self.rng = np.random.default_rng(seed=int(time.time()))
+        # [修改 3] 使用 env_seed 初始化生成器，确保 generate_input 的确定性
+        # 原代码: self.rng = np.random.default_rng(seed=int(time.time()))
+        self.rng = np.random.default_rng(seed=self.env_seed)
 
     def _init_csv(self):
         columns = [
@@ -466,7 +472,6 @@ class PCLAExecutor(Executor):
         episode_actions = []
         episode_rewards = []
         
-        # [修改点1]：在 try 之前初始化变量，防止 UnboundLocalError
         sequence = []
         start_time = time.time()
         cur_loc = None
@@ -484,7 +489,6 @@ class PCLAExecutor(Executor):
             task_id = f"fuzz_{self.phase2_count:04d}"
             run_seed = self.env_seed + 100000 + self.phase2_count
         
-        # [修改点2]：保持 wrapper_initialized 的初始化
         wrapper_initialized = False
 
         try:
@@ -560,15 +564,12 @@ class PCLAExecutor(Executor):
             collision_sensor.listen(collision_queue.put)
             sensor_list.append(collision_sensor)
             
-            # wrapper_initialized is already initialized to False at the start of the block
             try:
                 self.env.map_wrapper.init(self.env.client, self.env.world, self.env.map, vehicle)
                 wrapper_initialized = True
             except Exception:
                 pass
             
-            # [修改点3]：start_time 已在 try 外初始化，此处可重置以更精确（如果 reset_world 耗时较久）
-            # 或者，如果希望包含 reset_world 的耗时，可以不在此处重置。通常为了计算 episode 耗时，可以重置。
             start_time = time.time()
             prev_distance = ego_transform.location.distance(target_transform.location)
             prev_speed = np.array([0, 0, 0])
@@ -663,7 +664,6 @@ class PCLAExecutor(Executor):
             if route_file and os.path.exists(route_file): os.remove(route_file)
 
             current_global_time = time.time() - self.experiment_start_time
-            # [修改点4]：此时 start_time 肯定已被定义
             duration = time.time() - start_time
             
             avg_speed = 0.0
@@ -675,12 +675,10 @@ class PCLAExecutor(Executor):
 
             final_x = 0.0
             final_y = 0.0
-            # [修改点5]：安全地检查 cur_loc
             if cur_loc is not None:
                 final_x = cur_loc.x
                 final_y = cur_loc.y
 
-            # [修改点6]：安全地检查 sequence
             if len(sequence) > 0 and len(episode_actions) > 0:
                 min_len = min(len(sequence), len(episode_actions), len(episode_rewards))
                 traj_path = self.traj_dir / f"{task_id}.npz"
