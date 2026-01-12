@@ -10,14 +10,17 @@ from pathlib import Path
 from typing import Any, Optional
 import pygame 
 
+# 设置 SDL 视频驱动为 dummy，以支持无显示器运行
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
+# --- 路径设置 ---
 CURRENT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = CURRENT_DIR.parent
 
 if str(CURRENT_DIR) not in sys.path:
     sys.path.append(str(CURRENT_DIR))
 
+# 尝试添加 PCLA 路径
 pcla_path = ROOT_DIR / 'PCLA'
 if pcla_path.exists():
     if str(pcla_path) not in sys.path:
@@ -28,6 +31,7 @@ else:
         if str(pcla_inner_path) not in sys.path:
             sys.path.append(str(pcla_inner_path))
 
+# 导入必要的模块
 try:
     from bird_view.utils import map_utils
     try:
@@ -39,6 +43,7 @@ except ImportError:
 
 from mdpfuzz.executor import Executor
 
+# --- Monkey Patching map_utils ---
 def patch_map_utils():
     """Monkey patch map_utils to support headless pygame initialization."""
     @classmethod
@@ -81,11 +86,13 @@ def patch_map_utils():
 
 patch_map_utils()
 
+# --- Monkey Patching PCLA ---
 if not hasattr(PCLA, 'get_action_with_entropy'):
     def patched_get_action(self):
         return self.get_action(), 0.0
     PCLA.get_action_with_entropy = patched_get_action
 
+# --- 辅助函数 ---
 def get_full_state_str(input_vector):
     if input_vector is None:
         return "None"
@@ -254,9 +261,9 @@ class PCLAEnv:
             
         self.world.tick()
 
+# --- Executor Implementation ---
 class PCLAExecutor(Executor):
     def __init__(self, sim_steps: int, env: PCLAEnv, num_vehicles: int = 10, out_dir: str = "./results", init_budget: int = 10) -> None:
-        # [修改 1] 将 env.seed 传递给父类，而不是传 0
         super().__init__(sim_steps, env.seed)
         self.env = env
         self.num_vehicles = num_vehicles + 1 
@@ -287,11 +294,12 @@ class PCLAExecutor(Executor):
 
         self.all_combinations = []
         if self.benchmark_tasks:
+            # Generate all (start, target, weather) combinations
             for t_idx, (s_idx, tgt_idx) in enumerate(self.benchmark_tasks):
                 for w_idx in range(4):
                     self.all_combinations.append((s_idx, tgt_idx, w_idx))
             
-            # [修改 2] 在 shuffle 前设置全局 random 种子，确保任务顺序一致
+            # Initial Shuffle
             random.seed(self.env_seed)
             random.shuffle(self.all_combinations)
         
@@ -307,8 +315,6 @@ class PCLAExecutor(Executor):
         if not self.csv_file.exists():
             self._init_csv()
             
-        # [修改 3] 使用 env_seed 初始化生成器，确保 generate_input 的确定性
-        # 原代码: self.rng = np.random.default_rng(seed=int(time.time()))
         self.rng = np.random.default_rng(seed=self.env_seed)
 
     def _init_csv(self):
@@ -348,23 +354,63 @@ class PCLAExecutor(Executor):
         return tasks
 
     def _create_input_vector(self, s_idx, t_idx, weather_idx, rng):
+        """
+        Modified to include maximum attempt limit to prevent infinite loops (deadlocks) 
+        when generating random scenarios.
+        """
         start_vec = self.start_positions[s_idx].copy()
         indices = []
+        
+        # [Fix] Add attempt counter to prevent infinite loops
+        attempts = 0
+        max_attempts = 2000 
+        
         while len(indices) < self.num_vehicles - 1:
+            attempts += 1
             i = rng.choice(self.num_start_positions)
-            if (i != s_idx) and (i not in indices) and (np.linalg.norm(self.start_positions[i][:2] - start_vec[:2]) > 10.0):
+            
+            # Default constraint: not the ego vehicle
+            valid = (i != s_idx)
+            
+            if attempts < 1000:
+                # Strict mode: distinct position AND >10m distance from ego
+                valid = valid and (i not in indices) and (np.linalg.norm(self.start_positions[i][:2] - start_vec[:2]) > 10.0)
+            elif attempts < max_attempts:
+                # Relaxed mode: just distinct position
+                valid = valid and (i not in indices)
+            else:
+                # Panic mode: just ensure it's not the ego (allow overlap, let physics engine handle it)
+                pass 
+            
+            if valid:
                 indices.append(i)
         
         npc_vecs = [self.start_positions[i].copy() for i in indices]
         return np.hstack([np.array([weather_idx, t_idx, s_idx]), start_vec] + npc_vecs)
 
     def generate_input(self, rng: np.random.Generator) -> np.ndarray:
-        try:
-            s_idx, t_idx, w_idx = next(self.combo_iterator)
-        except StopIteration:
+        """
+        [MODIFIED] 
+        修改了任务生成逻辑：
+        1. 优先使用预设的 all_combinations (benchmark任务) 进行遍历。
+        2. 当预设任务遍历完 (StopIteration) 后，不再生成全随机坐标。
+        3. 而是从 self.all_combinations 中随机抽取一个任务（允许重复）。
+        """
+        if self.all_combinations:
+            try:
+                # 尝试获取下一个预设任务（保证前408个覆盖测试）
+                s_idx, t_idx, w_idx = next(self.combo_iterator)
+            except StopIteration:
+                # 遍历结束后，从列表中随机抽取一个组合
+                # 使用 rng 生成 0 到 len-1 之间的随机整数
+                idx = rng.integers(0, len(self.all_combinations))
+                s_idx, t_idx, w_idx = self.all_combinations[idx]
+        else:
+            # 如果没有加载到基准任务，则回退到完全随机
             s_idx = rng.choice(self.num_start_positions)
             t_idx = rng.choice(self.num_start_positions)
             w_idx = rng.integers(0, 4)
+            
         return self._create_input_vector(s_idx, t_idx, w_idx, rng)
 
     def generate_inputs(self, rng: np.random.Generator, n: int) -> np.ndarray:

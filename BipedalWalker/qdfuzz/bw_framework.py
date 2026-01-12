@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from stable_baselines3.common.base_class import BaseAlgorithm
-from typing import List
+from typing import List, Optional
 
 from bw_common import load_model, EXPERT_INDICES, execute_policy, get_edges
 from common import compute_cell, EXPERIMENT_SEEDS
@@ -21,7 +21,6 @@ class Framework():
 
         self.loaded = False
         self.has_init = False
-        # MODIFIED: 移除了 test_budget
         self.init_budget = None
 
         self.granularity = cell_granularity
@@ -36,7 +35,7 @@ class Framework():
 
         # data structure consists of a list of cells (list of integers) and a list of list of test results
         self.cells: list[list[int]] = []
-        # MODIFIED: a 6-tuple: (input, performance, oracle result, behavior, mutation_count, elapsed_time)
+        # a 6-tuple: (input, performance, oracle result, behavior, mutation_count, elapsed_time)
         self.cells_data: list[list[tuple[np.ndarray, float, bool, np.ndarray, int, float]]] = []
 
         self.config = {
@@ -63,7 +62,6 @@ class Framework():
     def save_configuration(self, filepath: str):
         '''
         Saves the configuration of the object.
-        This lets us know what BS has been used, which can be handy for organizing the results and to compare to MDPFuzz.
         '''
         if not filepath.endswith('config'):
             filepath += '_config'
@@ -83,14 +81,11 @@ class Framework():
     def save_state(self, filepath: str):
         '''
         Saves the current state of the framework to possibly resume execution.
-        MODIFIED: Saves the input vector as a JSON string to ensure correct CSV serialization.
         '''
         cell_dfs = []
         
         # 定义基础列名
         base_columns = ['score', 'is_faulty', 'cell_index'] + [f'cell{i}' for i in range(2)] + [f'behavior{i}' for i in range(2)]
-        
-        # MODIFIED: 定义包含 'input', 'mutation_count', 'elapsed_time' 的列
         all_columns = base_columns + ['input', 'mutation_count', 'elapsed_time']
 
         for i, cell_data in enumerate(self.cells_data):
@@ -118,15 +113,13 @@ class Framework():
                     )
                 )
         
-        if cell_dfs: # 确保列表不为空
+        if cell_dfs:
             pd.concat(cell_dfs, ignore_index=True).to_csv(f'{filepath}_data.csv', index=0)
             print(f"Saved state to {filepath}_data.csv")
         else:
             print("No data in cells_data to save.")
             
-        # saves the random state
         self.save_random_state(filepath)
-        # saves the configuration
         self.save_configuration(filepath)
 
 
@@ -151,7 +144,6 @@ class Framework():
     def load_state(self, filepath: str):
         '''
         Loads a state of an instance to resume testing and returns the number of test cases loaded.
-        MODIFIED: Loads the input vector from a JSON string column.
         '''
         df_fp = f'{filepath}_data.csv'
 
@@ -161,39 +153,30 @@ class Framework():
 
         df = pd.read_csv(df_fp)
 
-        # 确定单元格和行为列
         cell_cols = [c for c in df.columns.to_list() if c.startswith('cell') and 'index' not in c]
         behavior_cols = [c for c in df.columns.to_list() if c.startswith('behavior')]
 
         assert len(cell_cols) > 0, "CSV 中未找到 Cell 列"
         assert len(behavior_cols) > 0, "CSV 中未找到 Behavior 列"
 
-        # 检查是否存在 elapsed_time 和 mutation_count 列（为了兼容旧数据）
         has_elapsed_time = 'elapsed_time' in df.columns
         has_mutation_count = 'mutation_count' in df.columns
 
         for i, row in df.iterrows():
-            # MODIFIED: 从行中提取数据
             cell = row[cell_cols].astype(int).tolist()
             performance = row['score']
             is_faulty = row['is_faulty']
             behavior = row[behavior_cols].values
             
-            # MODIFIED: 使用 json.loads 将 'input' 列的字符串解析回列表,然后转为 numpy 数组
             try:
                 input_vec = np.array(json.loads(row['input']), dtype=int)
             except (json.JSONDecodeError, TypeError):
-                # 兼容可能的旧格式或出错情况
                 print(f"Warning: Failed to parse input at row {i}, skipping.")
                 continue
             
-            # MODIFIED: 加载 mutation_count
             mutation_count = int(row['mutation_count']) if has_mutation_count else 0
-
-            # MODIFIED: 加载 elapsed_time
             elapsed_time = float(row['elapsed_time']) if has_elapsed_time else 0.0
             
-            # MODIFIED: 调用新的 update_cell
             self.update_cell(cell, input_vec, performance, is_faulty, np.array(behavior), mutation_count, elapsed_time)
 
         self.load_random_state(filepath)
@@ -205,13 +188,10 @@ class Framework():
     def select_input(self, index: int):
         '''
         Samples from the indexed cell the next input.
-        MODIFIED: Returns both input and its mutation_count.
+        Returns both input and its mutation_count.
         '''
         input_index: int = self.rng.integers(0, len(self.cells_data[index]))
-        
         selected_data = self.cells_data[index][input_index]
-        # 返回 input (索引 0) 和 mutation_count (索引 4)
-        # 索引 5 是 elapsed_time，不需要在这里返回
         return selected_data[0], selected_data[4]
 
 
@@ -223,21 +203,15 @@ class Framework():
     def update_cell(self, cell: List[int], input: np.ndarray, performance: float, is_faulty: bool, behavior: np.ndarray, mutation_count: int, elapsed_time: float):
         '''
         Records the execution result to the corresponding cell.
-        MODIFIED: Accepts and stores mutation_count and elapsed_time.
-        It returns the index of the cell updated.
         '''
         index = None
         try:
-            # index of the cell to update
             index = self.cells.index(cell)
-            # MODIFIED: 存储 6 元素元组
             self.cells_data[index].append((input, performance, is_faulty, behavior, mutation_count, elapsed_time))
         except ValueError:
             self.cells.append(cell)
-            # MODIFIED: 存储 6 元素元组
             self.cells_data.append([(input, performance, is_faulty, behavior, mutation_count, elapsed_time)])
         finally:
-            # sanity checks
             assert len(self.cells) == len(self.cells_data), 'inconsistent cells and cells_data lists!'
             self.last_cell_updated = index if index is not None else (len(self.cells) - 1)
         return self.last_cell_updated
@@ -253,27 +227,45 @@ class Framework():
         return mutated_input
 
 
+    def _check_budget(self, start_time: float, current_executions: int, time_budget_hours: Optional[float], execution_budget: Optional[int]) -> bool:
+        """
+        Helper to check if any budget is exceeded. Returns True if budget is NOT reached (continue), False if reached (stop).
+        """
+        if execution_budget is not None and current_executions >= execution_budget:
+            print(f"Execution budget ({execution_budget}) reached.")
+            return False
+        
+        if time_budget_hours is not None:
+            elapsed_seconds = time.time() - start_time
+            if elapsed_seconds >= time_budget_hours * 3600:
+                print(f"Time budget ({time_budget_hours}h) reached.")
+                return False
+        
+        return True
+
+
     def test_policy(self, model: BaseAlgorithm,
                     env_seed: int,
-                    time_budget_hours: int, # MODIFIED: 接收小时预算
                     init_budget: int,
                     results_fp: str,
+                    time_budget_hours: Optional[float] = None, # 可选时间
+                    execution_budget: Optional[int] = None,    # 可选次数
                     disable_pbar: bool = False):
 
-        # MODIFIED: 移除了 test_budget
+        if time_budget_hours is None and execution_budget is None:
+            raise ValueError("At least one budget (time_budget_hours or execution_budget) must be provided.")
+
         self.config['time_budget_hours'] = time_budget_hours
+        self.config['execution_budget'] = execution_budget
         self.init_budget = init_budget
         self.config['init_budget'] = self.init_budget
-
         self.config['env_seed'] = env_seed
-
 
         if os.path.isdir(results_fp):
             filepath = f'{results_fp}{self.creation_time}' if results_fp.endswith('/') else f'{results_fp}/{self.creation_time}'
         else:
             filepath = results_fp
 
-        # 确保目录存在
         if os.path.dirname(filepath):
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
@@ -283,27 +275,25 @@ class Framework():
         cells_buffer = open(f'{filepath}_cells.txt', 'w', buffering=1)
         logs_buffer = open(f'{filepath}_logs.txt', 'w', buffering=1)
 
-        # MODIFIED: 
-        time_budget_seconds = time_budget_hours * 3600
-        # MODIFIED: 移除了 executions_budget
-        print(f'Time budget of {time_budget_hours} hours ({(time_budget_seconds / 60):.2f} minutes).')
+        print(f'Starting test_policy. Time Budget: {time_budget_hours}h, Execution Budget: {execution_budget}')
 
         inputs: List[np.ndarray] = []
         behaviors = []
         final_states: List[np.ndarray] = []
         acc_rewards: List[float] = []
         oracles: List[bool] = []
-        # MODIFIED: 在 init 循环之前启动总计时器
+        
         testing_start_time = time.time()
         execution_times = []
+        n_executions = 0 
 
         print("Starting initialization phase...")
         for _ in tqdm.tqdm(range(init_budget), disable=disable_pbar):
-            # MODIFIED: 添加时间检查以允许提前退出 init
-            if (time.time() - testing_start_time > time_budget_seconds):
-                print("Time budget reached during initialization. Stopping.")
+            # 检查预算
+            if not self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
+                print("Budget reached during initialization.")
                 break
-                
+
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
 
             t0 = time.time()
@@ -316,28 +306,26 @@ class Framework():
             final_states.append(fs)
             acc_rewards.append(episode_reward)
             oracles.append(oracle)
+            n_executions += 1
         
-        # 确保即使 init 提前停止，代码也能继续
         if not inputs:
-            print("No inputs generated, time budget may be too small.")
+            print("No inputs generated.")
             behaviors_buffer.close()
             inputs_buffer.close()
             cells_buffer.close()
             logs_buffer.close()
             final_states_buffer.close()
-            return # 提前退出
+            return
 
         behaviors = np.array(behaviors)
 
         self.xedges, self.yedges = get_edges(env_seed, self.descriptors)
-
         self.config['xedges'] = list(self.xedges)
         self.config['yedges'] = list(self.xedges)
 
-        for i in range(len(inputs)): # MODIFIED: 使用 len(inputs) 应对提前退出的情况
+        for i in range(len(inputs)): 
             behavior = behaviors[i]
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
-            # MODIFIED: 初始种子, mutation_count = 0, elapsed_time = 0.0 (表示在 Fuzzing Loop 之前)
             mutated_input_index = self.update_cell(cell, inputs[i], acc_rewards[i], oracles[i], behavior, 0, 0.0)
             print(f'episode_reward: {acc_rewards[i]}, oracle: {float(oracles[i])}, cell_selected_index: -1, cell_updated_index: {mutated_input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, inputs[i].reshape(1, -1), fmt='%1.0f', delimiter=',')
@@ -345,22 +333,20 @@ class Framework():
             np.savetxt(final_states_buffer, final_states[i].reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
 
-        # MODIFIED: 移除了 start_time, nb_executions
-        current_time = time.time()
-        # MODIFIED: 移除了 pbar 的 total
-        pbar = tqdm.tqdm(disable=disable_pbar)
-        pbar.set_description(f"Fuzzing loop (running for {time_budget_hours}h total)")
+        # 配置进度条
+        if execution_budget is not None:
+            pbar = tqdm.tqdm(total=execution_budget, initial=n_executions, disable=disable_pbar)
+            pbar.set_description(f"Fuzzing (max {execution_budget} execs)")
+        else:
+            pbar = tqdm.tqdm(disable=disable_pbar)
+            pbar.set_description(f"Fuzzing (max {time_budget_hours}h)")
 
         print("Starting fuzzing loop...")
-        
-        # MODIFIED: 记录主循环开始时间
         fuzzing_start_time = time.time()
 
-        # MODIFIED: 循环条件只检查总时间
-        while (current_time - testing_start_time < time_budget_seconds):
+        while self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
             cell_index = self.select_cell()
             self.last_cell_selected = cell_index
-            # MODIFIED: select_input 现在返回 input 和 count
             input, parent_mutation_count = self.select_input(cell_index)
 
             mutated_input = self.mutate(input)
@@ -368,12 +354,11 @@ class Framework():
             episode_reward, oracle, behavior, fs, _ = execute_policy(mutated_input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
-            cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
-
-            # MODIFIED: 传递新的 count (父代 + 1)
-            new_mutation_count = parent_mutation_count + 1
             
-            # MODIFIED: 计算距离主循环开始的时间
+            n_executions += 1 
+
+            cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
+            new_mutation_count = parent_mutation_count + 1
             elapsed_time = time.time() - fuzzing_start_time
             
             mutated_input_index = self.update_cell(cell, mutated_input, episode_reward, oracle, behavior, new_mutation_count, elapsed_time)
@@ -382,18 +367,17 @@ class Framework():
             np.savetxt(behaviors_buffer, behavior.reshape(1, -1), delimiter=',')
             np.savetxt(final_states_buffer, fs.reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
-            current_time = time.time()
-            # MODIFIED: 移除了 nb_executions += 1
+            
             pbar.update(1)
 
-        print("Time budget reached. Stopping test_policy.")
+        print("Stopping test_policy.")
         testing_end_time = time.time()
         self.config['testing_start_time'] = testing_start_time
         self.config['testing_end_time'] = testing_end_time
         self.config['testing_time'] = testing_end_time - testing_start_time
         self.config['total_execution_time'] = sum(execution_times)
-        # MODIFIED: 也可以记录 fuzzing 开始时间
         self.config['fuzzing_start_time'] = fuzzing_start_time
+        self.config['total_executions'] = n_executions
 
         pbar.close()
         behaviors_buffer.close()
@@ -406,21 +390,24 @@ class Framework():
 
     def random_testing(self, model: BaseAlgorithm,
                     env_seed: int,
-                    time_budget_hours: int, # MODIFIED: 接收小时预算
                     results_fp: str,
+                    time_budget_hours: Optional[float] = None,
+                    execution_budget: Optional[int] = None,
                     disable_pbar: bool = False):
         '''Random testing loop baseline.'''
-        # MODIFIED:
-        self.config['time_budget_hours'] = time_budget_hours
-        self.config['env_seed'] = env_seed
+        
+        if time_budget_hours is None and execution_budget is None:
+            raise ValueError("At least one budget must be provided.")
 
+        self.config['time_budget_hours'] = time_budget_hours
+        self.config['execution_budget'] = execution_budget
+        self.config['env_seed'] = env_seed
 
         if os.path.isdir(results_fp):
             filepath = f'{results_fp}{self.creation_time}' if results_fp.endswith('/') else f'{results_fp}/{self.creation_time}'
         else:
             filepath = results_fp
         
-        # 确保目录存在
         if os.path.dirname(filepath):
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
@@ -430,53 +417,49 @@ class Framework():
         cells_buffer = open(f'{filepath}_cells.txt', 'w', buffering=1)
         logs_buffer = open(f'{filepath}_logs.txt', 'w', buffering=1)
 
-        # MODIFIED:
-        time_budget_seconds = time_budget_hours * 3600
-        print(f'Time budget of {time_budget_hours} hours ({(time_budget_seconds / 60):.2f} minutes).')
-
+        print(f'Starting random_testing. Time Budget: {time_budget_hours}h, Execution Budget: {execution_budget}')
 
         self.xedges, self.yedges = get_edges(env_seed, self.descriptors)
-
         self.config['xedges'] = list(self.xedges)
         self.config['yedges'] = list(self.xedges)
 
         execution_times = []
-
+        n_executions = 0 
         start_time = time.time()
-        current_time = time.time()
-        # MODIFIED: 移除了 nb_executions
-        pbar = tqdm.tqdm(disable=disable_pbar) # MODIFIED: 移除了 total
-        pbar.set_description(f"Random testing (running for {time_budget_hours}h total)")
+        
+        if execution_budget is not None:
+            pbar = tqdm.tqdm(total=execution_budget, disable=disable_pbar)
+        else:
+            pbar = tqdm.tqdm(disable=disable_pbar)
 
-        # MODIFIED: 循环条件只检查总时间
-        while (current_time - start_time < time_budget_seconds):
+        while self._check_budget(start_time, n_executions, time_budget_hours, execution_budget):
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
             t0 = time.time()
             episode_reward, oracle, behavior, fs, _ = execute_policy(input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
-            cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
+            
+            n_executions += 1 
 
-            # MODIFIED: 计算时间
+            cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
             elapsed_time = time.time() - start_time
 
-            # MODIFIED: 随机测试, mutation_count = 0
             input_index = self.update_cell(cell, input, episode_reward, oracle, behavior, 0, elapsed_time)
             print(f'episode_reward: {episode_reward}, oracle: {float(oracle)}, cell_selected_index: -1, cell_updated_index: {input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, input.reshape(1, -1), fmt='%1.0f', delimiter=',')
             np.savetxt(behaviors_buffer, behavior.reshape(1, -1), delimiter=',')
             np.savetxt(final_states_buffer, fs.reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
-            current_time = time.time()
-            # MODIFIED: 移除了 nb_executions += 1
+            
             pbar.update(1)
 
-        print("Time budget reached. Stopping random_testing.")
+        print("Stopping random_testing.")
         testing_end_time = time.time()
         self.config['testing_start_time'] = start_time
         self.config['testing_end_time'] = testing_end_time
         self.config['testing_time'] = testing_end_time - start_time
         self.config['total_execution_time'] = sum(execution_times)
+        self.config['total_executions'] = n_executions
 
         pbar.close()
         behaviors_buffer.close()
@@ -490,17 +473,20 @@ class Framework():
     def novelty_search(self, model: BaseAlgorithm,
                     env_seed: int,
                     pop_size: int,
-                    # MODIFIED: 移除了 nb_iterations
                     k: int,
                     nov_threshold: float,
-                    time_budget_hours: int, # MODIFIED: 接收小时预算
                     results_fp: str,
+                    time_budget_hours: Optional[float] = None,
+                    execution_budget: Optional[int] = None,
                     disable_pbar: bool = False):
         '''Does not use cached data anymore.'''
 
+        if time_budget_hours is None and execution_budget is None:
+            raise ValueError("At least one budget must be provided.")
+
         self.config['pop_size'] = pop_size
-        # MODIFIED: 移除了 nb_iterations 和 test_budget
         self.config['time_budget_hours'] = time_budget_hours
+        self.config['execution_budget'] = execution_budget
         self.config['env_seed'] = env_seed
         self.config['nov_threshold'] = nov_threshold
         self.config['k'] = k
@@ -510,82 +496,68 @@ class Framework():
         else:
             filepath = results_fp
         
-        # 确保目录存在
         if os.path.dirname(filepath):
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
-        # to collect the data during the search, i.e., every model execution
         behaviors_buffer = open(f'{filepath}_behaviors.txt', 'w', buffering=1)
         final_states_buffer = open(f'{filepath}_final_states.txt', 'w', buffering=1)
         inputs_buffer = open(f'{filepath}_inputs.txt', 'w', buffering=1)
         cells_buffer = open(f'{filepath}_cells.txt', 'w', buffering=1)
         logs_buffer = open(f'{filepath}_logs.txt', 'w', buffering=1)
 
-        # MODIFIED: 添加总计时器
         testing_start_time = time.time()
-        time_budget_seconds = time_budget_hours * 3600
-        print(f'Time budget of {time_budget_hours} hours ({(time_budget_seconds / 60):.2f} minutes).')
+        n_executions = 0
+        
+        print(f'Starting novelty_search. Time Budget: {time_budget_hours}h, Execution Budget: {execution_budget}')
 
         self.xedges, self.yedges = get_edges(env_seed, self.descriptors)
-
         self.config['xedges'] = list(self.xedges)
         self.config['yedges'] = list(self.xedges)
 
-        # helpers 1: MODIFIED: 接收 mutation_count 和 elapsed_time
         def record(input: np.ndarray, reward: float, oracle: bool, behavior: np.ndarray, final_state: np.ndarray, mutation_count: int, elapsed_time: float) -> None:
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
-            # MODIFIED: 传递 mutation_count 和 elapsed_time
             updated_cell_index = self.update_cell(cell, input, reward, oracle, behavior, mutation_count, elapsed_time)
-            # parent's cell is not logged
             print(f'episode_reward: {reward}, oracle: {float(oracle)}, cell_updated_index: {updated_cell_index}, nb_cells: {len(self.cells)}', file=logs_buffer)
             np.savetxt(inputs_buffer, input.reshape(1, -1), fmt='%1.0f', delimiter=',')
             np.savetxt(behaviors_buffer, behavior.reshape(1, -1), delimiter=',')
             np.savetxt(final_states_buffer, final_state.reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
         
-        # helpers 2: MODIFIED: 接收和传递 mutation_counts, 计算时间
         def evaluate(individuals: np.ndarray, mutation_counts: np.ndarray, loop_start_time: float = None) -> np.ndarray:
+            nonlocal n_executions 
             behaviors = []
             for i, ind in enumerate(individuals):
-                # MODIFIED: 在执行前检查时间
-                if (time.time() - testing_start_time > time_budget_seconds):
-                    print("Time budget reached during evaluation. Stopping.")
-                    break # 停止 evaluate 循环
+                if not self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
+                    break 
                 
                 r, o, b, fs, _ = execute_policy(ind, model, env_seed, self.descriptors, 300)
+                n_executions += 1
                 
-                # MODIFIED: 计算时间
                 if loop_start_time is None:
-                    e_time = 0.0 # 初始化阶段
+                    e_time = 0.0
                 else:
                     e_time = time.time() - loop_start_time
 
-                # MODIFIED: 传递 mutation_counts[i] 和 e_time
                 record(ind, r, o, b, fs, mutation_counts[i], e_time)
                 behaviors.append(b)
             return np.array(behaviors)
         
-        # helper 3: mutates a batch of individuals
         def mutate(inputs: np.ndarray):
             mutants = [self.mutate(input) for input in inputs]
             return np.array(mutants)
 
-        # ns logs
         ns_logs_buffer = open(f'{filepath}_ns_logs.txt', 'w', buffering=1)
         nov_scores_buffer = open(f'{filepath}_nov_scores.txt', 'w', buffering=1)
-        # initial population and novelty archive
+        
         from novelty_search import NoveltyArchive
         print("Starting initial population evaluation...")
         pop = self.rng.integers(low=1, high=4, size=(pop_size, 15))
-        # MODIFIED: 创建初始 counts
         pop_mutation_counts = np.zeros(pop_size, dtype=int)
         
-        # MODIFIED: 传递 counts, loop_start_time=None
         pop_behaviors = evaluate(pop, pop_mutation_counts, loop_start_time=None)
         
-        # 检查 evaluate 是否因时间耗尽而提前退出
-        if not pop_behaviors.any():
-             print("Time budget reached before initial population could be evaluated.")
+        if not pop_behaviors.any() or not self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
+             print("Budget reached or no behaviors generated.")
              ns_logs_buffer.close()
              nov_scores_buffer.close()
              behaviors_buffer.close()
@@ -593,59 +565,50 @@ class Framework():
              cells_buffer.close()
              logs_buffer.close()
              final_states_buffer.close()
-             return # 提前退出
+             return
 
         nov_archive = NoveltyArchive(pop_behaviors, k, nov_threshold)
         pop_nov_scores = nov_archive.score(pop_behaviors)
         [np.savetxt(nov_scores_buffer, s.reshape(1, -1), delimiter=',') for s in pop_nov_scores]
-        # novelty search loop
+        
         print(f'iteration: 0, archive_size: {nov_archive.size()}, archive_sparseness: {nov_archive.archive_sparseness():0.5f}', file=ns_logs_buffer)
         
-        # MODIFIED: 更改为 while 循环
         i = 1
-        pbar = tqdm.tqdm(disable=disable_pbar)
-        pbar.set_description(f"Novelty Search loop (running for {time_budget_hours}h total)")
+        if execution_budget is not None:
+             pbar = tqdm.tqdm(total=execution_budget, initial=n_executions, disable=disable_pbar)
+        else:
+             pbar = tqdm.tqdm(disable=disable_pbar)
 
         print("Starting Novelty Search loop...")
-        
-        # MODIFIED: 记录主循环开始时间
         ns_start_time = time.time()
 
-        while (time.time() - testing_start_time < time_budget_seconds):
-            # 1. generates offspring
+        while self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
             offspring = mutate(pop)
-            # MODIFIED: 创建后代的 counts
             offspring_mutation_counts = pop_mutation_counts + 1
             
-            # 1. evaluates the offspring
-            # MODIFIED: 传递 counts 和 start_time
+            prev_executions = n_executions
             offspring_behaviors = evaluate(offspring, offspring_mutation_counts, loop_start_time=ns_start_time)
+            executions_diff = n_executions - prev_executions
+            pbar.update(executions_diff)
             
-            # 检查 evaluate 是否耗尽了时间
             if not offspring_behaviors.any():
-                print("Time budget reached during offspring evaluation. Breaking loop.")
+                print("Budget reached during offspring evaluation.")
                 break
 
-            # 1. novelty scores of the offspring w.r.t the archive and the population
             offspring_nov_scores = nov_archive.score(offspring_behaviors, pop_behaviors)
 
-            # 2. selects the most novel individuals to form the new population
-            joined_pop = np.vstack([pop, offspring])
+            joined_pop = np.vstack([pop, offspring[:len(offspring_behaviors)]]) 
             joined_scores = np.hstack([pop_nov_scores, offspring_nov_scores])
-            # MODIFIED: 合并 counts
-            joined_mutation_counts = np.hstack([pop_mutation_counts, offspring_mutation_counts])
+            joined_mutation_counts = np.hstack([pop_mutation_counts, offspring_mutation_counts[:len(offspring_behaviors)]])
             
             median_score = np.median(joined_scores)
 
-            # 3. updates the archive
             _updated, _offspring_indices = nov_archive.update3(offspring_behaviors)
 
-            # 4. updates the population and their data
             mask = (joined_scores >= median_score)
 
             pop = joined_pop[mask].copy()
             pop_behaviors = np.vstack([pop_behaviors, offspring_behaviors])[mask]
-            # MODIFIED: 筛选 counts
             pop_mutation_counts = joined_mutation_counts[mask]
             
             pop_nov_scores = nov_archive.score(pop_behaviors)
@@ -653,17 +616,14 @@ class Framework():
                 pop = pop[:pop_size]
                 pop_behaviors = pop_behaviors[:pop_size]
                 pop_nov_scores = pop_nov_scores[:pop_size]
-                # MODIFIED: 截断 counts
                 pop_mutation_counts = pop_mutation_counts[:pop_size]
 
-            # (asserts ...)
             [np.savetxt(nov_scores_buffer, s.reshape(1, -1), delimiter=',') for s in pop_nov_scores]
             print(f'iteration: {i}, archive_size: {nov_archive.size()}, archive_sparseness: {nov_archive.archive_sparseness():0.5f}', file=ns_logs_buffer)
             
             i += 1
-            pbar.update(1)
 
-        print("Time budget reached. Stopping novelty_search.")
+        print("Stopping novelty_search.")
         pbar.close()
         ns_logs_buffer.close()
         nov_scores_buffer.close()
@@ -685,17 +645,11 @@ class MAPElitesFramework(Framework):
 
     def select_input(self, index: int):
         '''
-        MODIFIED: Returns both input and its mutation_count.
+        Returns both input and its mutation_count.
         '''
         scores = list(map(lambda x: x[1], self.cells_data[index]))
-        # the best performing input is one whose score is the minimum, since it corresponds to the accumulated reward.
         best_performer_index = int(np.argmin(scores))
-        
-        # MODIFIED: 获取完整的元组
-        # 结构: (input, score, is_faulty, behavior, mutation_count, elapsed_time)
         selected_data = self.cells_data[index][best_performer_index]
-        
-        # 返回 input (索引 0) 和 mutation_count (索引 4)
         return selected_data[0], selected_data[4]
 
 
@@ -705,16 +659,18 @@ if __name__ == '__main__':
     env_seed = 0
     model = load_model()
 
-    # experimental parameters
-    # MODIFIED: 定义时间预算
-    time_budget_hours = 12
+    # --- 配置区域 ---
+    # 你可以在这里同时设置时间预算(小时)和执行次数预算。
+    # 程序会在任一限制达到时停止。设置为 None 则忽略该限制。
     
-    # MODIFIED: test_policy 仍需要 init_budget
+    TIME_BUDGET_HOURS = None       # 例如: 12 小时
+    EXECUTION_BUDGET = 5000     # 例如: 20000 次执行
+    
+    # ----------------
+    
     init_budget = 1000
-    test_budget=5000
     cell_granularity = 50
 
-    # MODIFIED: novelty_search 仍需要这些参数
     population_size = 100
     k = 3
     novelty_threshold = 0.005
@@ -726,20 +682,17 @@ if __name__ == '__main__':
     for seed in EXPERIMENT_SEEDS:
         print(f'Seed {seed} starts.')
         for expert_indices in EXPERT_INDICES:
-            print(f"--- Running MAP-Elites for {time_budget_hours} hours ---")
+            print(f"--- Running MAP-Elites ---")
             f = MAPElitesFramework(seed, cell_granularity, descriptors=expert_indices, name='MAP-Elites')
-            # MODIFIED: 更新了方法调用
-            f.test_policy(model, env_seed, test_budget, init_budget, results_fp)
             
-            #print(f"--- Running Novelty Search for {time_budget_hours} hours ---")
-            #f = Framework(seed, cell_granularity, descriptors=expert_indices, name=f'Novelty Search')
-            # MODIFIED: 更新了方法调用
-            #f.novelty_search(
-                #model, env_seed,
-                #population_size,
-                #k,
-                #novelty_threshold,
-                #time_budget_hours,
-                #results_fp
-            #)
+            # 使用新的参数接口调用
+            f.test_policy(
+                model=model, 
+                env_seed=env_seed, 
+                init_budget=init_budget, 
+                results_fp=results_fp,
+                time_budget_hours=TIME_BUDGET_HOURS,    # 传入时间预算
+                execution_budget=EXECUTION_BUDGET       # 传入执行预算
+            )
+            
         print(f'Experts done.')

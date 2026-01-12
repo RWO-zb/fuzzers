@@ -560,7 +560,7 @@ class Fuzzer():
         start_time = time.time()
         i = 0
         
-        # [Modified] Loop with try-except for KeyboardInterrupt
+        # [Modified] Loop with try-except for KeyboardInterrupt and heartbeat logs
         try:
             while True:
                 if target_budget_time:
@@ -570,6 +570,9 @@ class Fuzzer():
                         break
                 elif i >= n:
                     break
+                
+                # [Fix] Added debug logging to confirm liveness
+                # print(f"[Debug] Iteration {i}: Generating input...", end='\r')
 
                 execute = True
                 random_input = self.sampling(1)
@@ -582,6 +585,9 @@ class Fuzzer():
                         execute = False
 
                 if execute:
+                    # [Fix] Added debug logging to confirm liveness
+                    # print(f"[Debug] Iteration {i}: Executing policy...", end='\r')
+
                     acc_reward, oracle, success, state_sequence, exec_time = self.mdp(random_input, policy, phase="RT")
 
                     coverage = 0.0
@@ -600,6 +606,10 @@ class Fuzzer():
                     )
                     
                     i += 1
+                    
+                    # [Fix] Periodic heartbeat log to confirm process is not frozen
+                    if i % 100 == 0:
+                        print(f"[Info] Random Testing alive. Completed {i} iterations.")
                 
                 if target_budget_time:
                     current_elapsed_int = int(time.time() - start_time)
