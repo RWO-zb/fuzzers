@@ -5,7 +5,7 @@ import numpy as np
 import sys
 from fuzz.executor import Executor
 from sb3_contrib import TQC
-from typing import Any, Tuple
+from typing import Any, Tuple, List
 
 
 class BipedalWalkerExecutor(Executor):
@@ -29,6 +29,7 @@ class BipedalWalkerExecutor(Executor):
 
 
     def load_policy(self):
+        # 请根据实际路径调整
         return TQC.load(
             "D:\\code\\fuzzers\\BipedalWalker\\rl-trained-agents\\tqc\\BipedalWalkerHardcore-v3_1\\BipedalWalkerHardcore-v3.zip",
             device='cpu',
@@ -36,20 +37,21 @@ class BipedalWalkerExecutor(Executor):
             kwargs={'seed': 0, 'buffer_size': 1})
 
 
-    def execute_policy(self, input: np.ndarray, policy: Any) -> Tuple[float, bool, np.ndarray, float, float, float]:
+    def execute_policy(self, input: np.ndarray, policy: Any) -> Tuple[float, bool, np.ndarray, float, float, float, List]:
         '''
         Executes the model and returns the trajectory data and behaviour metrics.
-        Returns: (acc_reward, is_crash, obs_seq, exec_time, bd_dist, bd_mean_angle)
+        Returns: (acc_reward, is_crash, obs_seq, exec_time, bd_dist, bd_mean_angle, transitions)
         '''
         env = gym.make('BipedalWalkerHardcore-v3')
         env.seed(self.env_seed)
         obs_seq = []
+        transitions = [] 
+        
         acc_reward = 0.0
 
         obs = env.reset(input)
         state = None
         
-        # --- Metrics Calculation Setup (新增) ---
         total_x_pos_sum = 0.0
         total_abs_angle_sum = 0.0
         episode_steps = 0
@@ -57,10 +59,11 @@ class BipedalWalkerExecutor(Executor):
         t0 = time.time()
         for t in range(self.sim_steps):
             action, state = policy.predict(obs, state=state, deterministic=True)
-            obs, reward, done, info = env.step(action)
+            next_obs, reward, done, info = env.step(action)
             
-            # --- Capture internal state for BD metrics (新增) ---
-            # 尝试获取 unwrapped 环境以访问 Box2D 的 hull 对象
+            # 记录 Transition
+            transitions.append((obs.copy(), action[0].copy() if isinstance(action, np.ndarray) else action, reward, next_obs.copy(), done))
+
             real_env = env.unwrapped
             if hasattr(real_env, 'hull'):
                 total_x_pos_sum += real_env.hull.position[0]
@@ -69,17 +72,18 @@ class BipedalWalkerExecutor(Executor):
             episode_steps += 1
             acc_reward += reward
             obs_seq.append(obs)
+            
+            obs = next_obs
+            
             if done:
                 break
 
         env.close()
         
-        # --- Finalize Metrics (新增) ---
         bd_dist = total_x_pos_sum / max(1, episode_steps)
         bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
 
-        # 返回值增加了最后两项
-        return acc_reward, (reward == -100), np.array(obs_seq), time.time() - t0, bd_dist, bd_mean_angle
+        return acc_reward, (reward == -100), np.array(obs_seq), time.time() - t0, bd_dist, bd_mean_angle, transitions
 
 
 if __name__ == '__main__':
@@ -87,9 +91,7 @@ if __name__ == '__main__':
     executor = BipedalWalkerExecutor(300, 0)
     input = executor.generate_input(rng)
     policy = executor.load_policy()
-    # 更新了解包逻辑
-    reward, oracle, sequence, exec_time, bd_d, bd_a = executor.execute_policy(input, policy)
+    reward, oracle, sequence, exec_time, bd_d, bd_a, trans = executor.execute_policy(input, policy)
     print(f"Input: {input}")
     print(f"Reward: {reward}, Crash: {oracle}, Time: {exec_time:.4f}")
-    print(f"BD Dist: {bd_d:.4f}, BD Angle: {bd_a:.4f}")
-    print(f"Seq shape: {sequence.shape}")
+    print(f"Transitions: {len(trans)}")

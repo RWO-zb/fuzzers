@@ -9,6 +9,8 @@ import pickle
 import yaml
 import numpy as np
 import gym
+import torch
+import random
 from datetime import datetime
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecEnvWrapper
@@ -17,14 +19,103 @@ from utils.exp_manager import ExperimentManager
 from utils.utils import StoreDict
 from fuzz.cure_fuzz import CureFuzz
 
+# ==========================================
+# [辅助函数] TodyNet 严格采样
+# ==========================================
+def process_episode_data(sequence, label, window_size):
+    seq_len = len(sequence)
+    if seq_len < window_size:
+        return None, None
+    
+    seq_array = np.array(sequence) 
+    windows = []
+    labels = []
+
+    if label == 0:
+        # Success: Random 1
+        max_idx = seq_len - window_size
+        rand_idx = random.randint(0, max_idx)
+        win = seq_array[rand_idx : rand_idx + window_size]
+        win = win.transpose() 
+        windows.append(win)
+        labels.append(0)
+    else:
+        # Failure: Last 1
+        win = seq_array[-window_size:] 
+        win = win.transpose()
+        windows.append(win)
+        labels.append(1)
+        
+    return np.array(windows), np.array(labels)
+
+# ==========================================
+# [辅助函数] TodyNet 平衡与截断
+# ==========================================
+def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size, target_total=3000, target_crash_ratio=0.30):
+    if not X_list:
+        return
+    
+    print(f"\n[TodyNet Data] Processing balancing to {target_total} samples (Target Crash Ratio: {target_crash_ratio:.0%})...")
+    X_all = np.concatenate(X_list, axis=0)
+    y_all = np.concatenate(y_list, axis=0)
+    
+    indices_fail = np.where(y_all == 1)[0]
+    indices_succ = np.where(y_all == 0)[0]
+    
+    # 计算目标数量
+    # 总数 3000 -> Crash 900, Success 2100
+    target_n_fail = int(target_total * target_crash_ratio)
+    target_n_succ = target_total - target_n_fail
+    
+    print(f"  Raw Collected: Fail={len(indices_fail)}, Success={len(indices_succ)}")
+    print(f"  Target: Fail={target_n_fail}, Success={target_n_succ}")
+
+    # 1. 采样 Crash
+    if len(indices_fail) >= target_n_fail:
+        final_fail = np.random.choice(indices_fail, size=target_n_fail, replace=False)
+    else:
+        print(f"  [Warning] Not enough crash samples! Keeping all {len(indices_fail)}.")
+        final_fail = indices_fail
+
+    # 2. 采样 Success
+    if len(indices_succ) >= target_n_succ:
+        final_succ = np.random.choice(indices_succ, size=target_n_succ, replace=False)
+    else:
+        print(f"  [Warning] Not enough success samples! Keeping all {len(indices_succ)}.")
+        final_succ = indices_succ
+    
+    final_indices = np.concatenate([final_fail, final_succ])
+    np.random.shuffle(final_indices)
+    
+    X_balanced = X_all[final_indices]
+    y_balanced = y_all[final_indices]
+
+    X_final = np.expand_dims(X_balanced, axis=1)
+    X_tensor = torch.from_numpy(X_final).float()
+    y_tensor = torch.from_numpy(y_balanced).long()
+    
+    total = X_tensor.size(0)
+    indices = torch.randperm(total)
+    split = int(0.8 * total)
+    
+    ds_id = f"{dataset_name}_{window_size}"
+    save_path = os.path.join(output_dir, ds_id)
+    os.makedirs(save_path, exist_ok=True)
+    
+    torch.save(X_tensor[indices[:split]], os.path.join(save_path, 'X_train.pt'))
+    torch.save(y_tensor[indices[:split]], os.path.join(save_path, 'y_train.pt'))
+    torch.save(X_tensor[indices[split:]], os.path.join(save_path, 'X_valid.pt'))
+    torch.save(y_tensor[indices[split:]], os.path.join(save_path, 'y_valid.pt'))
+    
+    final_ratio = y_tensor.float().mean().item()
+    print(f"[TodyNet Data] Saved {total} samples to {save_path} | Final Crash Ratio: {final_ratio:.2%}")
+
 def get_real_unwrapped_env(env):
     current_env = env
     while hasattr(current_env, 'venv'):
         current_env = current_env.venv
-    
     if hasattr(current_env, 'envs'):
         return current_env.envs[0].unwrapped
-    
     return None
 
 def main():
@@ -50,14 +141,20 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=1000, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=20000, type=int)
     
+    parser.add_argument("--save-data", action="store_true", default=False, help="Save TodyNet training data")
+    parser.add_argument("--save-transitions", action="store_true", default=False, help="Save RL transitions")
+    parser.add_argument("--window-size", type=int, default=20, help="Sliding window size")
+    parser.add_argument("--dataset-name", type=str, default="BipedalWalkerHC", help="Dataset name prefix")
+
     args = parser.parse_args()
     
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
     result_path = './results/' + result_folder + '/'
     os.makedirs(result_path, exist_ok=True)
+    
     log_file_path = os.path.join(result_path, 'cure_fuzz.txt')
     f = open(log_file_path, 'w', buffering=1, encoding='utf-8')
     sys.stdout = f
@@ -79,8 +176,6 @@ def main():
         log_path = os.path.join(folder, algo, f"{env_id}_{args.exp_id}")
     else:
         log_path = os.path.join(folder, algo)
-
-    assert os.path.isdir(log_path), f"The {log_path} folder was not found"
 
     found = False
     model_path = ""
@@ -155,18 +250,35 @@ def main():
     fuzzer = CureFuzz()
     seeds_num = args.seed_number
     
+    # === TodyNet 容器 ===
+    all_window_data = [] 
+    all_label_data = []
+    todynet_success_count = 0  # 软上限计数器
+    
+    # === Transitions 容器 ===
+    crash_transitions = []
+    success_transitions = []
+    
+    # === [配置] 采集目标 ===
+    TARGET_CRASH_COUNT = 10000
+    TARGET_SUCCESS_COUNT = 20000
+    
+    # === [配置] TodyNet 软上限 ===
+    # 最终保存: 3000总数 * 70% Success = 2100 条
+    # 软上限: 设置 5000 以确保有足够样本供随机采样，同时防止 OOM
+    TODYNET_SUCCESS_SOFT_CAP = 5000
+
     pbar = tqdm.tqdm(total=seeds_num)
     start_corpus_time = time.time()
     i = 0
     
-    # --- Corpus Generation Loop ---
-    print("\nStarting Corpus Generation...")
+    # --- Corpus Generation ---
     while i < seeds_num and (time.time() - start_corpus_time) <= (3600*2):
         states = np.random.randint(low=1, high=4, size=15)
         state = None
         episode_reward = 0.0
         obs = env.reset(states)
-        sequences = [obs[0]]
+        sequences = [obs[0]] 
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, _ = env.step(action)
@@ -200,14 +312,13 @@ def main():
 
     start_fuzz_time = time.time()
     current_time = time.time()
-    pbar1 = tqdm.tqdm(total=seeds_num)
     seedcount = 0
     fuzz_selection_log = []
     
-    print("\nStarting Fuzzing Loop...")
-
+    print(f"\n[Goal] Collecting {TARGET_CRASH_COUNT} Crash steps + {TARGET_SUCCESS_COUNT} Success steps...")
+    
     # --- Fuzzing Loop ---
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 and seedcount<5000:
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0:
         seedcount += 1
         selected_info = fuzzer.get_pose()
         states = selected_info['seed_state']
@@ -217,27 +328,37 @@ def main():
         state = None
         episode_reward = 0.0
         obs = env.reset(mutate_states)
-        sequences = [obs[0]]
+        
+        rnd_sequences = [obs[0]] 
+        todynet_sequences = []   
+        
+        current_ep_transitions = []
         
         total_x_pos_sum = 0.0
         total_abs_angle_sum = 0.0
         episode_steps = 0
         
         for _ in range(args.n_timesteps):
+            current_obs = obs[0].copy()
             action, state = model.predict(obs, state=state, deterministic=deterministic)
+            current_action = action[0]
+            
+            vec_28d = np.concatenate((current_obs, current_action))
+            todynet_sequences.append(vec_28d)
+
             obs, reward, done, _ = env.step(action)
             
-            real_env = get_real_unwrapped_env(env)
+            if args.save_transitions:
+                current_ep_transitions.append((current_obs, current_action, reward[0], obs[0].copy(), done[0]))
             
+            real_env = get_real_unwrapped_env(env)
             raw_x_pos = real_env.hull.position[0]
             raw_angle = real_env.hull.angle
-            
             total_x_pos_sum += raw_x_pos
             total_abs_angle_sum += abs(raw_angle)
-
             episode_steps += 1
             
-            sequences.append(obs[0])
+            rnd_sequences.append(obs[0])
             episode_reward += reward[0]
             if done:
                 break
@@ -245,14 +366,12 @@ def main():
         bd_dist = total_x_pos_sum / max(1, episode_steps)
         bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
         
-        intrinsic_reward = fuzzer.train_rnd(sequences)
+        intrinsic_reward = fuzzer.train_rnd(rnd_sequences)
         entropy = np.linalg.norm(np.asarray(obs[0]) - np.asarray(fuzzer.final_state))
         
         did_crash = False
         if done or episode_reward < 10:
-            pbar1.update(1)
             fuzzer.add_crash(mutate_states)
-            print(f'Found Crash! Total: {len(fuzzer.result)}')
             did_crash = True
         else:
             condition = False
@@ -260,9 +379,44 @@ def main():
                 condition = intrinsic_reward > intrins_theta or episode_reward < fuzzer.current_reward or entropy > entropy_theta
             else:
                 condition = episode_reward < fuzzer.current_reward or entropy > entropy_theta
-            
             if condition:
                 fuzzer.further_mutation(copy.deepcopy(mutate_states), episode_reward, entropy, intrinsic_reward, final_state, fuzzer.current_original)
+        
+        if args.save_transitions:
+            if did_crash:
+                if len(crash_transitions) < TARGET_CRASH_COUNT:
+                    crash_transitions.extend(current_ep_transitions)
+            else:
+                if len(success_transitions) < TARGET_SUCCESS_COUNT:
+                    success_transitions.extend(current_ep_transitions)
+            
+            c_len = len(crash_transitions)
+            s_len = len(success_transitions)
+            
+            if seedcount % 100 == 0:
+                print(f"Seeds: {seedcount} | Fail Steps: {c_len}/{TARGET_CRASH_COUNT} | Success Steps: {s_len}/{TARGET_SUCCESS_COUNT}")
+
+        # === TodyNet 数据收集 (带软上限) ===
+        if args.save_data:
+            label = 1 if did_crash else 0
+            
+            # 判断是否收集
+            collect_this = False
+            if label == 1:
+                # Crash: 总是收集
+                collect_this = True
+            else:
+                # Success: 仅当未达到软上限时收集
+                if todynet_success_count < TODYNET_SUCCESS_SOFT_CAP:
+                    collect_this = True
+            
+            if collect_this:
+                wins, labels = process_episode_data(todynet_sequences, label, args.window_size)
+                if wins is not None and len(wins) > 0:
+                    all_window_data.append(wins)
+                    all_label_data.append(labels)
+                    if label == 0:
+                        todynet_success_count += 1
         
         fuzz_selection_log.append({
             'seed_state': selected_info['seed_state'],
@@ -274,10 +428,30 @@ def main():
             'bd_mean_angle': bd_mean_angle 
         })
         
-        if seedcount % 100 == 0:
-            print(f'Seeds tested: {seedcount}, Crashes found: {len(fuzzer.result)}')
-            
         current_time = time.time()
+
+    # === 保存 Transitions ===
+    if args.save_transitions:
+        final_transitions = crash_transitions + success_transitions
+        random.shuffle(final_transitions)
+        
+        trans_file = os.path.join(result_path, 'transitions.pkl')
+        print(f"Saving {len(final_transitions)} total transitions to {trans_file}...")
+        with open(trans_file, 'wb') as f_t:
+            pickle.dump(final_transitions, f_t, protocol=pickle.HIGHEST_PROTOCOL)
+        print("Transitions saved.")
+
+    # === 保存 TodyNet 数据 (应用目标3000条, 30% Crash) ===
+    if args.save_data:
+        balance_and_save_data(
+            all_window_data, 
+            all_label_data, 
+            result_path, 
+            args.dataset_name, 
+            args.window_size,
+            target_total=3000,      
+            target_crash_ratio=0.30 
+        )
 
     crash_file = 'cure_crash.pkl' if args.guide else 'ablated_crash.pkl'
     with open(os.path.join(result_path, crash_file), 'wb') as handle:
@@ -286,7 +460,6 @@ def main():
     log_file_name = os.path.join(result_path, 'selection_log.pkl')
     with open(log_file_name, 'wb') as handle:
         pickle.dump(fuzz_selection_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    print(f"Selection log saved to {log_file_name}")
 
     if not args.no_render:
         if args.n_envs == 1 and "Bullet" not in env_id and not is_atari and isinstance(env, VecEnv):
@@ -300,9 +473,4 @@ def main():
             env.close()
 
 if __name__ == "__main__":
-    start_time = datetime.now()
-    print(f"--- start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')} ---")
     main()
-    end_time = datetime.now()
-    print(f"--- end time: {end_time.strftime('%Y-%m-%d %H:%M:%S')} ---")
-    print(f"--- total time: {end_time - start_time} ---")

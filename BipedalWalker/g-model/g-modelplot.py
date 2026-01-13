@@ -24,7 +24,7 @@ COLORS = {
 
 # 路径配置
 # 注意：请根据 test_gen.py 实际生成的文件夹名称修改此处
-RESULT_DIR = os.path.join("results", "generative+novelty_5_seed_0")
+RESULT_DIR = os.path.join("results", "generative+novelty_50_seed_0")
 LOG_FILENAME = os.path.join(RESULT_DIR, "all_test_cases_log.pkl")
 PLOT_5_FILE = os.path.join(RESULT_DIR, '5_behaviour_coverage_heatmap.png') # 新增
 

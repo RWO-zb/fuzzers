@@ -4,10 +4,12 @@ import copy
 import json
 import tqdm
 import numpy as np
+import torch
+import pickle
+import random
 
 from typing import List, Tuple, Dict, Any
 
-# or runs python -m mdpfuzz.py
 if __package__ is None or __package__ == '':
     from gmm import CoverageModel
     from logger import FuzzerLogger
@@ -18,6 +20,97 @@ else:
     from .logger import FuzzerLogger
     from .executor import Executor
     from .pool import Pool, IndexedPool, LightPool
+
+# ==========================================
+# 辅助函数
+# ==========================================
+def process_episode_data(sequence, label, window_size):
+    """
+    TodyNet 严格采样: Success随机取1个，Failure取最后1个
+    """
+    seq_len = len(sequence)
+    if seq_len < window_size:
+        return None, None
+    
+    seq_array = np.array(sequence) 
+    windows = []
+    labels = []
+
+    if label == 0:
+        max_idx = seq_len - window_size
+        rand_idx = random.randint(0, max_idx)
+        win = seq_array[rand_idx : rand_idx + window_size]
+        win = win.transpose() 
+        windows.append(win)
+        labels.append(0)
+    else:
+        win = seq_array[-window_size:] 
+        win = win.transpose()
+        windows.append(win)
+        labels.append(1)
+        
+    return np.array(windows), np.array(labels)
+
+def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size, target_total=3000, target_crash_ratio=0.30):
+    """
+    平衡数据：强制 Crash 占比 target_crash_ratio (0.30)，且总数限制为 target_total (3000)
+    """
+    if not X_list:
+        return
+    
+    print(f"\n[TodyNet Data] Processing balancing to {target_total} samples (Target Crash Ratio: {target_crash_ratio:.0%})...")
+    X_all = np.concatenate(X_list, axis=0)
+    y_all = np.concatenate(y_list, axis=0)
+    
+    indices_fail = np.where(y_all == 1)[0]
+    indices_succ = np.where(y_all == 0)[0]
+    
+    # 目标计算: Total 3000 -> Fail 900, Success 2100
+    n_crash_target = int(target_total * target_crash_ratio)
+    n_succ_target = target_total - n_crash_target
+    
+    print(f"  Raw Collected: Fail={len(indices_fail)}, Success={len(indices_succ)}")
+    print(f"  Target: Fail={n_crash_target}, Success={n_succ_target}")
+
+    # 1. 采样 Crash
+    if len(indices_fail) >= n_crash_target:
+        final_fail = np.random.choice(indices_fail, size=n_crash_target, replace=False)
+    else:
+        print(f"  [Warning] Not enough crash samples! Keeping all {len(indices_fail)}.")
+        final_fail = indices_fail
+        
+    # 2. 采样 Success
+    if len(indices_succ) >= n_succ_target:
+        final_succ = np.random.choice(indices_succ, size=n_succ_target, replace=False)
+    else:
+        print(f"  [Warning] Not enough success samples! Keeping all {len(indices_succ)}.")
+        final_succ = indices_succ
+    
+    final_indices = np.concatenate([final_fail, final_succ])
+    np.random.shuffle(final_indices)
+    
+    X_balanced = X_all[final_indices]
+    y_balanced = y_all[final_indices]
+
+    X_final = np.expand_dims(X_balanced, axis=1)
+    X_tensor = torch.from_numpy(X_final).float()
+    y_tensor = torch.from_numpy(y_balanced).long()
+    
+    total = X_tensor.size(0)
+    indices = torch.randperm(total)
+    split = int(0.8 * total)
+    
+    ds_id = f"{dataset_name}_{window_size}"
+    save_path = os.path.join(output_dir, ds_id)
+    os.makedirs(save_path, exist_ok=True)
+    
+    torch.save(X_tensor[indices[:split]], os.path.join(save_path, 'X_train.pt'))
+    torch.save(y_tensor[indices[:split]], os.path.join(save_path, 'y_train.pt'))
+    torch.save(X_tensor[indices[split:]], os.path.join(save_path, 'X_valid.pt'))
+    torch.save(y_tensor[indices[split:]], os.path.join(save_path, 'y_valid.pt'))
+    
+    final_ratio = y_tensor.float().mean().item()
+    print(f"[TodyNet Data] Saved {total} samples to {save_path} | Final Crash Ratio: {final_ratio:.2%}")
 
 
 class Fuzzer():
@@ -37,6 +130,15 @@ class Fuzzer():
         self.env_seed = self.executor.env_seed
 
         self._set_config()
+        
+        # 数据收集容器
+        self.all_window_data = [] 
+        self.all_label_data = []
+        self.crash_transitions = []
+        self.success_transitions = []
+        
+        # TodyNet 收集计数
+        self.todynet_success_count = 0
 
 
     def _set_config(self):
@@ -84,35 +186,31 @@ class Fuzzer():
         return mutate_states
 
 
-    def mdp(self, state: np.ndarray, policy: Any = None) -> Tuple[float, bool, np.ndarray, float, float, float]:
-        '''Returns the accumulated reward, crash bool, state sequence, exec time, and BD metrics.'''
-        # [修改] 解包 6 个返回值
-        episode_reward, done, obs_seq, exec_time, bd_dist, bd_angle = self.executor.execute_policy(state, policy)
-        return episode_reward, done, obs_seq, exec_time, bd_dist, bd_angle
+    def mdp(self, state: np.ndarray, policy: Any = None) -> Tuple[float, bool, np.ndarray, float, float, float, List]:
+        # 解包新增的 transitions
+        episode_reward, done, obs_seq, exec_time, bd_dist, bd_angle, transitions = self.executor.execute_policy(state, policy)
+        return episode_reward, done, obs_seq, exec_time, bd_dist, bd_angle, transitions
 
 
-    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, generation: int = None ,**kwargs) -> Tuple[float, float, bool, List[np.ndarray], float, float, float]:
-        '''
-        Computes the sensitivity of the state @state.
-        '''
+    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, generation: int = None ,**kwargs) -> Tuple[float, float, bool, List[np.ndarray], float, float, float, List]:
         perturbed_state = self.mutate_validate(state, **kwargs)
         perturbation = np.linalg.norm(state - perturbed_state)
 
         bd_dist_ret = None
         bd_angle_ret = None
+        transitions_ret = []
 
         if acc_reward is None:
-            # [修改] 解包
-            acc_reward, crash, state_sequence, exec_time, bd_dist_ret, bd_angle_ret = self.mdp(state, policy)
+            acc_reward, crash, state_sequence, exec_time, bd_dist_ret, bd_angle_ret, transitions_ret = self.mdp(state, policy)
         else:
             state_sequence = []
             crash = None
             exec_time = None
             bd_dist_ret = None
             bd_angle_ret = None
+            transitions_ret = []
 
-        # [修改] 解包 perturbed
-        acc_reward_perturbed, crash_perturbed, state_sequence_perturbed, exec_time_perturbed, bd_dist_p, bd_angle_p = self.mdp(perturbed_state, policy)
+        acc_reward_perturbed, crash_perturbed, state_sequence_perturbed, exec_time_perturbed, bd_dist_p, bd_angle_p, transitions_p = self.mdp(perturbed_state, policy)
         
         if self.logger is not None:
             episode_length = len(state_sequence_perturbed)
@@ -124,15 +222,13 @@ class Fuzzer():
                 Generation=generation,
                 test_exec_time=exec_time_perturbed,
                 run_time=time.time(),
-                # [新增] 记录 BD 指标
                 bd_distance=bd_dist_p,
                 bd_mean_angle=bd_angle_p
             )
 
         sensitivity = np.abs(acc_reward - acc_reward_perturbed) / perturbation
 
-        # [修改] 返回值包含 BD 指标
-        return sensitivity, acc_reward, crash, state_sequence, exec_time, bd_dist_ret, bd_angle_ret
+        return sensitivity, acc_reward, crash, state_sequence, exec_time, bd_dist_ret, bd_angle_ret, transitions_ret
 
 
     def local_sensitivity(self, state: np.ndarray, state_mutate: np.ndarray, state_reward: float, state_mutate_reward: float):
@@ -146,8 +242,7 @@ class Fuzzer():
         if state_sequence is None:
             policy = kwargs.get('policy', None)
             random_input = kwargs.get('input', self.sampling())
-            # [修改] 解包
-            reward, crash, state_sequence, exec_time, bd_dist, bd_angle = self.mdp(random_input, policy)
+            reward, crash, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(random_input, policy)
             exec_counter += 1
             if self.logger is not None:
                 episode_length = len(state_sequence)
@@ -159,7 +254,6 @@ class Fuzzer():
                     Generation=0,
                     test_exec_time=exec_time,
                     run_time=time.time(),
-                    # [新增]
                     bd_distance=bd_dist,
                     bd_mean_angle=bd_angle
                     )
@@ -172,8 +266,65 @@ class Fuzzer():
         print('Coverage model initialized')
         return exec_counter
 
+    def _collect_data(self, transitions, crash, window_size, 
+                      TARGET_CRASH=10000, TARGET_SUCCESS=20000, 
+                      save_data=False, save_transitions=False):
+        """
+        统一的数据收集逻辑。
+        策略：
+        1. Transitions: 有固定上限 (10000/20000)，存满即止。
+        2. TodyNet: Success有软上限(3000)以节省内存，Crash无限收集，最后由 balance_and_save_data 进行截断。
+        """
+        if len(transitions) == 0:
+            return
+
+        # 1. RL Transitions 收集 (带上限)
+        if save_transitions:
+            if crash:
+                if len(self.crash_transitions) < TARGET_CRASH:
+                    self.crash_transitions.extend(transitions)
+            else:
+                if len(self.success_transitions) < TARGET_SUCCESS:
+                    self.success_transitions.extend(transitions)
+
+        # 2. TodyNet 数据收集
+        if save_data:
+            # 策略：Crash 总是收集，Success 收集到一定量后停止，等待最后平衡。
+            # 目标只需 2100 个 Success，设置 3000 作为缓存上限
+            TODYNET_SUCCESS_CAP = 3000 
+            
+            collect_this = False
+            if crash:
+                collect_this = True
+            else:
+                if self.todynet_success_count < TODYNET_SUCCESS_CAP:
+                    collect_this = True
+            
+            if collect_this:
+                # 构造 28维 序列
+                todynet_seq = []
+                for t in transitions:
+                    s, a, _, _, _ = t
+                    if isinstance(a, (int, float, np.integer, np.floating)):
+                         a = np.array([a])
+                    vec = np.concatenate([s, a])
+                    todynet_seq.append(vec)
+                
+                label = 1 if crash else 0
+                wins, labels = process_episode_data(todynet_seq, label, window_size)
+                if wins is not None and len(wins) > 0:
+                    self.all_window_data.append(wins)
+                    self.all_label_data.append(labels)
+                    if not crash:
+                        self.todynet_success_count += 1
+
 
     def fuzzing(self, n: int, policy: Any = None, **kwargs):
+        # [配置参数]
+        save_data = kwargs.get('save_data', False)
+        save_transitions = kwargs.get('save_transitions', False)
+        window_size = kwargs.get('window_size', 20)
+        
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
         path = kwargs.get('saving_path', None)
@@ -197,8 +348,11 @@ class Fuzzer():
         pbar = tqdm.tqdm(total=n)
         
         for state in initial_inputs:
-            # [修改] 解包 sentivity 返回值
-            sensitivity, acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle = self.sentivity(state, policy=policy, generation=0, **kwargs)
+            sensitivity, acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.sentivity(state, policy=policy, generation=0, **kwargs)
+            
+            # [数据收集]
+            self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
+            
             state_sequence_conc = self._concatenate_state_sequence(state_sequence)
             t0 = time.time()
             coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
@@ -218,7 +372,6 @@ class Fuzzer():
                     test_exec_time=exec_time,
                     coverage_time=coverage_time,
                     run_time=time.time(),
-                    # [新增]
                     bd_distance=bd_dist,
                     bd_mean_angle=bd_angle
                 )
@@ -256,8 +409,10 @@ class Fuzzer():
                 new_generation = generation + 1
                 mutant = self.mutate_validate(input, **kwargs)
                 
-                # [修改] 解包 mdp
-                acc_reward_mutant, oracle, state_sequence, exec_time, bd_dist, bd_angle = self.mdp(mutant, policy)
+                acc_reward_mutant, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(mutant, policy)
+                
+                # [数据收集] 
+                self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
 
                 record = np.concatenate([input, mutant, np.array([int(oracle)])])
                 self.mutation_history.append(record)
@@ -274,8 +429,7 @@ class Fuzzer():
                     if local_sensitivity:
                         sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                     else:
-                        # [修改] 解包 sentivity
-                        sensitivity, _, _, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
+                        sensitivity, _, _, _, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
                     pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle, generation=new_generation)
 
                 if self.logger is not None:
@@ -291,7 +445,6 @@ class Fuzzer():
                         test_exec_time=exec_time,
                         coverage_time=coverage_time,
                         run_time=time.time(),
-                        # [新增]
                         bd_distance=bd_dist,
                         bd_mean_angle=bd_angle
                     )
@@ -304,6 +457,13 @@ class Fuzzer():
                     if int(current_time - start_time) > seconds:
                         seconds += 1
                         pbar.update(1)
+                        if seconds % 10 == 0:
+                            c_len = len(self.crash_transitions)
+                            s_len = len(self.success_transitions)
+                            tn_c = len(self.all_window_data) - self.todynet_success_count
+                            tn_s = self.todynet_success_count
+                            print(f"Stats: Transitions(F/S)={c_len}/{s_len}, TodyNet(F/S)={tn_c}/{tn_s}")
+
         except Exception as e:
             print(e)
             import traceback
@@ -311,6 +471,22 @@ class Fuzzer():
 
         pbar.close()
         
+        # [最后保存数据]
+        if path is not None:
+            save_dir = os.path.dirname(path)
+            
+            if save_transitions:
+                final_trans = self.crash_transitions + self.success_transitions
+                random.shuffle(final_trans)
+                t_path = os.path.join(save_dir, 'transitions.pkl')
+                print(f"Saving {len(final_trans)} transitions to {t_path}")
+                with open(t_path, 'wb') as f:
+                    pickle.dump(final_trans, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            if save_data:
+                # 目标 Total=3000, Ratio=30%
+                balance_and_save_data(self.all_window_data, self.all_label_data, save_dir, "BipedalWalkerHC", window_size, target_total=3000, target_crash_ratio=0.30)
+
         if path is not None:
             self.save_configuration(path)
             np.savetxt(path + '_selected.txt', pool.selected, fmt='%1.0f', delimiter=',')
@@ -323,6 +499,10 @@ class Fuzzer():
 
 
     def fuzzing_no_coverage(self, n: int, policy: Any = None, **kwargs):
+        save_data = kwargs.get('save_data', False)
+        save_transitions = kwargs.get('save_transitions', False)
+        window_size = kwargs.get('window_size', 20)
+
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
         self.config['name'] = 'Fuzzer'
@@ -344,8 +524,11 @@ class Fuzzer():
 
         pbar = tqdm.tqdm(total=n)
         for state in initial_inputs:
-            # [修改] 解包
-            sensitivity, acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle = self.sentivity(state, policy=policy, generation=0, **kwargs)
+            sensitivity, acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.sentivity(state, policy=policy, generation=0, **kwargs)
+            
+            # [数据收集]
+            self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
+            
             pool.add(state, acc_reward, 0, sensitivity, oracle, generation=0)
 
             if self.logger is not None:
@@ -359,7 +542,6 @@ class Fuzzer():
                     Generation=0,
                     test_exec_time=exec_time,
                     run_time=time.time(),
-                    # [新增]
                     bd_distance=bd_dist,
                     bd_mean_angle=bd_angle
                 )
@@ -395,9 +577,11 @@ class Fuzzer():
             new_generation = generation + 1
             mutant = self.mutate_validate(input, **kwargs)
             
-            # [修改] 解包 mdp
-            acc_reward_mutant, oracle, state_sequence, exec_time, bd_dist, bd_angle = self.mdp(mutant, policy)
+            acc_reward_mutant, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(mutant, policy)
             
+            # [数据收集]
+            self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
+
             record = np.concatenate([input, mutant, np.array([int(oracle)])])
             self.mutation_history.append(record)
             
@@ -408,8 +592,7 @@ class Fuzzer():
                 if local_sensitivity:
                     sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                 else:
-                    # [修改] 解包
-                    sensitivity, _, _, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
+                    sensitivity, _, _, _, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
                 pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle, generation=new_generation)
 
             if self.logger is not None:
@@ -423,7 +606,6 @@ class Fuzzer():
                     Generation=new_generation,
                     test_exec_time=exec_time,
                     run_time=time.time(),
-                    # [新增]
                     bd_distance=bd_dist,
                     bd_mean_angle=bd_angle
                 )
@@ -436,9 +618,30 @@ class Fuzzer():
                 if int(current_time - start_time) > seconds:
                     seconds += 1
                     pbar.update(1)
+                    if seconds % 10 == 0:
+                        c_len = len(self.crash_transitions)
+                        s_len = len(self.success_transitions)
+                        tn_c = len(self.all_window_data) - self.todynet_success_count
+                        tn_s = self.todynet_success_count
+                        print(f"Stats: Transitions(F/S)={c_len}/{s_len}, TodyNet(F/S)={tn_c}/{tn_s}")
 
         pbar.close()
         
+        # [最后保存数据]
+        if path is not None:
+            save_dir = os.path.dirname(path)
+            
+            if save_transitions:
+                final_trans = self.crash_transitions + self.success_transitions
+                random.shuffle(final_trans)
+                t_path = os.path.join(save_dir, 'transitions.pkl')
+                print(f"Saving {len(final_trans)} transitions to {t_path}")
+                with open(t_path, 'wb') as f:
+                    pickle.dump(final_trans, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            if save_data:
+                 balance_and_save_data(self.all_window_data, self.all_label_data, save_dir, "BipedalWalkerHC", window_size, target_total=3000, target_crash_ratio=0.30)
+
         if path is not None:
             self.save_configuration(path)
             np.savetxt(path + '_selected.txt', pool.selected, fmt='%1.0f', delimiter=',')
@@ -527,8 +730,7 @@ class Fuzzer():
                 else:
                     execute = False
             if execute:
-                # [修改] 解包
-                acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle = self.mdp(random_input, policy)
+                acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(random_input, policy)
                 episode_length = len(state_sequence)
                 self.logger.log(
                     input=random_input,
@@ -538,7 +740,6 @@ class Fuzzer():
                     Generation=0,
                     test_exec_time=exec_time,
                     run_time=time.time(),
-                    # [新增]
                     bd_distance=bd_dist,
                     bd_mean_angle=bd_angle
                 )

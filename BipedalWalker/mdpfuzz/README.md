@@ -33,5 +33,5 @@ git clone https://github.com/DLR-RM/rl-trained-agents
 
 Check the default path of the model is correct in `./enjoy_cure.py`. 
 
-Run `python test_rl.py data_rq2/ 0 bw` to start fuzz testing.
+Run `python test_rl.py data_rq2/ 0 bw --save-transitions  --save-data`  to start fuzz testing.
 

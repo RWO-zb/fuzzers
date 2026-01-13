@@ -39,7 +39,7 @@ git clone https://github.com/DLR-RM/rl-trained-agents
 
 Check the default path of the model is correct in `./enjoy.py`. 
 
-Run `python test_gen.py --method generative+novelty --hour 12 --step 50` to start fuzz testing.
+Run `python test_gen.py --method generative+novelty --hour 12 --step 50 --save-data --save-transitions --window-size 25` to start fuzz testing.
 
 ----
 

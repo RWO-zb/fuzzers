@@ -33,7 +33,7 @@ git clone https://github.com/DLR-RM/rl-trained-agents
 
 Check the default path of the model is correct in `./enjoy_cure.py`. 
 
-Run `python enjoy_cure.py  --guide --no-render --seed 0` to start fuzz testing.
+Run `python enjoy_cure.py  --guide --no-render --seed 0 --save-data --save-transitions --window-size 20 ` to start fuzz testing.
 
 Run ` python reproduce_crash.py --env BipedalWalkerHardcore-v3 --algo tqc --crash-file results/01_11_2026_20_45_08_seed_0/cure_crash.pkl --delay 0.02 `
 

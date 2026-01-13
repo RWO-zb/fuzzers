@@ -13,6 +13,96 @@ from datetime import datetime
 from interfaces import normalize_data, Memory, Density, compute_sensitivity, case_clip, compute_novelty, Grid
 from diffusion import Diffusion
 
+# ==========================================
+# [新增] 辅助函数：TodyNet 严格采样
+# ==========================================
+def process_episode_data(sequence, label, window_size):
+    seq_len = len(sequence)
+    if seq_len < window_size:
+        return None, None
+    
+    seq_array = np.array(sequence) 
+    windows = []
+    labels = []
+
+    if label == 0:
+        # Success: Random 1
+        max_idx = seq_len - window_size
+        rand_idx = random.randint(0, max_idx)
+        win = seq_array[rand_idx : rand_idx + window_size]
+        win = win.transpose() 
+        windows.append(win)
+        labels.append(0)
+    else:
+        # Failure: Last 1
+        win = seq_array[-window_size:] 
+        win = win.transpose()
+        windows.append(win)
+        labels.append(1)
+        
+    return np.array(windows), np.array(labels)
+
+# ==========================================
+# [新增] 辅助函数：TodyNet 平衡与保存 (3000条, 30% Crash)
+# ==========================================
+def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size, target_total=3000, target_crash_ratio=0.30):
+    if not X_list:
+        return
+    
+    print(f"\n[TodyNet Data] Processing balancing to {target_total} samples (Target Crash Ratio: {target_crash_ratio:.0%})...")
+    X_all = np.concatenate(X_list, axis=0)
+    y_all = np.concatenate(y_list, axis=0)
+    
+    indices_fail = np.where(y_all == 1)[0]
+    indices_succ = np.where(y_all == 0)[0]
+    
+    # 计算目标数量
+    target_n_fail = int(target_total * target_crash_ratio)
+    target_n_succ = target_total - target_n_fail
+    
+    print(f"  Raw Collected: Fail={len(indices_fail)}, Success={len(indices_succ)}")
+    print(f"  Target: Fail={target_n_fail}, Success={target_n_succ}")
+
+    # 1. 采样 Crash
+    if len(indices_fail) >= target_n_fail:
+        final_fail = np.random.choice(indices_fail, size=target_n_fail, replace=False)
+    else:
+        print(f"  [Warning] Not enough crash samples! Keeping all {len(indices_fail)}.")
+        final_fail = indices_fail
+
+    # 2. 采样 Success
+    if len(indices_succ) >= target_n_succ:
+        final_succ = np.random.choice(indices_succ, size=target_n_succ, replace=False)
+    else:
+        print(f"  [Warning] Not enough success samples! Keeping all {len(indices_succ)}.")
+        final_succ = indices_succ
+    
+    final_indices = np.concatenate([final_fail, final_succ])
+    np.random.shuffle(final_indices)
+    
+    X_balanced = X_all[final_indices]
+    y_balanced = y_all[final_indices]
+
+    X_final = np.expand_dims(X_balanced, axis=1)
+    X_tensor = th.from_numpy(X_final).float()
+    y_tensor = th.from_numpy(y_balanced).long()
+    
+    total = X_tensor.size(0)
+    indices = th.randperm(total)
+    split = int(0.8 * total)
+    
+    ds_id = f"{dataset_name}_{window_size}"
+    save_path = os.path.join(output_dir, ds_id)
+    os.makedirs(save_path, exist_ok=True)
+    
+    th.save(X_tensor[indices[:split]], os.path.join(save_path, 'X_train.pt'))
+    th.save(y_tensor[indices[:split]], os.path.join(save_path, 'y_train.pt'))
+    th.save(X_tensor[indices[split:]], os.path.join(save_path, 'X_valid.pt'))
+    th.save(y_tensor[indices[split:]], os.path.join(save_path, 'y_valid.pt'))
+    
+    final_ratio = y_tensor.float().mean().item()
+    print(f"[TodyNet Data] Saved {total} samples to {save_path} | Final Crash Ratio: {final_ratio:.2%}")
+
 # --- [新增] 辅助函数：获取底层环境以访问 hull 数据 ---
 def get_real_unwrapped_env(env):
     """
@@ -69,12 +159,18 @@ def main():
         "--env-kwargs", type=str, nargs="+", action=StoreDict, help="Optional keyword argument to pass to the env constructor"
     )
 
-
     ######################## parameters for generative testing ############################################
     parser.add_argument("--method", help="select the guidance for testing", default="generative", type=str, required=False)
     parser.add_argument("--hour", help="test time", default=12, type=int)
     parser.add_argument("--step", help="number of normal cases at each training step", default=50, type=int)
     parser.add_argument("--grid", help="state abstraction granularity", default=5, type=int)
+    
+    # [新增] 数据采集相关参数
+    parser.add_argument("--save-data", action="store_true", default=False, help="Save TodyNet training data")
+    parser.add_argument("--save-transitions", action="store_true", default=False, help="Save RL transitions")
+    parser.add_argument("--window-size", type=int, default=20, help="Sliding window size")
+    parser.add_argument("--dataset-name", type=str, default="BipedalWalkerHC", help="Dataset name prefix")
+    
     args = parser.parse_args()
     
     result_folder_name = f"{args.method}_{args.step}_seed_{args.seed}"
@@ -234,6 +330,21 @@ def main():
     termination_list = []
     information_list = []
     failure_flag = False
+    
+    # ==========================================
+    # [新增] 数据采集容器初始化
+    # ==========================================
+    # TodyNet 容器
+    all_window_data = [] 
+    all_label_data = []
+    todynet_success_count = 0  
+    TODYNET_SUCCESS_SOFT_CAP = 5000
+    
+    # Transitions 容器
+    crash_transitions = []
+    success_transitions = []
+    TARGET_CRASH_COUNT = 10000
+    TARGET_SUCCESS_COUNT = 20000
 
     # --- 阶段 1：严格遵循论文的初始化预热 (Strict Initialization) ---
     print("--- Stage 1: Initialization (Warm-up) ---")
@@ -263,7 +374,7 @@ def main():
     all_test_cases_log = []
 
     print("--- Stage 2: Main Testing Loop ---")
-    while current_time - start_time < 3600 * 12 and len(all_test_cases_log) < 5000: # 使用参数控制时间
+    while current_time - start_time < 3600 * 4 : # 使用参数控制时间
 
         if cur_step > 0 and cur_step % args.step == 0:
             # --- 扩散模型微调与生成阶段 ---
@@ -299,14 +410,29 @@ def main():
                 sequences = [obs[0]]
                 episode_reward = 0.0
                 
+                # [新增] 采集变量
+                todynet_sequences = []   
+                current_ep_transitions = []
+                
                 # [新增] 行为多样性统计变量
                 total_x_pos_sum = 0.0
                 total_abs_angle_sum = 0.0
                 episode_steps = 0
 
                 for _ in range(args.n_timesteps):
+                    current_obs = obs[0].copy() # 捕获当前状态
                     action, state = model.predict(obs, state=state, deterministic=deterministic)
+                    current_action = action[0]  # 捕获当前动作
+                    
+                    # TodyNet 向量
+                    vec_28d = np.concatenate((current_obs, current_action))
+                    todynet_sequences.append(vec_28d)
+
                     obs, reward, done, infos = env.step(action)
+                    
+                    # Transitions 记录
+                    if args.save_transitions:
+                        current_ep_transitions.append((current_obs, current_action, reward[0], obs[0].copy(), done[0]))
                     
                     # [新增] 获取底层数据以计算 Diversity
                     real_env = get_real_unwrapped_env(env)
@@ -329,6 +455,34 @@ def main():
                 is_crash = (done or episode_reward < 10)
                 elapsed_time = time.time() - start_time
                 
+                # === [新增] 数据采集逻辑 (仅在 Generative 阶段) ===
+                # 1. Transitions 收集
+                if args.save_transitions:
+                    if is_crash:
+                        if len(crash_transitions) < TARGET_CRASH_COUNT:
+                            crash_transitions.extend(current_ep_transitions)
+                    else:
+                        if len(success_transitions) < TARGET_SUCCESS_COUNT:
+                            success_transitions.extend(current_ep_transitions)
+
+                # 2. TodyNet 数据收集
+                if args.save_data:
+                    label = 1 if is_crash else 0
+                    collect_this = False
+                    if label == 1:
+                        collect_this = True
+                    else:
+                        if todynet_success_count < TODYNET_SUCCESS_SOFT_CAP:
+                            collect_this = True
+                    
+                    if collect_this:
+                        wins_data, labels_data = process_episode_data(todynet_sequences, label, args.window_size)
+                        if wins_data is not None and len(wins_data) > 0:
+                            all_window_data.append(wins_data)
+                            all_label_data.append(labels_data)
+                            if label == 0:
+                                todynet_success_count += 1
+                
                 # [新增] 记录 bd_distance 和 bd_mean_angle
                 all_test_cases_log.append({
                     "input": test_case.tolist(), 
@@ -336,8 +490,8 @@ def main():
                     "source": "generative",
                     "step": cur_step,
                     "time": elapsed_time,
-                    "bd_distance": bd_dist,      # 新增
-                    "bd_mean_angle": bd_mean_angle # 新增
+                    "bd_distance": bd_dist,      
+                    "bd_mean_angle": bd_mean_angle 
                 })
 
                 if is_crash:
@@ -374,7 +528,7 @@ def main():
                 print(failure_flag, abstract_id, len(novelty_dict.keys()), len(set(diffusion_failure_clusters)))
                 information_list.append([sequences[-1].tolist(), failure_flag, abstract_id, norm_novelty])
         else:
-            # --- 随机采样阶段 ---
+            # --- 随机采样阶段 (不采集数据) ---
             state = None
             normal_case = np.random.randint(low=1, high=4, size=15)
             
@@ -419,8 +573,8 @@ def main():
                 "source": "random",
                 "step": cur_step,
                 "time": elapsed_time,
-                "bd_distance": bd_dist,      # 新增
-                "bd_mean_angle": bd_mean_angle # 新增
+                "bd_distance": bd_dist,      
+                "bd_mean_angle": bd_mean_angle 
             })
 
             normal_case_list.append(normal_case)
@@ -464,6 +618,33 @@ def main():
 
         cur_step += 1
         current_time = time.time()
+
+    # ==========================================
+    # [新增] 循环结束后的数据保存逻辑
+    # ==========================================
+    
+    # 1. 保存 Transitions
+    if args.save_transitions:
+        final_transitions = crash_transitions + success_transitions
+        random.shuffle(final_transitions)
+        
+        trans_file = os.path.join(result_path, 'transitions.pkl')
+        print(f"Saving {len(final_transitions)} total transitions to {trans_file}...")
+        with open(trans_file, 'wb') as f_t:
+            pickle.dump(final_transitions, f_t, protocol=pickle.HIGHEST_PROTOCOL)
+        print("Transitions saved.")
+
+    # 2. 保存 TodyNet 数据
+    if args.save_data:
+        balance_and_save_data(
+            all_window_data, 
+            all_label_data, 
+            result_path, 
+            args.dataset_name, 
+            args.window_size,
+            target_total=3000,
+            target_crash_ratio=0.30
+        )
 
     file_path_diffusion = os.path.join(result_path, 'diffusion_failure_count.json')
     with open(file_path_diffusion, 'w') as f:
