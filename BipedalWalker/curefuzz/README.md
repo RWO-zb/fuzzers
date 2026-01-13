@@ -35,5 +35,4 @@ Check the default path of the model is correct in `./enjoy_cure.py`.
 
 Run `python enjoy_cure.py  --guide --no-render --seed 0 --save-data --save-transitions --window-size 20 ` to start fuzz testing.
 
-Run ` python reproduce_crash.py --env BipedalWalkerHardcore-v3 --algo tqc --crash-file results/01_11_2026_20_45_08_seed_0/cure_crash.pkl --delay 0.02 `
-
+Run ` python retrain.py --env BipedalWalkerHardcore-v3 --algo tqc --model-path ../rl-trained-agents/tqc/BipedalWalkerHardcore-v3_1/BipedalWalkerHardcore-v3.zip --transitions-path transitions.pkl --n-timesteps 100000 --folder logs/retrained_models`

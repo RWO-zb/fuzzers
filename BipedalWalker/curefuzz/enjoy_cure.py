@@ -473,4 +473,12 @@ def main():
             env.close()
 
 if __name__ == "__main__":
+    start_time = datetime.now()
+    start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"--- start time: {start_time_str} ---")
     main()
+    end_time = datetime.now()
+    end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"--- finish time: {end_time_str} ---")
+    duration = end_time - start_time
+    print(f"--- total time: {duration} ---")
