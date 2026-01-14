@@ -36,7 +36,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", type=str, default="physics_trajectory.pkl", help="Path to physics trajectory file")
     parser.add_argument("--env", type=str, default="BipedalWalkerHardcore-v3")
-    parser.add_argument("--steps-before-crash", type=int, default=40, help="Teleport to N steps before the end of trajectory")
+    parser.add_argument("--steps-before-crash", type=int, default=60, help="Teleport to N steps before the end of trajectory")
     parser.add_argument("--num-cases", type=int, default=5, help="How many crashes to verify")
     parser.add_argument("--seed", type=int, default=0) 
     parser.add_argument("--norm-reward", action="store_true", default=False)

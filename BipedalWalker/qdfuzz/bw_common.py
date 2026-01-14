@@ -108,12 +108,15 @@ def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descr
     features /= t
     exec_time = time.time() - t0
 
+    # 修改判定逻辑：如果最后一步reward是-100（摔倒）或者总奖励 acc_reward < 10，则判定为Crash
+    is_crash = (reward == -100) or (acc_reward < 10)
+
     if descriptors is not None:
         descriptors = np.array(descriptors)
         assert all(descriptors < 12) and all(descriptors >= 0)
-        return acc_reward, (reward == -100), features[descriptors], obs, exec_time
+        return acc_reward, is_crash, features[descriptors], obs, exec_time
     else:
-        return acc_reward, (reward == -100), features, obs, exec_time
+        return acc_reward, is_crash, features, obs, exec_time
 
 
 def execute_policy_trajectory(input: np.ndarray, model: BaseAlgorithm, env_seed: int, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, List[np.ndarray], float]:
@@ -139,7 +142,11 @@ def execute_policy_trajectory(input: np.ndarray, model: BaseAlgorithm, env_seed:
     env.close()
     features /= t
     exec_time = time.time() - t0
-    return acc_reward,(reward == -100), features, np.array(obs_seq), exec_time
+    
+    # 修改判定逻辑：同上
+    is_crash = (reward == -100) or (acc_reward < 10)
+
+    return acc_reward, is_crash, features, np.array(obs_seq), exec_time
 
 
 def get_edges(env_seed: int, descriptors: np.ndarray, sim_steps: int = 300) -> np.ndarray:
