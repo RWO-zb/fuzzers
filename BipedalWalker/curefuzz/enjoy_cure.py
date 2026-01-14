@@ -20,6 +20,42 @@ from utils.utils import StoreDict
 from fuzz.cure_fuzz import CureFuzz
 
 # ==========================================
+# [新增] 物理状态提取辅助函数
+# ==========================================
+def extract_physics_state(real_env):
+    """
+    从底层 BipedalWalker 环境中提取完整的物理状态 (Box2D)
+    """
+    # 确保拿到的是 BipedalWalker 类实例
+    if not hasattr(real_env, 'hull') or not hasattr(real_env, 'legs'):
+        return None
+
+    hull = real_env.hull
+    legs = real_env.legs # 列表 [leg1_upper, leg1_lower, leg2_upper, leg2_lower]
+    
+    state_dict = {
+        # 1. 躯干 (Hull)
+        "hull_pos": (hull.position[0], hull.position[1]),
+        "hull_angle": hull.angle,
+        "hull_lin_vel": (hull.linearVelocity[0], hull.linearVelocity[1]),
+        "hull_ang_vel": hull.angularVelocity,
+        
+        # 2. 腿部 (Legs)
+        "legs": []
+    }
+    
+    for leg_part in legs:
+        leg_data = {
+            "pos": (leg_part.position[0], leg_part.position[1]),
+            "angle": leg_part.angle,
+            "lin_vel": (leg_part.linearVelocity[0], leg_part.linearVelocity[1]),
+            "ang_vel": leg_part.angularVelocity,
+        }
+        state_dict["legs"].append(leg_data)
+        
+    return state_dict
+
+# ==========================================
 # [辅助函数] TodyNet 严格采样
 # ==========================================
 def process_episode_data(sequence, label, window_size):
@@ -63,7 +99,6 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     indices_succ = np.where(y_all == 0)[0]
     
     # 计算目标数量
-    # 总数 3000 -> Crash 900, Success 2100
     target_n_fail = int(target_total * target_crash_ratio)
     target_n_succ = target_total - target_n_fail
     
@@ -141,11 +176,14 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=20000, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=100, type=int)
     
     parser.add_argument("--save-data", action="store_true", default=False, help="Save TodyNet training data")
     parser.add_argument("--save-transitions", action="store_true", default=False, help="Save RL transitions")
-    parser.add_argument("--window-size", type=int, default=20, help="Sliding window size")
+    # [新增参数] 开启物理状态收集
+    parser.add_argument("--save-physics", action="store_true", default=False, help="Save full physics state trajectories for crash restoration")
+    
+    parser.add_argument("--window-size", type=int, default=25, help="Sliding window size")
     parser.add_argument("--dataset-name", type=str, default="BipedalWalkerHC", help="Dataset name prefix")
 
     args = parser.parse_args()
@@ -253,19 +291,19 @@ def main():
     # === TodyNet 容器 ===
     all_window_data = [] 
     all_label_data = []
-    todynet_success_count = 0  # 软上限计数器
+    todynet_success_count = 0 
     
     # === Transitions 容器 ===
     crash_transitions = []
     success_transitions = []
     
+    # === [新增] 物理轨迹容器 ===
+    # 结构: [{'seed': int, 'trajectory': [dict, dict, ...]}, ...]
+    all_crash_physics_trajectories = []
+    
     # === [配置] 采集目标 ===
     TARGET_CRASH_COUNT = 10000
     TARGET_SUCCESS_COUNT = 20000
-    
-    # === [配置] TodyNet 软上限 ===
-    # 最终保存: 3000总数 * 70% Success = 2100 条
-    # 软上限: 设置 5000 以确保有足够样本供随机采样，同时防止 OOM
     TODYNET_SUCCESS_SOFT_CAP = 5000
 
     pbar = tqdm.tqdm(total=seeds_num)
@@ -315,10 +353,10 @@ def main():
     seedcount = 0
     fuzz_selection_log = []
     
-    print(f"\n[Goal] Collecting {TARGET_CRASH_COUNT} Crash steps + {TARGET_SUCCESS_COUNT} Success steps...")
+    print(f"\n[Goal] Collecting data. Save Physics: {args.save_physics}")
     
     # --- Fuzzing Loop ---
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0:
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 and seedcount<300:
         seedcount += 1
         selected_info = fuzzer.get_pose()
         states = selected_info['seed_state']
@@ -327,17 +365,32 @@ def main():
         mutate_states = fuzzer.mutation(states)
         state = None
         episode_reward = 0.0
+        
+        # 重置环境
+        # 注意：env.reset(mutate_states) 返回的是 observation
+        # 此时环境 seed 已经被环境内部逻辑或包装器处理
+        # 为了物理轨迹的 seed 对齐，我们需要记录当前的 mutate_states 也就是 seed
         obs = env.reset(mutate_states)
         
         rnd_sequences = [obs[0]] 
         todynet_sequences = []   
-        
         current_ep_transitions = []
+        
+        # [新增] 当前 Episode 的物理轨迹缓存
+        current_episode_physics = []
         
         total_x_pos_sum = 0.0
         total_abs_angle_sum = 0.0
         episode_steps = 0
         
+        # 初始帧物理状态 (Step 0)
+        if args.save_physics:
+            real_env = get_real_unwrapped_env(env)
+            if real_env:
+                init_phys = extract_physics_state(real_env)
+                if init_phys:
+                    current_episode_physics.append(init_phys)
+
         for _ in range(args.n_timesteps):
             current_obs = obs[0].copy()
             action, state = model.predict(obs, state=state, deterministic=deterministic)
@@ -348,12 +401,22 @@ def main():
 
             obs, reward, done, _ = env.step(action)
             
+            # [新增] 在 step 之后立即捕获物理状态
+            if args.save_physics:
+                real_env = get_real_unwrapped_env(env)
+                if real_env:
+                    phys_snapshot = extract_physics_state(real_env)
+                    if phys_snapshot:
+                        current_episode_physics.append(phys_snapshot)
+            
             if args.save_transitions:
                 current_ep_transitions.append((current_obs, current_action, reward[0], obs[0].copy(), done[0]))
             
-            real_env = get_real_unwrapped_env(env)
-            raw_x_pos = real_env.hull.position[0]
-            raw_angle = real_env.hull.angle
+            # 这里也用了 get_real_unwrapped_env 用于计算 bd_dist
+            # 如果不开启 save_physics，这里会重复调用一次，无伤大雅
+            real_env_stats = get_real_unwrapped_env(env)
+            raw_x_pos = real_env_stats.hull.position[0]
+            raw_angle = real_env_stats.hull.angle
             total_x_pos_sum += raw_x_pos
             total_abs_angle_sum += abs(raw_angle)
             episode_steps += 1
@@ -382,6 +445,15 @@ def main():
             if condition:
                 fuzzer.further_mutation(copy.deepcopy(mutate_states), episode_reward, entropy, intrinsic_reward, final_state, fuzzer.current_original)
         
+        # [新增] 如果 Crash 且开启了物理保存，则存储该轨迹
+        if did_crash and args.save_physics:
+            # 只有当轨迹长度足够时才保存（可选过滤）
+            if len(current_episode_physics) > 20:
+                all_crash_physics_trajectories.append({
+                    "seed": mutate_states,  # 在这里 mutate_states 充当了 seed 的角色
+                    "trajectory": current_episode_physics
+                })
+        
         if args.save_transitions:
             if did_crash:
                 if len(crash_transitions) < TARGET_CRASH_COUNT:
@@ -390,11 +462,11 @@ def main():
                 if len(success_transitions) < TARGET_SUCCESS_COUNT:
                     success_transitions.extend(current_ep_transitions)
             
-            c_len = len(crash_transitions)
-            s_len = len(success_transitions)
-            
             if seedcount % 100 == 0:
-                print(f"Seeds: {seedcount} | Fail Steps: {c_len}/{TARGET_CRASH_COUNT} | Success Steps: {s_len}/{TARGET_SUCCESS_COUNT}")
+                c_len = len(crash_transitions)
+                s_len = len(success_transitions)
+                p_len = len(all_crash_physics_trajectories)
+                print(f"Seeds: {seedcount} | Fail Steps: {c_len} | Physics Trajs: {p_len}")
 
         # === TodyNet 数据收集 (带软上限) ===
         if args.save_data:
@@ -440,6 +512,14 @@ def main():
         with open(trans_file, 'wb') as f_t:
             pickle.dump(final_transitions, f_t, protocol=pickle.HIGHEST_PROTOCOL)
         print("Transitions saved.")
+        
+    # === [新增] 保存物理状态轨迹 ===
+    if args.save_physics:
+        phys_file = os.path.join(result_path, 'physics_trajectory.pkl')
+        print(f"Saving {len(all_crash_physics_trajectories)} physics trajectories to {phys_file}...")
+        with open(phys_file, 'wb') as f_p:
+            pickle.dump(all_crash_physics_trajectories, f_p, protocol=pickle.HIGHEST_PROTOCOL)
+        print("Physics trajectories saved.")
 
     # === 保存 TodyNet 数据 (应用目标3000条, 30% Crash) ===
     if args.save_data:
