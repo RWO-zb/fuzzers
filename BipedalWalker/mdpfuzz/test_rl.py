@@ -23,7 +23,7 @@ if __name__ == '__main__':
     print(f"--- 脚本开始运行时间: {start_time_str} ---")
     torch.set_num_threads(1)
     
-    test_budget = 7000
+    test_budget = 100
     test_budget_in_seconds = 3600
     init_budget = 1000
     k = 10
@@ -87,16 +87,20 @@ if __name__ == '__main__':
     }
 
     if method == 'rt':
+        # [修改] 将数据保存参数传递给 random_testing
         fuzzer.random_testing(
             n=test_budget,
             policy=policy,
             path=path,
-            exp_name=RL_NAMES[rl_index])
+            exp_name=RL_NAMES[rl_index],
+            save_data=args.save_data,             # 新增
+            save_transitions=args.save_transitions, # 新增
+            window_size=args.window_size          # 新增
+        )
     elif method == 'fuzzer':
         fuzzer.fuzzing_no_coverage(**fuzz_kwargs)
     else:
         fuzzer.fuzzing(**fuzz_kwargs)
-
     # [新增] 脚本运行结束时，保存收集到的物理轨迹
     if args.save_physics and len(executor.crash_physics_trajectories) > 0:
         # 确保保存路径存在

@@ -713,24 +713,38 @@ class Fuzzer():
     def random_testing(self, n: int, policy: Any = None, path: str = 'logs', **kwargs):
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
+        
+        # [新增] 获取数据收集参数
+        save_data = kwargs.get('save_data', False)
+        save_transitions = kwargs.get('save_transitions', False)
+        window_size = kwargs.get('window_size', 20)
+        
         check_redundant_input = kwargs.get('check_redundant_input', True)
         self.config['name'] = 'RT'
         self.config['test_budget'] = n
+        
         self.logger = FuzzerLogger(path + '_logs.txt')
         self.logger.write_columns()
+        
         pbar = tqdm.tqdm(total=n)
         i = 0
         while i < n:
             execute = True
             random_input = self.sampling(1)
+            
             if check_redundant_input:
                 tmp = random_input.tolist()
                 if not (tmp in self.evaluated_solutions):
                     self.evaluated_solutions.append(tmp)
                 else:
                     execute = False
+            
             if execute:
                 acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(random_input, policy)
+                
+                # [新增] 收集数据 (调用 _collect_data)
+                self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
+                
                 episode_length = len(state_sequence)
                 self.logger.log(
                     input=random_input,
@@ -746,5 +760,32 @@ class Fuzzer():
                 pbar.update(1)
                 i += 1
         pbar.close()
+
+        # [新增] 循环结束后，保存收集到的数据
+        if path is not None:
+            save_dir = os.path.dirname(path)
+
+            # 1. 保存 Transitions
+            if save_transitions:
+                final_trans = self.crash_transitions + self.success_transitions
+                random.shuffle(final_trans)
+                t_path = os.path.join(save_dir, 'transitions.pkl')
+                print(f"Saving {len(final_trans)} transitions to {t_path}")
+                with open(t_path, 'wb') as f:
+                    pickle.dump(final_trans, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            # 2. 保存 TodyNet 数据 (Balance and Save)
+            if save_data:
+                # 使用与 fuzzing 相同的参数: Target Total=3000, Ratio=30%
+                balance_and_save_data(
+                    self.all_window_data, 
+                    self.all_label_data, 
+                    save_dir, 
+                    "BipedalWalkerHC", 
+                    window_size, 
+                    target_total=3000, 
+                    target_crash_ratio=0.30
+                )
+
         self.save_configuration(path)
         self.save_evaluated_solutions(path)
