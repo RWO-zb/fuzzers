@@ -7,7 +7,7 @@ import os
 import json
 
 # ==========================================
-# 1. 全局配置与风格设置 (参照 plot-RQ3)
+# 1. 全局配置与风格设置
 # ==========================================
 plt.style.use('seaborn-v0_8-whitegrid')
 plt.rcParams.update({
@@ -21,52 +21,55 @@ plt.rcParams.update({
     'lines.linewidth': 2
 })
 
-# 颜色映射 (确保每个方法有固定的颜色)
+# --- 颜色映射修改 ---
+# 为了与 plot-RQ3.py 保持一致，这里使用 Tab10 调色板的对应颜色
+# 对应顺序: CureFuzz(0), G-Model(1), MDPFuzz(2), QDFuzz(3), Random(4), SeqFuzz(5)
 COLOR_MAP = {
-    "MDPFuzz":  "#d62728", # 红色
-    "Random":   "#7f7f7f", # 灰色
-    "CureFuzz": "#9467bd", # 紫色
-    "SeqFuzz":  "#2ca02c", # 绿色
-    "QDFuzz":   "#1f77b4", # 蓝色
-    "G-Model":  "#ff7f0e", # 橙色
+    "CureFuzz": "#1f77b4", # Tab10[0] Blue
+    "G-Model":  "#ff7f0e", # Tab10[1] Orange
+    "MDPFuzz":  "#2ca02c", # Tab10[2] Green
+    "QDFuzz":   "#d62728", # Tab10[3] Red
+    "Random":   "#9467bd", # Tab10[4] Purple
+    "SeqFuzz":  "#8c564b", # Tab10[5] Brown
 }
 
 # 统计截断时间 (小时)
 MAX_HOURS = 12.0
 
 # ==========================================
-# 2. 文件路径配置 (请在此处修改你的文件名)
+# 2. 文件路径配置
 # ==========================================
-# 注意：type 字段决定了使用哪种加载逻辑
+# --- 顺序修改 ---
+# 字典顺序调整为字母顺序，以确保柱状图从左到右的排列与 plot-RQ3.py 一致
 FILES_CONFIG = {
-    "MDPFuzz": {
-        "path": "fuzzer_10_0.01_0.01_0_logs.txt", 
-        "type": "mdpfuzz_txt" 
-    },
-    "Random": {
-        "path": "rt_10_0.01_0.01_0_logs.txt",          
-        "type": "mdpfuzz_txt"  # Random 通常格式同 MDPFuzz
-    },
     "CureFuzz": {
         "path": "selection_log.pkl",               
         "type": "cure_pkl"
-    },
-    "SeqFuzz": {
-        "path": "all_run_seeds_0.pkl",             
-        "type": "seq_pkl"
     },
     "G-Model": {
         "path": "all_test_cases_log.pkl",          
         "type": "gmodel_pkl"
     },
+    "MDPFuzz": {
+        "path": "fuzzer_10_0.01_0.01_0_logs.txt", 
+        "type": "mdpfuzz_txt" 
+    },
     "QDFuzz": {
         "path": "1765639810.5339673_data.csv",                 
         "type": "qdfuzz_csv"
+    },
+    "Random": {
+        "path": "rt_10_0.01_0.01_0_logs.txt",          
+        "type": "mdpfuzz_txt"
+    },
+    "SeqFuzz": {
+        "path": "all_run_seeds_0.pkl",             
+        "type": "seq_pkl"
     }
 }
 
 # ==========================================
-# 3. 数据加载器 (集成各脚本逻辑)
+# 3. 数据加载器 (保持原有逻辑不变)
 # ==========================================
 
 def load_mdpfuzz_txt(path):
@@ -101,10 +104,8 @@ def load_cure_pkl(path):
         
         records = []
         for entry in log_data:
-            # CureFuzz 逻辑: input -> mutate_state
             state = entry.get('mutate_state')
             if state is None: continue
-            # 将 numpy array 转为 bytes 以便去重
             inp_bytes = state.tobytes() if hasattr(state, 'tobytes') else str(state)
             
             records.append({
@@ -126,13 +127,12 @@ def load_seq_pkl(path):
             
         records = []
         for entry in log_data:
-            # SeqFuzz 逻辑: input -> state (需要转bytes)
             state = entry.get('state')
             if state is None: continue
             inp_bytes = state.tobytes() if hasattr(state, 'tobytes') else str(state)
             
             records.append({
-                'time': entry.get('timestamp'), # 假设 timestamp 是累计时间
+                'time': entry.get('timestamp'), 
                 'input': inp_bytes,
                 'is_crash': entry.get('crashed', False),
                 'generation': entry.get('generation', 0)
@@ -150,16 +150,15 @@ def load_gmodel_pkl(path):
             
         records = []
         for entry in log_data:
-            # G-Model 逻辑: input -> input (通常是list)
             inp = entry.get('input')
             if inp is None: continue
-            inp_bytes = tuple(inp) # list 转 tuple 以便去重
+            inp_bytes = tuple(inp) 
             
             records.append({
                 'time': entry.get('time'),
                 'input': inp_bytes,
                 'is_crash': entry.get('is_crash', False),
-                'generation': np.nan # G-Model 通常没有代数概念
+                'generation': np.nan 
             })
         return pd.DataFrame(records)
     except Exception as e:
@@ -170,7 +169,6 @@ def load_qdfuzz_csv(path):
     """加载 QDFuzz 的 CSV"""
     try:
         df = pd.read_csv(path)
-        # QDFuzz 逻辑: elapsed_time, is_faulty, input, mutation_count
         data = pd.DataFrame({
             'time': df['elapsed_time'],
             'input': df['input'],
@@ -245,7 +243,7 @@ def process_data(label, config):
     if 'generation' in unique_crashes.columns:
         # Random 和 G-Model 通常没有代数，或为 NaN
         gen_vals = unique_crashes['generation'].dropna()
-        if not gen_vals.empty and label != "Random": # Random 代数无意义，强制 NaN
+        if not gen_vals.empty and label != "Random": 
             avg_gen = gen_vals.mean()
             
     print(f"  -> {label}: {n_crashes} unique crashes, Cost={time_eff:.1f} min, AvgGen={avg_gen:.1f}")
@@ -261,17 +259,17 @@ def main():
         "colors": []
     }
     
-    # 遍历配置中的方法
+    # 遍历配置中的方法 (现在顺序已经是字母序)
     for label, config in FILES_CONFIG.items():
         print(f"正在处理: {label} ...")
         time_eff, avg_gen = process_data(label, config)
         
-        # 只要文件处理没报错（即使结果是0），都加入图表以便对比
+        # 即使结果是0也加入，以保持图表占位
         if time_eff is not None:
             metrics_data["labels"].append(label)
             metrics_data["time_per_crash"].append(time_eff)
             metrics_data["gen_avg_depth"].append(avg_gen)
-            # 使用预定义的颜色，如果未定义则默认为黑色
+            # 使用新的颜色映射
             metrics_data["colors"].append(COLOR_MAP.get(label, "#333333"))
 
     # ==========================================
@@ -302,7 +300,7 @@ def main():
     # --- Subplot 2: Average Discovery Generation ---
     ax2 = axes[1]
     
-    # 过滤掉 NaN 数据 (Random/G-Model 可能没有代数)
+    # 过滤掉 NaN 数据
     valid_indices = [i for i, x in enumerate(metrics_data["gen_avg_depth"]) if not np.isnan(x) and x > 0]
     
     if valid_indices:
@@ -329,7 +327,7 @@ def main():
         ax2.set_title("Average Discovery Generation")
 
     plt.tight_layout()
-    output_file = 'RQ3_bw.png'
+    output_file = 'RQ3_bw_aligned.png'
     plt.savefig(output_file, dpi=300)
     print(f"\n图表已保存至: {output_file}")
     plt.show()
