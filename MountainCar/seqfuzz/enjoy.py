@@ -16,7 +16,7 @@ import torch
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", help="environment ID", type=str, default="MountainCar-v0")
-    parser.add_argument("-f", "--folder", help="Log folder", type=str, default="..\logs")
+    parser.add_argument("-f", "--folder", help="Log folder", type=str, default="../logs")
     parser.add_argument("--algo", help="RL Algorithm", default="dqn", type=str, required=False, choices=list(ALGOS.keys()))
     parser.add_argument("-n", "--n_timesteps", help="number of timesteps", default=200, type=int)
     parser.add_argument("--num-threads", help="Number of threads for PyTorch (-1 to use default)", default=-1, type=int)
@@ -206,7 +206,7 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 1000
+    seeds_num = 1500
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     

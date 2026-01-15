@@ -33,7 +33,7 @@ if __name__ == '__main__':
     
     # 预算具体数值
     BUDGET_HOURS = 12       # 如果选 TIME，运行多少小时
-    BUDGET_ITERS = 6000    # 如果选 ITERATION，运行多少次 (不含 init_budget)
+    BUDGET_ITERS = 7000    # 如果选 ITERATION，运行多少次 (不含 init_budget)
     # ============================
 
     # 计算实际参数
