@@ -335,13 +335,13 @@ def main():
     
     # 运行原有的绘图逻辑
     plot_crash_trend(deduplicated_log)
-    plot_full_space(deduplicated_log, dtype, expected_size)
-    plot_generation_histogram(deduplicated_log)
-    plot_crashes_over_time(deduplicated_log)
-    analyze_crash_statistics(deduplicated_log)
+    #plot_full_space(deduplicated_log, dtype, expected_size)
+    #plot_generation_histogram(deduplicated_log)
+    #plot_crashes_over_time(deduplicated_log)
+    #analyze_crash_statistics(deduplicated_log)
     
     # 运行新增的 QD-Fuzz 行为多样性分析
-    calculate_behaviour_diversity(deduplicated_log)
+    #calculate_behaviour_diversity(deduplicated_log)
 
     print("\nAll analysis and plotting completed.")
 

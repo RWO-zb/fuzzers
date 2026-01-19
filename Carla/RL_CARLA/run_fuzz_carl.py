@@ -1,5 +1,9 @@
 import os
 import sys
+
+# [修复1] 必须在 import pygame 之前设置，防止 Headless 模式卡死
+os.environ["SDL_VIDEODRIVER"] = "dummy"
+
 import time
 import math
 import random
@@ -11,9 +15,6 @@ import pickle
 from pathlib import Path
 import carla
 import pygame
-
-# 禁用 SDL 视频驱动
-os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 # 路径设置
 current_script_path = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +49,9 @@ except ImportError:
 # 辅助函数：Patch Pygame & Map Utils
 # ==========================================
 def patch_map_utils():
+    # 再次确认环境变量，兼容不同加载顺序
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+    
     @classmethod
     def patched_init(cls, client, world, carla_map, player):
         pygame.init()
@@ -363,6 +367,8 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
 
     client = env_manager.client
     world = env_manager.world
+    
+    # 强制开启同步模式，确保环境稳定
     settings = world.get_settings()
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = 1.0 / VIDEO_FPS 
@@ -440,6 +446,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         if collision_sensor: collision_sensor.destroy()
         if vehicle: vehicle.destroy()
         client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
+        world.tick() # 确保销毁后tick
         return "INITIAL_CRASH" 
 
     route_file = f"route_{run_name}.xml"
@@ -570,10 +577,9 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         try: world.tick()
         except: pass
         
-        settings = world.get_settings()
-        settings.synchronous_mode = False 
-        settings.fixed_delta_seconds = None
-        world.apply_settings(settings)
+        # [修复2]：删除了此处将 synchronous_mode 设为 False 的代码。
+        # 保持同步模式为 True，让服务器在 Python 处理数据时处于暂停状态，防止死锁。
+        
         if os.path.exists(route_file): 
             try: os.remove(route_file)
             except: pass

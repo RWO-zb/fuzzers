@@ -354,14 +354,10 @@ class PCLAExecutor(Executor):
         return tasks
 
     def _create_input_vector(self, s_idx, t_idx, weather_idx, rng):
-        """
-        Modified to include maximum attempt limit to prevent infinite loops (deadlocks) 
-        when generating random scenarios.
-        """
         start_vec = self.start_positions[s_idx].copy()
         indices = []
         
-        # [Fix] Add attempt counter to prevent infinite loops
+        # Add attempt counter to prevent infinite loops
         attempts = 0
         max_attempts = 2000 
         
@@ -369,17 +365,13 @@ class PCLAExecutor(Executor):
             attempts += 1
             i = rng.choice(self.num_start_positions)
             
-            # Default constraint: not the ego vehicle
             valid = (i != s_idx)
             
             if attempts < 1000:
-                # Strict mode: distinct position AND >10m distance from ego
                 valid = valid and (i not in indices) and (np.linalg.norm(self.start_positions[i][:2] - start_vec[:2]) > 10.0)
             elif attempts < max_attempts:
-                # Relaxed mode: just distinct position
                 valid = valid and (i not in indices)
             else:
-                # Panic mode: just ensure it's not the ego (allow overlap, let physics engine handle it)
                 pass 
             
             if valid:
@@ -389,24 +381,13 @@ class PCLAExecutor(Executor):
         return np.hstack([np.array([weather_idx, t_idx, s_idx]), start_vec] + npc_vecs)
 
     def generate_input(self, rng: np.random.Generator) -> np.ndarray:
-        """
-        [MODIFIED] 
-        修改了任务生成逻辑：
-        1. 优先使用预设的 all_combinations (benchmark任务) 进行遍历。
-        2. 当预设任务遍历完 (StopIteration) 后，不再生成全随机坐标。
-        3. 而是从 self.all_combinations 中随机抽取一个任务（允许重复）。
-        """
         if self.all_combinations:
             try:
-                # 尝试获取下一个预设任务（保证前408个覆盖测试）
                 s_idx, t_idx, w_idx = next(self.combo_iterator)
             except StopIteration:
-                # 遍历结束后，从列表中随机抽取一个组合
-                # 使用 rng 生成 0 到 len-1 之间的随机整数
                 idx = rng.integers(0, len(self.all_combinations))
                 s_idx, t_idx, w_idx = self.all_combinations[idx]
         else:
-            # 如果没有加载到基准任务，则回退到完全随机
             s_idx = rng.choice(self.num_start_positions)
             t_idx = rng.choice(self.num_start_positions)
             w_idx = rng.integers(0, 4)
@@ -700,14 +681,46 @@ class PCLAExecutor(Executor):
             stop_reason = "error"
             is_collision = True 
         
+        # ================= [修改点：强化清理逻辑] =================
         finally:
+            # 1. 停止传感器 (防止死锁)
             for sensor in sensor_list:
-                if sensor and sensor.is_alive: sensor.destroy()
-            if vehicle and vehicle.is_alive: vehicle.destroy()
-            self.env.client.apply_batch([carla.command.DestroyActor(x) for x in npc_actors])
-            if agent and hasattr(agent, 'destroy'): agent.destroy()
-            if wrapper_initialized: self.env.map_wrapper.clear()
-            if route_file and os.path.exists(route_file): os.remove(route_file)
+                if sensor and sensor.is_alive:
+                    sensor.stop()
+            
+            # 2. 销毁传感器
+            for sensor in sensor_list:
+                if sensor and sensor.is_alive:
+                    sensor.destroy()
+            
+            # 3. 销毁主车
+            if vehicle and vehicle.is_alive:
+                vehicle.destroy()
+            
+            # 4. 销毁 NPC
+            if npc_actors:
+                self.env.client.apply_batch([carla.command.DestroyActor(x) for x in npc_actors])
+            
+            # 5. 销毁 Agent
+            if agent and hasattr(agent, 'destroy'): 
+                agent.destroy()
+            
+            # 6. 清理 Map Wrapper
+            if wrapper_initialized: 
+                self.env.map_wrapper.clear()
+            
+            # 7. 删除路由文件
+            if route_file and os.path.exists(route_file): 
+                try:
+                    os.remove(route_file)
+                except: pass
+
+            # 8. [关键修复] 强制 Tick！解决 Random 模式下的服务器死锁问题
+            try:
+                self.env.world.tick()
+            except Exception:
+                pass
+        # ========================================================
 
             current_global_time = time.time() - self.experiment_start_time
             duration = time.time() - start_time

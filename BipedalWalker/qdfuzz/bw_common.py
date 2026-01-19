@@ -84,7 +84,8 @@ def get_inputs_from_keys(keys: Iterable[str]) -> np.ndarray:
     return np.array([np.asfarray(k.split(' '), dtype=str).astype(int) for k in keys])
 
 
-def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descriptors: List = None, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, np.ndarray, float]:
+# [修改] 返回值类型注解增加了 List[np.ndarray]
+def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descriptors: List = None, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, np.ndarray, float, List[np.ndarray]]:
     '''Executes the model on the environment and only computes the 12 features used by Leo Cazenille. It also returns the final state.'''
 
     env = gym.make('BipedalWalkerHardcore-v4',rand_seed=env_seed)
@@ -95,8 +96,16 @@ def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descr
     obs = env.reset(input)
     state = None
     t0 = time.time()
+    
+    # [新增] 存储 (State, Action) 序列
+    transitions = []
+
     for t in range(sim_steps):
         action, state = model.predict(obs, state=state, deterministic=True)
+        
+        # [新增] 收集 transitions (在 step 之前收集当前的 obs 和即将执行的 action)
+        transitions.append(np.concatenate([obs.flatten(), action.flatten()]))
+        
         obs, reward, done, info = env.step(action)
         features += info['features'] # numpy array
         acc_reward += reward
@@ -111,12 +120,13 @@ def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descr
     # 修改判定逻辑：如果最后一步reward是-100（摔倒）或者总奖励 acc_reward < 10，则判定为Crash
     is_crash = (reward == -100) or (acc_reward < 10)
 
+    # [修改] 返回 transitions
     if descriptors is not None:
         descriptors = np.array(descriptors)
         assert all(descriptors < 12) and all(descriptors >= 0)
-        return acc_reward, is_crash, features[descriptors], obs, exec_time
+        return acc_reward, is_crash, features[descriptors], obs, exec_time, transitions
     else:
-        return acc_reward, is_crash, features, obs, exec_time
+        return acc_reward, is_crash, features, obs, exec_time, transitions
 
 
 def execute_policy_trajectory(input: np.ndarray, model: BaseAlgorithm, env_seed: int, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, List[np.ndarray], float]:
@@ -167,7 +177,8 @@ if __name__ == '__main__':
 
     for _ in tqdm.tqdm(range(100)):
         input: np.ndarray = rng.integers(low=1, high=4, size=15)
-        r, o, b, fs, _ = execute_policy(input, model, env_seed, descriptors, 1000)
+        # [修改] 接收 6 个返回值
+        r, o, b, fs, _, _ = execute_policy(input, model, env_seed, descriptors, 1000)
         oracles.append(o)
         rewards.append(r)
         behaviors.append(b)

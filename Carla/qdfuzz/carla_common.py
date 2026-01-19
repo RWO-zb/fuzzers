@@ -1,4 +1,7 @@
 import os
+# [修复1] 设置 SDL 为 dummy 驱动，防止无头模式下 PyGame 初始化卡死
+os.environ["SDL_VIDEODRIVER"] = "dummy"
+
 import sys
 import time
 import random
@@ -48,6 +51,7 @@ AGENT_NAME = "carl_roach_0"
 # ==================== Helper Functions ====================
 
 def patch_map_utils():
+    # 注意：顶部的 os.environ 设置已经生效，这里保留是为了兼容性
     os.environ["SDL_VIDEODRIVER"] = "dummy"
     
     @classmethod
@@ -290,7 +294,9 @@ class CarlaEnvManager:
 
     def init_traffic(self, num_vehicles, hero_transform, seed=None):
         """
-        这个函数保留，用于 generate_random_individual 中生成初始的合法随机位置
+        [DEPRECATED BUT KEPT FOR COMPATIBILITY]
+        这个函数在 generate_random_individual 中已不再调用，
+        但保留在此以防其他模块需要。
         """
         self.client.apply_batch([carla.command.DestroyActor(x) for x in self.world.get_actors().filter('vehicle.*')])
         if num_vehicles <= 0: return [], []
@@ -332,14 +338,13 @@ def load_model(args, result_dir):
 
 def generate_random_individual(model: CarlaEnvManager, seed: int, task_idx: int = None, weather_id: int = None):
     """
-    Phase 1: 生成随机初始个体。
-    [修改点]: 增加了 task_idx 和 weather_id 可选参数。
-    如果提供了这两个参数，将强制使用指定的路线和天气，从而支持外部的去重逻辑。
-    如果未提供，则保持原有的随机行为。
+    [FIXED] Phase 1: 生成随机初始个体。
+    修改后：使用纯 Python 逻辑生成随机位置和车型配置，
+    完全不调用 SpawnActor 和 DestroyActor，避免 Traffic Manager 崩溃。
     """
     rng = random.Random(seed)
     
-    # [修改] 如果未指定 task_idx，则随机选择（兼容旧逻辑或Phase 2）
+    # 1. 任务 (起点/终点)
     if task_idx is None:
         task_idx = rng.randint(0, len(model.tasks) - 1)
     
@@ -351,19 +356,43 @@ def generate_random_individual(model: CarlaEnvManager, seed: int, task_idx: int 
     
     start_pose = model.spawn_points[start_id]
     
-    # [修改] 如果未指定 weather_id，则随机选择
+    # 2. 天气
     if weather_id is None:
         weather_id = rng.choice(model.weathers)
     
-    # 生成交通流的种子依旧保持随机变化，以确保即使路线相同，车流也是多样化的
-    # 使用 seed 派生出一个新的种子，避免直接复用 seed
+    # 3. 交通流配置 (纯数据生成，不产生物理实体)
     traffic_seed = seed + rng.randint(0, 10000)
+    rng_traffic = random.Random(traffic_seed)
     
-    # 临时生成一次以获取合法的随机位置，然后清理
-    npc_ids, npc_info = model.init_traffic(model.args.num_vehicles, start_pose, seed=traffic_seed)
-    model.client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
+    # 获取所有可用的四轮车蓝图
+    blueprints = model.world.get_blueprint_library().filter("vehicle.*")
+    blueprints = [x for x in blueprints if int(x.get_attribute('number_of_wheels')) == 4]
     
-    # 返回物理状态对象: (EgoTransform, NPC_Info_List, WeatherID, StartID, TargetID)
+    # 获取所有生成点并打乱
+    spawn_points = model.map.get_spawn_points()
+    rng_traffic.shuffle(spawn_points)
+    
+    npc_info = []
+    count = 0
+    
+    for transform in spawn_points:
+        if count >= model.args.num_vehicles: break
+        
+        # 距离过滤：不要在主车起点附近生成
+        if transform.location.distance(start_pose.location) < 10.0: continue
+        
+        # 随机选择车型和颜色
+        blueprint = rng_traffic.choice(blueprints)
+        color = None
+        if blueprint.has_attribute('color'):
+            color = rng_traffic.choice(blueprint.get_attribute('color').recommended_values)
+        
+        # 记录配置：(blueprint_id, transform, color, driver_id)
+        # 注意：这里直接保存 blueprint.id 字符串，后续 execute_policy 会重新 find
+        npc_info.append((blueprint.id, transform, color, None))
+        count += 1
+    
+    # 此时无需销毁任何 Actor，也无需 Tick
     return (start_pose, npc_info, weather_id, start_id, target_id)
 
 def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptors=None, sim_steps=200, mutation_generation=0, run_name=None, phase=None, input_pre=None):
@@ -372,6 +401,7 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
     修改：
     1. 返回 stop_reason
     2. distinct_crashes 包含碰撞和未完成任务（超时等）
+    3. [FIXED] 使用 apply_batch_sync 进行清理，并严格遵循 stop->destroy->tick 顺序
     """
     # 1. 解包 Individual
     start_pose, npc_info, weather_id, start_id, target_id = individual
@@ -379,6 +409,14 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
     
     client = model.client
     world = model.world
+    
+    # ================= [修复2]：每个 Episode 开始前强制重置同步设置 =================
+    # 这能防止上一个 Episode 异常退出后，当前 Episode 卡死
+    settings = world.get_settings()
+    settings.synchronous_mode = True
+    settings.fixed_delta_seconds = 1.0 / VIDEO_FPS
+    world.apply_settings(settings)
+    # =========================================================================
     
     # 2. 设置环境 (天气、红绿灯)
     weather_params = {
@@ -389,8 +427,10 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
     }
     world.set_weather(weather_params.get(weather_id, carla.WeatherParameters.ClearNoon))
     
-    client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('vehicle.*')])
-    client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
+    # [FIXED] Sync destroy existing actors
+    client.apply_batch_sync([carla.command.DestroyActor(x) for x in world.get_actors().filter('vehicle.*')])
+    client.apply_batch_sync([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
+    
     for _ in range(5): world.tick()
     
     try:
@@ -407,7 +447,12 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
     valid_npc_info = [] 
     for item in npc_info:
         bp_id, transform, color, driver_id = item
-        blueprint = world.get_blueprint_library().find(bp_id)
+        # 支持 bp_id 为字符串或 Blueprint 对象
+        if isinstance(bp_id, str):
+            blueprint = world.get_blueprint_library().find(bp_id)
+        else:
+            blueprint = world.get_blueprint_library().find(str(bp_id))
+
         if color: blueprint.set_attribute('color', color)
         blueprint.set_attribute('role_name', 'autopilot')
         
@@ -434,7 +479,8 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
         world.tick()
         vehicle = world.try_spawn_actor(bp, spawn_transform)
         if not vehicle:
-            client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
+            # [FIXED] Sync destroy
+            client.apply_batch_sync([carla.command.DestroyActor(x) for x in npc_ids])
             return 0.0, True, np.zeros(2), individual, 0.0, "SpawnFail", "SpawnFail"
 
     collision_bp = world.get_blueprint_library().find('sensor.other.collision')
@@ -456,9 +502,15 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
         
     if initial_crash:
         if wrapper_initialized: map_utils.Wrapper.clear()
-        if collision_sensor: collision_sensor.destroy()
-        if vehicle: vehicle.destroy()
-        client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
+        
+        # [修复] 传感器先停止再销毁
+        if collision_sensor and collision_sensor.is_alive: collision_sensor.stop()
+        if collision_sensor and collision_sensor.is_alive: collision_sensor.destroy()
+        
+        if vehicle and vehicle.is_alive: vehicle.destroy()
+        # [FIXED] Sync destroy and flush
+        client.apply_batch_sync([carla.command.DestroyActor(x) for x in npc_ids])
+        world.tick()
         return 0.0, True, np.zeros(2), individual, 0.0, "InitialCrash", "InitialCrash"
 
     # 5. 运行 Simulation Loop
@@ -544,8 +596,6 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
             
             if cur_dist < 5.0:
                 stop_reason = "Success"
-                # [MODIFIED] Removed the explicit +100 reward bonus to match RL_CARLA logic
-                # episode_reward += 100 
                 break
                 
     except Exception as e:
@@ -554,7 +604,6 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
         
     finally:
         # [NEW] Record crash/failure for timeouts (not success and not collided)
-        # 确保 distinct_crashes 包含所有失效情况（碰撞 + 任务未完成）
         if stop_reason != "Success" and stop_reason != "Collision":
             if 'cur_loc' in locals():
                 if phase != "Phase1":
@@ -562,11 +611,38 @@ def execute_policy(individual, model: CarlaEnvManager, env_seed: int, descriptor
 
         exec_time = time.time() - start_time
         
-        if wrapper_initialized: map_utils.Wrapper.clear()
-        if collision_sensor: collision_sensor.destroy()
-        if vehicle: vehicle.destroy()
-        client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
-        if os.path.exists(route_file): os.remove(route_file)
+        # ================= [修复3]：严格的资源清理逻辑 =================
+        # 1. 清理 Pygame Wrapper
+        if wrapper_initialized: 
+            try:
+                map_utils.Wrapper.clear()
+            except: pass
+        
+        # 2. 停止并销毁传感器 (先 Stop 防止死锁)
+        if collision_sensor and collision_sensor.is_alive:
+            collision_sensor.stop()
+        if collision_sensor and collision_sensor.is_alive:
+            collision_sensor.destroy()
+            
+        # 3. 销毁主车
+        if vehicle and vehicle.is_alive:
+            vehicle.destroy()
+        
+        # 4. 销毁所有 NPC 并强制 Tick
+        if npc_ids:
+            client.apply_batch_sync([carla.command.DestroyActor(x) for x in npc_ids])
+            
+        # 5. [关键] 最后执行一次 Tick，通知 Server Actor 已销毁，防止 TM 死锁
+        try:
+            world.tick()
+        except Exception:
+            pass
+        # =============================================================
+            
+        if os.path.exists(route_file): 
+            try:
+                os.remove(route_file)
+            except: pass
 
     avg_speed = np.mean(episode_speeds) if episode_speeds else 0.0
     steer_std = np.std(episode_steers) if episode_steers else 0.0

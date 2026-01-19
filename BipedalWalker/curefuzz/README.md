@@ -33,8 +33,8 @@ git clone https://github.com/DLR-RM/rl-trained-agents
 
 Check the default path of the model is correct in `./enjoy_cure.py`. 
 
-Run `python enjoy_cure.py  --guide --no-render --seed 0 --save-data --save-transitions --window-size 25 ` to start fuzz testing.
+Run `python enjoy_cure.py  --guide --no-render --seed 0  --save-transitions ` to start fuzz testing.
 
-Run ` python retrain.py --env BipedalWalkerHardcore-v3 --algo tqc --model-path ../rl-trained-agents/tqc/BipedalWalkerHardcore-v3_1/BipedalWalkerHardcore-v3.zip --transitions-path transitions.pkl --n-timesteps 100000 --folder logs/retrained_models`
+Run ` python retrain.py --env BipedalWalkerHardcore-v3 --algo tqc --model-path ../rl-trained-agents/tqc/BipedalWalkerHardcore-v3_1/BipedalWalkerHardcore-v3.zip --transitions-path transitions.pkl  --folder logs/retrained_models`
 
-python verify.py --file results/01_14_2026_10_38_26_seed_0/physics_trajectory.pkl
+

@@ -5,12 +5,93 @@ import torch
 import tqdm
 import numpy as np
 import pandas as pd
+import random # [新增]
 
 from stable_baselines3.common.base_class import BaseAlgorithm
 from typing import List, Optional
 
 from bw_common import load_model, EXPERT_INDICES, execute_policy, get_edges
 from common import compute_cell, EXPERIMENT_SEEDS
+
+# ==========================================
+# [新增] TodyNet 数据收集辅助函数
+# ==========================================
+def process_episode_data(sequence, label, window_size):
+    seq_len = len(sequence)
+    if seq_len < window_size:
+        return None, None
+    
+    seq_array = np.array(sequence) 
+    windows = []
+    labels = []
+
+    if label == 0:
+        max_idx = seq_len - window_size
+        rand_idx = random.randint(0, max_idx)
+        win = seq_array[rand_idx : rand_idx + window_size]
+        win = win.transpose() 
+        windows.append(win)
+        labels.append(0)
+    else:
+        win = seq_array[-window_size:] 
+        win = win.transpose()
+        windows.append(win)
+        labels.append(1)
+        
+    return np.array(windows), np.array(labels)
+
+def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size, target_total=3000, target_crash_ratio=0.30):
+    if not X_list:
+        return
+    
+    print(f"\n[TodyNet Data] Processing balancing to {target_total} samples (Target Crash Ratio: {target_crash_ratio:.0%})...")
+    X_all = np.concatenate(X_list, axis=0)
+    y_all = np.concatenate(y_list, axis=0)
+    
+    indices_fail = np.where(y_all == 1)[0]
+    indices_succ = np.where(y_all == 0)[0]
+    
+    n_crash_target = int(target_total * target_crash_ratio)
+    n_succ_target = target_total - n_crash_target
+    
+    print(f"  Raw Collected: Fail={len(indices_fail)}, Success={len(indices_succ)}")
+
+    if len(indices_fail) >= n_crash_target:
+        final_fail = np.random.choice(indices_fail, size=n_crash_target, replace=False)
+    else:
+        final_fail = indices_fail
+        
+    if len(indices_succ) >= n_succ_target:
+        final_succ = np.random.choice(indices_succ, size=n_succ_target, replace=False)
+    else:
+        final_succ = indices_succ
+    
+    final_indices = np.concatenate([final_fail, final_succ])
+    np.random.shuffle(final_indices)
+    
+    X_balanced = X_all[final_indices]
+    y_balanced = y_all[final_indices]
+
+    X_final = np.expand_dims(X_balanced, axis=1)
+    X_tensor = torch.from_numpy(X_final).float()
+    y_tensor = torch.from_numpy(y_balanced).long()
+    
+    total = X_tensor.size(0)
+    indices = torch.randperm(total)
+    split = int(0.8 * total)
+    
+    ds_id = f"{dataset_name}_{window_size}"
+    save_path = os.path.join(output_dir, ds_id)
+    os.makedirs(save_path, exist_ok=True)
+    
+    torch.save(X_tensor[indices[:split]], os.path.join(save_path, 'X_train.pt'))
+    torch.save(y_tensor[indices[:split]], os.path.join(save_path, 'y_train.pt'))
+    torch.save(X_tensor[indices[split:]], os.path.join(save_path, 'X_valid.pt'))
+    torch.save(y_tensor[indices[split:]], os.path.join(save_path, 'y_valid.pt'))
+    
+    print(f"[TodyNet Data] Saved {total} samples to {save_path}")
+
+# ==========================================
 
 class Framework():
     def __init__(self, rand_seed: int, cell_granularity: int, descriptors: List[int], **kwargs) -> None:
@@ -250,7 +331,10 @@ class Framework():
                     results_fp: str,
                     time_budget_hours: Optional[float] = None, # 可选时间
                     execution_budget: Optional[int] = None,    # 可选次数
-                    disable_pbar: bool = False):
+                    disable_pbar: bool = False,
+                    save_data: bool = True,   # [新增] 
+                    window_size: int = 25     # [新增]
+                    ):
 
         if time_budget_hours is None and execution_budget is None:
             raise ValueError("At least one budget (time_budget_hours or execution_budget) must be provided.")
@@ -286,6 +370,12 @@ class Framework():
         testing_start_time = time.time()
         execution_times = []
         n_executions = 0 
+        
+        # [新增] TodyNet 容器
+        all_window_data = [] 
+        all_label_data = []
+        todynet_success_count = 0
+        TODYNET_SUCCESS_CAP = 3000
 
         print("Starting initialization phase...")
         for _ in tqdm.tqdm(range(init_budget), disable=disable_pbar):
@@ -297,9 +387,23 @@ class Framework():
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
 
             t0 = time.time()
-            episode_reward, oracle, behavior, fs, _ = execute_policy(input, model, env_seed, self.descriptors)
+            # [修改] 接收 transitions
+            episode_reward, oracle, behavior, fs, _, transitions = execute_policy(input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
+
+            # [新增] 数据收集
+            if save_data:
+                is_crash = oracle
+                label = 1 if is_crash else 0
+                collect_this = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
+                if collect_this:
+                    wins, labels = process_episode_data(transitions, label, window_size)
+                    if wins is not None:
+                        all_window_data.append(wins)
+                        all_label_data.append(labels)
+                        if not is_crash:
+                            todynet_success_count += 1
 
             inputs.append(input)
             behaviors.append(behavior)
@@ -351,11 +455,25 @@ class Framework():
 
             mutated_input = self.mutate(input)
             t0 = time.time()
-            episode_reward, oracle, behavior, fs, _ = execute_policy(mutated_input, model, env_seed, self.descriptors)
+            # [修改] 接收 transitions
+            episode_reward, oracle, behavior, fs, _, transitions = execute_policy(mutated_input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
             
             n_executions += 1 
+
+            # [新增] 数据收集
+            if save_data:
+                is_crash = oracle
+                label = 1 if is_crash else 0
+                collect_this = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
+                if collect_this:
+                    wins, labels = process_episode_data(transitions, label, window_size)
+                    if wins is not None:
+                        all_window_data.append(wins)
+                        all_label_data.append(labels)
+                        if not is_crash:
+                            todynet_success_count += 1
 
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
             new_mutation_count = parent_mutation_count + 1
@@ -386,6 +504,10 @@ class Framework():
         logs_buffer.close()
         final_states_buffer.close()
         self.save_state(filepath)
+        
+        # [新增] 保存 TodyNet 数据
+        if save_data:
+            balance_and_save_data(all_window_data, all_label_data, results_fp, "BipedalWalkerHC", window_size)
 
 
     def random_testing(self, model: BaseAlgorithm,
@@ -393,7 +515,10 @@ class Framework():
                     results_fp: str,
                     time_budget_hours: Optional[float] = None,
                     execution_budget: Optional[int] = None,
-                    disable_pbar: bool = False):
+                    disable_pbar: bool = False,
+                    save_data: bool = True,   # [新增]
+                    window_size: int = 25     # [新增]
+                    ):
         '''Random testing loop baseline.'''
         
         if time_budget_hours is None and execution_budget is None:
@@ -427,6 +552,12 @@ class Framework():
         n_executions = 0 
         start_time = time.time()
         
+        # [新增] TodyNet 容器
+        all_window_data = [] 
+        all_label_data = []
+        todynet_success_count = 0
+        TODYNET_SUCCESS_CAP = 3000
+        
         if execution_budget is not None:
             pbar = tqdm.tqdm(total=execution_budget, disable=disable_pbar)
         else:
@@ -435,11 +566,25 @@ class Framework():
         while self._check_budget(start_time, n_executions, time_budget_hours, execution_budget):
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
             t0 = time.time()
-            episode_reward, oracle, behavior, fs, _ = execute_policy(input, model, env_seed, self.descriptors)
+            # [修改] 接收 transitions
+            episode_reward, oracle, behavior, fs, _, transitions = execute_policy(input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
             
             n_executions += 1 
+
+            # [新增] 数据收集
+            if save_data:
+                is_crash = oracle
+                label = 1 if is_crash else 0
+                collect_this = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
+                if collect_this:
+                    wins, labels = process_episode_data(transitions, label, window_size)
+                    if wins is not None:
+                        all_window_data.append(wins)
+                        all_label_data.append(labels)
+                        if not is_crash:
+                            todynet_success_count += 1
 
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
             elapsed_time = time.time() - start_time
@@ -468,6 +613,10 @@ class Framework():
         logs_buffer.close()
         final_states_buffer.close()
         self.save_state(filepath)
+        
+        # [新增] 保存 TodyNet 数据
+        if save_data:
+            balance_and_save_data(all_window_data, all_label_data, results_fp, "BipedalWalkerHC", window_size)
 
 
     def novelty_search(self, model: BaseAlgorithm,
@@ -478,7 +627,10 @@ class Framework():
                     results_fp: str,
                     time_budget_hours: Optional[float] = None,
                     execution_budget: Optional[int] = None,
-                    disable_pbar: bool = False):
+                    disable_pbar: bool = False,
+                    save_data: bool = True,   # [新增]
+                    window_size: int = 25     # [新增]
+                    ):
         '''Does not use cached data anymore.'''
 
         if time_budget_hours is None and execution_budget is None:
@@ -508,6 +660,12 @@ class Framework():
         testing_start_time = time.time()
         n_executions = 0
         
+        # [新增] TodyNet 容器
+        all_window_data = [] 
+        all_label_data = []
+        todynet_success_count = 0
+        TODYNET_SUCCESS_CAP = 3000
+        
         print(f'Starting novelty_search. Time Budget: {time_budget_hours}h, Execution Budget: {execution_budget}')
 
         self.xedges, self.yedges = get_edges(env_seed, self.descriptors)
@@ -525,13 +683,29 @@ class Framework():
         
         def evaluate(individuals: np.ndarray, mutation_counts: np.ndarray, loop_start_time: float = None) -> np.ndarray:
             nonlocal n_executions 
+            nonlocal todynet_success_count # [新增]
+            
             behaviors = []
             for i, ind in enumerate(individuals):
                 if not self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
                     break 
                 
-                r, o, b, fs, _ = execute_policy(ind, model, env_seed, self.descriptors, 300)
+                # [修改] 接收 transitions
+                r, o, b, fs, _, transitions = execute_policy(ind, model, env_seed, self.descriptors, 300)
                 n_executions += 1
+                
+                # [新增] 数据收集
+                if save_data:
+                    is_crash = o
+                    label = 1 if is_crash else 0
+                    collect_this = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
+                    if collect_this:
+                        wins, labels = process_episode_data(transitions, label, window_size)
+                        if wins is not None:
+                            all_window_data.append(wins)
+                            all_label_data.append(labels)
+                            if not is_crash:
+                                todynet_success_count += 1
                 
                 if loop_start_time is None:
                     e_time = 0.0
@@ -634,6 +808,10 @@ class Framework():
         logs_buffer.close()
         final_states_buffer.close()
         self.save_state(filepath)
+        
+        # [新增] 保存 TodyNet 数据
+        if save_data:
+            balance_and_save_data(all_window_data, all_label_data, results_fp, "BipedalWalkerHC", window_size)
 
 #TODO: this version can actually only keep the best performing input per cell (since all execution data is recorded during testing)
 class MAPElitesFramework(Framework):
@@ -660,13 +838,8 @@ if __name__ == '__main__':
     model = load_model()
 
     # --- 配置区域 ---
-    # 你可以在这里同时设置时间预算(小时)和执行次数预算。
-    # 程序会在任一限制达到时停止。设置为 None 则忽略该限制。
-    
-    TIME_BUDGET_HOURS = None       # 例如: 12 小时
-    EXECUTION_BUDGET = 5000     # 例如: 20000 次执行
-    
-    # ----------------
+    TIME_BUDGET_HOURS = 12600      
+    EXECUTION_BUDGET = None     
     
     init_budget = 1000
     cell_granularity = 50
@@ -685,14 +858,16 @@ if __name__ == '__main__':
             print(f"--- Running MAP-Elites ---")
             f = MAPElitesFramework(seed, cell_granularity, descriptors=expert_indices, name='MAP-Elites')
             
-            # 使用新的参数接口调用
+            # 使用新的参数接口调用, 并启用 save_data
             f.test_policy(
                 model=model, 
                 env_seed=env_seed, 
                 init_budget=init_budget, 
                 results_fp=results_fp,
-                time_budget_hours=TIME_BUDGET_HOURS,    # 传入时间预算
-                execution_budget=EXECUTION_BUDGET       # 传入执行预算
+                time_budget_hours=TIME_BUDGET_HOURS,    
+                execution_budget=EXECUTION_BUDGET,
+                save_data=True, # [新增]
+                window_size=25
             )
             
         print(f'Experts done.')
