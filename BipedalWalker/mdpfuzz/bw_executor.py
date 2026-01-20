@@ -12,11 +12,9 @@ class BipedalWalkerExecutor(Executor):
     def __init__(self, sim_steps, env_seed, save_physics=False):
         """
         初始化 Executor
-        :param save_physics: 是否开启物理轨迹收集 (用于反向课程生成)
         """
         super().__init__(sim_steps, env_seed)
         self.save_physics = save_physics
-        # 用于存储导致 Crash 的物理轨迹: [{'seed': input, 'trajectory': [state_t0, state_t1, ...]}, ...]
         self.crash_physics_trajectories = []
 
     def generate_input(self, rng: np.random.Generator) -> np.ndarray:
@@ -35,7 +33,7 @@ class BipedalWalkerExecutor(Executor):
         return mutated_input
 
     def load_policy(self):
-        # 请根据实际路径调整
+        # 请根据你的实际路径调整 path
         return TQC.load(
             "D:\\code\\fuzzers\\BipedalWalker\\rl-trained-agents\\tqc\\BipedalWalkerHardcore-v3_1\\BipedalWalkerHardcore-v3.zip",
             device='cpu',
@@ -43,9 +41,6 @@ class BipedalWalkerExecutor(Executor):
             kwargs={'seed': 0, 'buffer_size': 1})
 
     def extract_physics_state(self, env):
-        """
-        从底层 Box2D 环境提取物理状态
-        """
         base_env = env.unwrapped
         if not hasattr(base_env, 'hull') or not hasattr(base_env, 'legs'):
             return None
@@ -75,28 +70,24 @@ class BipedalWalkerExecutor(Executor):
     def execute_policy(self, input: np.ndarray, policy: Any) -> Tuple[float, bool, np.ndarray, float, float, float, List]:
         '''
         Executes the model and returns the trajectory data and behaviour metrics.
-        Returns: (acc_reward, is_crash, obs_seq, exec_time, bd_dist, bd_mean_angle, transitions)
+        [Alignment]: 该函数返回的 obs 是原始环境 (gym.make) 生成的，因此天然是 RAW 数据。
         '''
         env = gym.make('BipedalWalkerHardcore-v3')
-        # input 即为 seed 数组 (mutate_states)
+        
         try:
-            env.reset(seed=int(0)) # 初始化随机种子
+            env.reset(seed=int(0)) 
         except:
             env.seed(0)
             
         obs_seq = []
-        transitions = [] 
+        transitions = [] # [Raw] Transitions
         
-        # 当前 Episode 的物理轨迹缓存
         current_episode_physics = []
-        
         acc_reward = 0.0
 
-        # 注意：这里 reset 传入 input，这是自定义环境接收地形参数的方式
         try:
             obs = env.reset(input)
         except TypeError:
-            # 兼容性处理
             obs = env.reset()
         
         state = None
@@ -105,28 +96,31 @@ class BipedalWalkerExecutor(Executor):
         total_abs_angle_sum = 0.0
         episode_steps = 0
         
-        # 记录初始物理状态
         if self.save_physics:
             phys = self.extract_physics_state(env)
             if phys:
                 current_episode_physics.append(phys)
         
         t0 = time.time()
-        # 确保 reward 在循环外有定义，防止 sim_steps 为 0 或直接 break 的极端情况
-        reward = 0.0 
         
         for t in range(self.sim_steps):
+            # policy.predict 接受 Raw obs (前提是 Policy 训练时也见过 Raw，或者内部处理)
+            # CureFuzz 中 Policy 接受归一化，但这里是 MDPFuzz 的执行器，
+            # 只要这里保存出来的 transitions 中的 obs 是 Raw 的即可满足你的要求。
+            # gym.make 生成的 env 没有 VecNormalize，所以 obs 是 Raw。
             action, state = policy.predict(obs, state=state, deterministic=True)
+            
             next_obs, reward, done, info = env.step(action)
             
-            # 记录每一步的物理状态
             if self.save_physics:
                 phys = self.extract_physics_state(env)
                 if phys:
                     current_episode_physics.append(phys)
 
-            # 记录 Transition
-            transitions.append((obs.copy(), action[0].copy() if isinstance(action, np.ndarray) else action, reward, next_obs.copy(), done))
+            # [Alignment] 构造标准 5元组 (Raw Obs, Action, Reward, Raw Next Obs, Done)
+            # 确保 action 是标量或数组的一致性处理
+            act_save = action[0].copy() if isinstance(action, np.ndarray) else action
+            transitions.append((obs.copy(), act_save, reward, next_obs.copy(), done))
 
             real_env = env.unwrapped
             if hasattr(real_env, 'hull'):
@@ -147,29 +141,13 @@ class BipedalWalkerExecutor(Executor):
         bd_dist = total_x_pos_sum / max(1, episode_steps)
         bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
         
-        # [修改点] 判定逻辑修改：摔倒(-100) 或者 表现极差(总分<10) 都视为 Crash
         is_crash = (reward == -100) or (acc_reward < 10)
 
-        # 如果发生 Crash 且开启了物理保存，则存储该轨迹
         if is_crash and self.save_physics:
-            # 只有当轨迹长度足够时才保存（可选，防止保存开局即死的无效数据）
             if len(current_episode_physics) > 20:
                 self.crash_physics_trajectories.append({
-                    "seed": input,  # 保存当前的地形参数 input
+                    "seed": input,
                     "trajectory": current_episode_physics
                 })
 
         return acc_reward, is_crash, np.array(obs_seq), time.time() - t0, bd_dist, bd_mean_angle, transitions
-
-
-if __name__ == '__main__':
-    rng = np.random.default_rng(0)
-    # 测试 save_physics 功能
-    executor = BipedalWalkerExecutor(300, 0, save_physics=True)
-    input = executor.generate_input(rng)
-    policy = executor.load_policy()
-    reward, oracle, sequence, exec_time, bd_d, bd_a, trans = executor.execute_policy(input, policy)
-    print(f"Input: {input}")
-    print(f"Reward: {reward}, Crash: {oracle}, Time: {exec_time:.4f}")
-    print(f"Transitions: {len(trans)}")
-    print(f"Physics Trajectories Saved: {len(executor.crash_physics_trajectories)}")

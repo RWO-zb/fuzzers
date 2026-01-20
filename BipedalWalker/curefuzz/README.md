@@ -37,4 +37,4 @@ Run `python enjoy_cure.py  --guide --no-render --seed 0  --save-transitions ` to
 
 Run ` python retrain.py --env BipedalWalkerHardcore-v3 --algo tqc --model-path ../rl-trained-agents/tqc/BipedalWalkerHardcore-v3_1/BipedalWalkerHardcore-v3.zip --transitions-path transitions.pkl  --folder logs/retrained_models`
 
-
+python test.py --model-dataset mdpfuzz --target-dataset curefuzz --nsteps 25 --arch dyGIN2d --gpu 0

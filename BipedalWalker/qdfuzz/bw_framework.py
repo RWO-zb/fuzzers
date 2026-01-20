@@ -5,7 +5,8 @@ import torch
 import tqdm
 import numpy as np
 import pandas as pd
-import random # [新增]
+import random
+import pickle  # [Required] for saving transitions dict
 
 from stable_baselines3.common.base_class import BaseAlgorithm
 from typing import List, Optional
@@ -14,7 +15,7 @@ from bw_common import load_model, EXPERT_INDICES, execute_policy, get_edges
 from common import compute_cell, EXPERIMENT_SEEDS
 
 # ==========================================
-# [新增] TodyNet 数据收集辅助函数
+# [Helper] TodyNet Data Collection Helpers
 # ==========================================
 def process_episode_data(sequence, label, window_size):
     seq_len = len(sequence)
@@ -26,6 +27,7 @@ def process_episode_data(sequence, label, window_size):
     labels = []
 
     if label == 0:
+        # Success: Sample random window
         max_idx = seq_len - window_size
         rand_idx = random.randint(0, max_idx)
         win = seq_array[rand_idx : rand_idx + window_size]
@@ -33,6 +35,7 @@ def process_episode_data(sequence, label, window_size):
         windows.append(win)
         labels.append(0)
     else:
+        # Crash: Sample last window
         win = seq_array[-window_size:] 
         win = win.transpose()
         windows.append(win)
@@ -72,6 +75,7 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     X_balanced = X_all[final_indices]
     y_balanced = y_all[final_indices]
 
+    # Add channel dim: (N, 28, 25) -> (N, 1, 28, 25)
     X_final = np.expand_dims(X_balanced, axis=1)
     X_tensor = torch.from_numpy(X_final).float()
     y_tensor = torch.from_numpy(y_balanced).long()
@@ -165,23 +169,20 @@ class Framework():
         '''
         cell_dfs = []
         
-        # 定义基础列名
         base_columns = ['score', 'is_faulty', 'cell_index'] + [f'cell{i}' for i in range(2)] + [f'behavior{i}' for i in range(2)]
         all_columns = base_columns + ['input', 'mutation_count', 'elapsed_time']
 
         for i, cell_data in enumerate(self.cells_data):
-            # 准备数据，显式将 input 转为 JSON 字符串
             records = []
             for item in cell_data:
                 _input, score, is_faulty, behavior, mutation_count, elapsed_time = item
-                # 构建一行数据
                 record = [
                     score, 
                     is_faulty, 
                     i, 
-                    self.cells[i][0], self.cells[i][1], # cell 坐标
-                    behavior[0], behavior[1],           # behavior 特征
-                    json.dumps(_input.tolist()),        # input (序列化为字符串)
+                    self.cells[i][0], self.cells[i][1],
+                    behavior[0], behavior[1],
+                    json.dumps(_input.tolist()),
                     mutation_count,
                     elapsed_time
                 ]
@@ -197,8 +198,6 @@ class Framework():
         if cell_dfs:
             pd.concat(cell_dfs, ignore_index=True).to_csv(f'{filepath}_data.csv', index=0)
             print(f"Saved state to {filepath}_data.csv")
-        else:
-            print("No data in cells_data to save.")
             
         self.save_random_state(filepath)
         self.save_configuration(filepath)
@@ -237,9 +236,6 @@ class Framework():
         cell_cols = [c for c in df.columns.to_list() if c.startswith('cell') and 'index' not in c]
         behavior_cols = [c for c in df.columns.to_list() if c.startswith('behavior')]
 
-        assert len(cell_cols) > 0, "CSV 中未找到 Cell 列"
-        assert len(behavior_cols) > 0, "CSV 中未找到 Behavior 列"
-
         has_elapsed_time = 'elapsed_time' in df.columns
         has_mutation_count = 'mutation_count' in df.columns
 
@@ -251,8 +247,7 @@ class Framework():
             
             try:
                 input_vec = np.array(json.loads(row['input']), dtype=int)
-            except (json.JSONDecodeError, TypeError):
-                print(f"Warning: Failed to parse input at row {i}, skipping.")
+            except:
                 continue
             
             mutation_count = int(row['mutation_count']) if has_mutation_count else 0
@@ -293,7 +288,6 @@ class Framework():
             self.cells.append(cell)
             self.cells_data.append([(input, performance, is_faulty, behavior, mutation_count, elapsed_time)])
         finally:
-            assert len(self.cells) == len(self.cells_data), 'inconsistent cells and cells_data lists!'
             self.last_cell_updated = index if index is not None else (len(self.cells) - 1)
         return self.last_cell_updated
 
@@ -309,9 +303,6 @@ class Framework():
 
 
     def _check_budget(self, start_time: float, current_executions: int, time_budget_hours: Optional[float], execution_budget: Optional[int]) -> bool:
-        """
-        Helper to check if any budget is exceeded. Returns True if budget is NOT reached (continue), False if reached (stop).
-        """
         if execution_budget is not None and current_executions >= execution_budget:
             print(f"Execution budget ({execution_budget}) reached.")
             return False
@@ -329,11 +320,11 @@ class Framework():
                     env_seed: int,
                     init_budget: int,
                     results_fp: str,
-                    time_budget_hours: Optional[float] = None, # 可选时间
-                    execution_budget: Optional[int] = None,    # 可选次数
+                    time_budget_hours: Optional[float] = None,
+                    execution_budget: Optional[int] = None,
                     disable_pbar: bool = False,
-                    save_data: bool = True,   # [新增] 
-                    window_size: int = 25     # [新增]
+                    save_data: bool = True,  
+                    window_size: int = 25     
                     ):
 
         if time_budget_hours is None and execution_budget is None:
@@ -371,15 +362,20 @@ class Framework():
         execution_times = []
         n_executions = 0 
         
-        # [新增] TodyNet 容器
+        # [Alignment] Data Collection Containers
         all_window_data = [] 
         all_label_data = []
         todynet_success_count = 0
         TODYNET_SUCCESS_CAP = 3000
 
+        # [Alignment] Transition Lists
+        crash_transitions = []
+        success_transitions = []
+        TARGET_CRASH_TRANS = 10000
+        TARGET_SUCCESS_TRANS = 20000
+
         print("Starting initialization phase...")
         for _ in tqdm.tqdm(range(init_budget), disable=disable_pbar):
-            # 检查预算
             if not self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
                 print("Budget reached during initialization.")
                 break
@@ -387,18 +383,29 @@ class Framework():
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
 
             t0 = time.time()
-            # [修改] 接收 transitions
             episode_reward, oracle, behavior, fs, _, transitions = execute_policy(input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
 
-            # [新增] 数据收集
+            # [Alignment] Data Collection Logic
             if save_data:
                 is_crash = oracle
-                label = 1 if is_crash else 0
+                
+                # 1. Transitions Collection (5-tuple)
+                if is_crash:
+                    if len(crash_transitions) < TARGET_CRASH_TRANS:
+                        crash_transitions.extend(transitions)
+                else:
+                    if len(success_transitions) < TARGET_SUCCESS_TRANS:
+                        success_transitions.extend(transitions)
+
+                # 2. TodyNet Collection
                 collect_this = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
                 if collect_this:
-                    wins, labels = process_episode_data(transitions, label, window_size)
+                    # Convert (s,a,r,s',d) -> concat(s, a)
+                    tn_seq = [np.concatenate([t[0], t[1]]) for t in transitions]
+                    label = 1 if is_crash else 0
+                    wins, labels = process_episode_data(tn_seq, label, window_size)
                     if wins is not None:
                         all_window_data.append(wins)
                         all_label_data.append(labels)
@@ -414,11 +421,6 @@ class Framework():
         
         if not inputs:
             print("No inputs generated.")
-            behaviors_buffer.close()
-            inputs_buffer.close()
-            cells_buffer.close()
-            logs_buffer.close()
-            final_states_buffer.close()
             return
 
         behaviors = np.array(behaviors)
@@ -437,14 +439,10 @@ class Framework():
             np.savetxt(final_states_buffer, final_states[i].reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
 
-        # 配置进度条
-        if execution_budget is not None:
-            pbar = tqdm.tqdm(total=execution_budget, initial=n_executions, disable=disable_pbar)
-            pbar.set_description(f"Fuzzing (max {execution_budget} execs)")
-        else:
-            pbar = tqdm.tqdm(disable=disable_pbar)
-            pbar.set_description(f"Fuzzing (max {time_budget_hours}h)")
-
+        # Fuzzing Loop
+        pbar_total = execution_budget if execution_budget else int(time_budget_hours * 3600) if time_budget_hours else 1000
+        pbar = tqdm.tqdm(total=pbar_total, initial=n_executions, disable=disable_pbar)
+        
         print("Starting fuzzing loop...")
         fuzzing_start_time = time.time()
 
@@ -455,20 +453,27 @@ class Framework():
 
             mutated_input = self.mutate(input)
             t0 = time.time()
-            # [修改] 接收 transitions
             episode_reward, oracle, behavior, fs, _, transitions = execute_policy(mutated_input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
             
             n_executions += 1 
 
-            # [新增] 数据收集
+            # [Alignment] Data Collection Logic (Same as above)
             if save_data:
                 is_crash = oracle
-                label = 1 if is_crash else 0
+                if is_crash:
+                    if len(crash_transitions) < TARGET_CRASH_TRANS:
+                        crash_transitions.extend(transitions)
+                else:
+                    if len(success_transitions) < TARGET_SUCCESS_TRANS:
+                        success_transitions.extend(transitions)
+
                 collect_this = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
                 if collect_this:
-                    wins, labels = process_episode_data(transitions, label, window_size)
+                    tn_seq = [np.concatenate([t[0], t[1]]) for t in transitions]
+                    label = 1 if is_crash else 0
+                    wins, labels = process_episode_data(tn_seq, label, window_size)
                     if wins is not None:
                         all_window_data.append(wins)
                         all_label_data.append(labels)
@@ -490,24 +495,28 @@ class Framework():
 
         print("Stopping test_policy.")
         testing_end_time = time.time()
-        self.config['testing_start_time'] = testing_start_time
-        self.config['testing_end_time'] = testing_end_time
         self.config['testing_time'] = testing_end_time - testing_start_time
-        self.config['total_execution_time'] = sum(execution_times)
-        self.config['fuzzing_start_time'] = fuzzing_start_time
         self.config['total_executions'] = n_executions
 
         pbar.close()
-        behaviors_buffer.close()
-        inputs_buffer.close()
-        cells_buffer.close()
-        logs_buffer.close()
-        final_states_buffer.close()
+        behaviors_buffer.close(); inputs_buffer.close(); cells_buffer.close(); logs_buffer.close(); final_states_buffer.close()
         self.save_state(filepath)
         
-        # [新增] 保存 TodyNet 数据
+        # [Alignment] Save Phase
         if save_data:
+            # 1. Save TodyNet
             balance_and_save_data(all_window_data, all_label_data, results_fp, "BipedalWalkerHC", window_size)
+            
+            # 2. Save Transitions Dict
+            trans_file = os.path.join(results_fp, 'transitions.pkl')
+            print(f"Saving {len(crash_transitions)} crash / {len(success_transitions)} success transitions to {trans_file}...")
+            save_payload = {
+                "crash": crash_transitions,
+                "success": success_transitions,
+                "is_raw": True
+            }
+            with open(trans_file, 'wb') as f_t:
+                pickle.dump(save_payload, f_t, protocol=pickle.HIGHEST_PROTOCOL)
 
 
     def random_testing(self, model: BaseAlgorithm,
@@ -516,8 +525,8 @@ class Framework():
                     time_budget_hours: Optional[float] = None,
                     execution_budget: Optional[int] = None,
                     disable_pbar: bool = False,
-                    save_data: bool = True,   # [新增]
-                    window_size: int = 25     # [新增]
+                    save_data: bool = True,
+                    window_size: int = 25
                     ):
         '''Random testing loop baseline.'''
         
@@ -552,34 +561,41 @@ class Framework():
         n_executions = 0 
         start_time = time.time()
         
-        # [新增] TodyNet 容器
+        # [Alignment] Data Containers
         all_window_data = [] 
         all_label_data = []
         todynet_success_count = 0
         TODYNET_SUCCESS_CAP = 3000
         
-        if execution_budget is not None:
-            pbar = tqdm.tqdm(total=execution_budget, disable=disable_pbar)
-        else:
-            pbar = tqdm.tqdm(disable=disable_pbar)
+        crash_transitions = []
+        success_transitions = []
+        TARGET_CRASH_TRANS = 10000
+        TARGET_SUCCESS_TRANS = 20000
+        
+        pbar = tqdm.tqdm(disable=disable_pbar)
 
         while self._check_budget(start_time, n_executions, time_budget_hours, execution_budget):
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
             t0 = time.time()
-            # [修改] 接收 transitions
             episode_reward, oracle, behavior, fs, _, transitions = execute_policy(input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
             
             n_executions += 1 
 
-            # [新增] 数据收集
+            # [Alignment] Data Collection
             if save_data:
                 is_crash = oracle
-                label = 1 if is_crash else 0
+                if is_crash:
+                    if len(crash_transitions) < TARGET_CRASH_TRANS: crash_transitions.extend(transitions)
+                else:
+                    if len(success_transitions) < TARGET_SUCCESS_TRANS: success_transitions.extend(transitions)
+
                 collect_this = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
                 if collect_this:
-                    wins, labels = process_episode_data(transitions, label, window_size)
+                    tn_seq = [np.concatenate([t[0], t[1]]) for t in transitions]
+                    label = 1 if is_crash else 0
+                    wins, labels = process_episode_data(tn_seq, label, window_size)
                     if wins is not None:
                         all_window_data.append(wins)
                         all_label_data.append(labels)
@@ -600,23 +616,21 @@ class Framework():
 
         print("Stopping random_testing.")
         testing_end_time = time.time()
-        self.config['testing_start_time'] = start_time
-        self.config['testing_end_time'] = testing_end_time
         self.config['testing_time'] = testing_end_time - start_time
-        self.config['total_execution_time'] = sum(execution_times)
         self.config['total_executions'] = n_executions
 
         pbar.close()
-        behaviors_buffer.close()
-        inputs_buffer.close()
-        cells_buffer.close()
-        logs_buffer.close()
-        final_states_buffer.close()
+        behaviors_buffer.close(); inputs_buffer.close(); cells_buffer.close(); logs_buffer.close(); final_states_buffer.close()
         self.save_state(filepath)
         
-        # [新增] 保存 TodyNet 数据
+        # [Alignment] Save Phase
         if save_data:
             balance_and_save_data(all_window_data, all_label_data, results_fp, "BipedalWalkerHC", window_size)
+            trans_file = os.path.join(results_fp, 'transitions.pkl')
+            print(f"Saving transitions to {trans_file}...")
+            save_payload = {"crash": crash_transitions, "success": success_transitions, "is_raw": True}
+            with open(trans_file, 'wb') as f_t:
+                pickle.dump(save_payload, f_t, protocol=pickle.HIGHEST_PROTOCOL)
 
 
     def novelty_search(self, model: BaseAlgorithm,
@@ -628,8 +642,8 @@ class Framework():
                     time_budget_hours: Optional[float] = None,
                     execution_budget: Optional[int] = None,
                     disable_pbar: bool = False,
-                    save_data: bool = True,   # [新增]
-                    window_size: int = 25     # [新增]
+                    save_data: bool = True,
+                    window_size: int = 25
                     ):
         '''Does not use cached data anymore.'''
 
@@ -660,11 +674,16 @@ class Framework():
         testing_start_time = time.time()
         n_executions = 0
         
-        # [新增] TodyNet 容器
+        # [Alignment] Data Containers
         all_window_data = [] 
         all_label_data = []
         todynet_success_count = 0
         TODYNET_SUCCESS_CAP = 3000
+        
+        crash_transitions = []
+        success_transitions = []
+        TARGET_CRASH_TRANS = 10000
+        TARGET_SUCCESS_TRANS = 20000
         
         print(f'Starting novelty_search. Time Budget: {time_budget_hours}h, Execution Budget: {execution_budget}')
 
@@ -682,30 +701,33 @@ class Framework():
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
         
         def evaluate(individuals: np.ndarray, mutation_counts: np.ndarray, loop_start_time: float = None) -> np.ndarray:
-            nonlocal n_executions 
-            nonlocal todynet_success_count # [新增]
+            nonlocal n_executions, todynet_success_count
             
             behaviors = []
             for i, ind in enumerate(individuals):
                 if not self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
                     break 
                 
-                # [修改] 接收 transitions
                 r, o, b, fs, _, transitions = execute_policy(ind, model, env_seed, self.descriptors, 300)
                 n_executions += 1
                 
-                # [新增] 数据收集
+                # [Alignment] Data Collection
                 if save_data:
                     is_crash = o
-                    label = 1 if is_crash else 0
+                    if is_crash:
+                        if len(crash_transitions) < TARGET_CRASH_TRANS: crash_transitions.extend(transitions)
+                    else:
+                        if len(success_transitions) < TARGET_SUCCESS_TRANS: success_transitions.extend(transitions)
+                    
                     collect_this = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
                     if collect_this:
-                        wins, labels = process_episode_data(transitions, label, window_size)
+                        tn_seq = [np.concatenate([t[0], t[1]]) for t in transitions]
+                        label = 1 if is_crash else 0
+                        wins, labels = process_episode_data(tn_seq, label, window_size)
                         if wins is not None:
                             all_window_data.append(wins)
                             all_label_data.append(labels)
-                            if not is_crash:
-                                todynet_success_count += 1
+                            if not is_crash: todynet_success_count += 1
                 
                 if loop_start_time is None:
                     e_time = 0.0
@@ -730,15 +752,8 @@ class Framework():
         
         pop_behaviors = evaluate(pop, pop_mutation_counts, loop_start_time=None)
         
-        if not pop_behaviors.any() or not self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
-             print("Budget reached or no behaviors generated.")
-             ns_logs_buffer.close()
-             nov_scores_buffer.close()
-             behaviors_buffer.close()
-             inputs_buffer.close()
-             cells_buffer.close()
-             logs_buffer.close()
-             final_states_buffer.close()
+        if not pop_behaviors.any():
+             print("No behaviors generated or budget reached.")
              return
 
         nov_archive = NoveltyArchive(pop_behaviors, k, nov_threshold)
@@ -748,10 +763,7 @@ class Framework():
         print(f'iteration: 0, archive_size: {nov_archive.size()}, archive_sparseness: {nov_archive.archive_sparseness():0.5f}', file=ns_logs_buffer)
         
         i = 1
-        if execution_budget is not None:
-             pbar = tqdm.tqdm(total=execution_budget, initial=n_executions, disable=disable_pbar)
-        else:
-             pbar = tqdm.tqdm(disable=disable_pbar)
+        pbar = tqdm.tqdm(disable=disable_pbar)
 
         print("Starting Novelty Search loop...")
         ns_start_time = time.time()
@@ -760,13 +772,10 @@ class Framework():
             offspring = mutate(pop)
             offspring_mutation_counts = pop_mutation_counts + 1
             
-            prev_executions = n_executions
             offspring_behaviors = evaluate(offspring, offspring_mutation_counts, loop_start_time=ns_start_time)
-            executions_diff = n_executions - prev_executions
-            pbar.update(executions_diff)
+            pbar.update(len(offspring))
             
             if not offspring_behaviors.any():
-                print("Budget reached during offspring evaluation.")
                 break
 
             offspring_nov_scores = nov_archive.score(offspring_behaviors, pop_behaviors)
@@ -801,7 +810,6 @@ class Framework():
         pbar.close()
         ns_logs_buffer.close()
         nov_scores_buffer.close()
-        
         behaviors_buffer.close()
         inputs_buffer.close()
         cells_buffer.close()
@@ -809,11 +817,16 @@ class Framework():
         final_states_buffer.close()
         self.save_state(filepath)
         
-        # [新增] 保存 TodyNet 数据
+        # [Alignment] Save Phase
         if save_data:
             balance_and_save_data(all_window_data, all_label_data, results_fp, "BipedalWalkerHC", window_size)
+            trans_file = os.path.join(results_fp, 'transitions.pkl')
+            print(f"Saving transitions to {trans_file}...")
+            save_payload = {"crash": crash_transitions, "success": success_transitions, "is_raw": True}
+            with open(trans_file, 'wb') as f_t:
+                pickle.dump(save_payload, f_t, protocol=pickle.HIGHEST_PROTOCOL)
 
-#TODO: this version can actually only keep the best performing input per cell (since all execution data is recorded during testing)
+
 class MAPElitesFramework(Framework):
     def __init__(self, rand_seed: int, cell_granularity: int, descriptors: List[int], **kwargs) -> None:
         if kwargs.get('name') is None:
@@ -838,7 +851,7 @@ if __name__ == '__main__':
     model = load_model()
 
     # --- 配置区域 ---
-    TIME_BUDGET_HOURS = 12600      
+    TIME_BUDGET_HOURS = 4      
     EXECUTION_BUDGET = None     
     
     init_budget = 1000

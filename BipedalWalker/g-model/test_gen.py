@@ -2,7 +2,7 @@ import argparse, importlib, os, sys, time, copy, tqdm, pickle, gym, yaml
 import numpy as np
 import torch as th
 from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecEnvWrapper, VecVideoRecorder
+from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecEnvWrapper, VecVideoRecorder, VecNormalize
 import utils.import_envs
 from utils import ALGOS, create_test_env, get_latest_run_id, get_saved_hyperparams
 from utils.exp_manager import ExperimentManager
@@ -14,7 +14,25 @@ from interfaces import normalize_data, Memory, Density, compute_sensitivity, cas
 from diffusion import Diffusion
 
 # ==========================================
-# [新增] 辅助函数：TodyNet 严格采样
+# [Alignment] 辅助函数：获取 Raw Observation
+# ==========================================
+def get_raw_obs(env, obs):
+    """
+    如果环境被 VecNormalize 包装，则进行反归一化以获取原始物理数值。
+    这对于确保 TodyNet 和 Retrain 数据的一致性至关重要。
+    """
+    norm_env = env
+    # 处理嵌套情况 (DummyVecEnv -> VecNormalize)
+    if hasattr(norm_env, 'venv') and isinstance(norm_env.venv, VecNormalize):
+        return norm_env.venv.unnormalize_obs(obs)
+    # 处理直接是 VecNormalize 的情况
+    elif isinstance(norm_env, VecNormalize):
+        return norm_env.unnormalize_obs(obs)
+    # 如果没有归一化，直接返回
+    return obs
+
+# ==========================================
+# [Helper] 辅助函数：TodyNet 严格采样
 # ==========================================
 def process_episode_data(sequence, label, window_size):
     seq_len = len(sequence)
@@ -43,7 +61,7 @@ def process_episode_data(sequence, label, window_size):
     return np.array(windows), np.array(labels)
 
 # ==========================================
-# [新增] 辅助函数：TodyNet 平衡与保存 (3000条, 30% Crash)
+# [Helper] 辅助函数：TodyNet 平衡与保存
 # ==========================================
 def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size, target_total=3000, target_crash_ratio=0.30):
     if not X_list:
@@ -103,20 +121,13 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     final_ratio = y_tensor.float().mean().item()
     print(f"[TodyNet Data] Saved {total} samples to {save_path} | Final Crash Ratio: {final_ratio:.2%}")
 
-# --- [新增] 辅助函数：获取底层环境以访问 hull 数据 ---
+# --- [Helper] 辅助函数：获取底层环境以访问 hull 数据 ---
 def get_real_unwrapped_env(env):
-    """
-    穿透 VecEnv 和 Monitor 等包装器，获取底层的 BipedalWalker 环境实例，
-    以便访问 hull.position 和 hull.angle。
-    """
     current_env = env
     while hasattr(current_env, 'venv'):
         current_env = current_env.venv
-    
     if hasattr(current_env, 'envs'):
-        # 对于 DummyVecEnv，通常取第一个环境
         return current_env.envs[0].unwrapped
-    
     return current_env.unwrapped
 
 def main():
@@ -129,43 +140,24 @@ def main():
     parser.add_argument("--n-envs", help="number of environments", default=1, type=int)
     parser.add_argument("--exp-id", help="Experiment ID (default: 0: latest, -1: no exp folder)", default=0, type=int)
     parser.add_argument("--verbose", help="Verbose mode (0: no output, 1: INFO)", default=1, type=int)
-    parser.add_argument(
-        "--no-render", action="store_true", default=False, help="Do not render the environment (useful for tests)"
-    )
+    parser.add_argument("--no-render", action="store_true", default=False, help="Do not render the environment")
     parser.add_argument("--deterministic", action="store_true", default=False, help="Use deterministic actions")
-    parser.add_argument(
-        "--load-best", action="store_true", default=False, help="Load best model instead of last model if available"
-    )
-    parser.add_argument(
-        "--load-checkpoint",
-        type=int,
-        help="Load checkpoint instead of last model if available, "
-        "you must pass the number of timesteps corresponding to it",
-    )
+    parser.add_argument("--load-best", action="store_true", default=False, help="Load best model")
+    parser.add_argument("--load-checkpoint", type=int, help="Load checkpoint")
     parser.add_argument("--stochastic", action="store_true", default=False, help="Use stochastic actions")
-    parser.add_argument(
-        "--norm-reward", action="store_true", default=False, help="Normalize reward if applicable (trained with VecNormalize)"
-    )
+    parser.add_argument("--norm-reward", action="store_true", default=False, help="Normalize reward")
     parser.add_argument("--seed", help="Random generator seed", type=int, default=0)
     parser.add_argument("--reward-log", help="Where to log reward", default="", type=str)
-    parser.add_argument(
-        "--gym-packages",
-        type=str,
-        nargs="+",
-        default=[],
-        help="Additional external Gym environemnt package modules to import (e.g. gym_minigrid)",
-    )
-    parser.add_argument(
-        "--env-kwargs", type=str, nargs="+", action=StoreDict, help="Optional keyword argument to pass to the env constructor"
-    )
+    parser.add_argument("--gym-packages", type=str, nargs="+", default=[], help="External Gym packages")
+    parser.add_argument("--env-kwargs", type=str, nargs="+", action=StoreDict, help="Env constructor kwargs")
 
-    ######################## parameters for generative testing ############################################
+    # Generative testing parameters
     parser.add_argument("--method", help="select the guidance for testing", default="generative", type=str, required=False)
     parser.add_argument("--hour", help="test time", default=12, type=int)
     parser.add_argument("--step", help="number of normal cases at each training step", default=50, type=int)
     parser.add_argument("--grid", help="state abstraction granularity", default=5, type=int)
     
-    # [新增] 数据采集相关参数
+    # [Alignment] 数据采集参数
     parser.add_argument("--save-data", action="store_true", default=False, help="Save TodyNet training data")
     parser.add_argument("--save-transitions", action="store_true", default=False, help="Save RL transitions")
     parser.add_argument("--window-size", type=int, default=20, help="Sliding window size")
@@ -181,7 +173,6 @@ def main():
     sys.stdout = f
     sys.stderr = f
 
-    # Going through custom gym packages to let them register in the global registory
     for env_module in args.gym_packages:
         importlib.import_module(env_module)
 
@@ -192,7 +183,6 @@ def main():
     if args.exp_id == 0:
         args.exp_id = get_latest_run_id(os.path.join(folder, algo), env_id)
 
-    # Sanity checks
     if args.exp_id > 0:
         log_path = os.path.join(folder, algo, f"{env_id}_{args.exp_id}")
     else:
@@ -226,8 +216,6 @@ def main():
     set_random_seed(args.seed)
 
     if args.num_threads > 0:
-        if args.verbose > 1:
-            print(f"Setting torch.num_threads to {args.num_threads}")
         th.set_num_threads(args.num_threads)
 
     is_atari = ExperimentManager.is_atari(env_id)
@@ -239,7 +227,7 @@ def main():
     args_path = os.path.join(log_path, env_id, "args.yml")
     if os.path.isfile(args_path):
         with open(args_path, "r") as f:
-            loaded_args = yaml.load(f, Loader=yaml.UnsafeLoader)  # pytype: disable=module-attr
+            loaded_args = yaml.load(f, Loader=yaml.UnsafeLoader)
             if loaded_args["env_kwargs"] is not None:
                 env_kwargs = loaded_args["env_kwargs"]
     if args.env_kwargs is not None:
@@ -247,6 +235,7 @@ def main():
 
     log_dir = args.reward_log if args.reward_log != "" else None
 
+    # 创建环境 (可能包含 VecNormalize)
     env = create_test_env(
         env_id,
         n_envs=args.n_envs,
@@ -262,10 +251,8 @@ def main():
     if algo in off_policy_algos:
         kwargs.update(dict(buffer_size=1))
 
-    newer_python_version = sys.version_info.major == 3 and sys.version_info.minor >= 8
-
     custom_objects = {}
-    if newer_python_version:
+    if sys.version_info.major == 3 and sys.version_info.minor >= 8:
         custom_objects = {
             "learning_rate": 0.0,
             "lr_schedule": lambda _: 0.0,
@@ -274,16 +261,14 @@ def main():
 
     model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, **kwargs)
 
-    ##################################################################################################
-
+    # Diffusion Setup
     case_dimension = 15
     diffusion_model = Diffusion(batch_size = 1, epoch = 100, data_size = case_dimension, training_step_per_spoch = 25, num_diffusion_step = 25)
     diffusion_model.setup()
     memory_model = Memory(size = 100)
     density_model = Density()
 
-
-    ################################### nvovelty computation ########################################
+    # Novelty Grid Setup
     min_obs = np.array([-5 for i in range(env.observation_space.shape[0])])
     max_obs = np.array([5 for i in range(env.observation_space.shape[0])])
     novelty_grid = Grid(min_obs, max_obs, args.grid)
@@ -291,108 +276,71 @@ def main():
     novelty_dict = dict()
     novelty_test_dict = dict()
 
-
-
-    #np.random.seed()
-    states = np.random.randint(low=1, high=4, size=15)
-    obs = env.reset(states)
-
-    # Deterministic by default except for atari games
     stochastic = args.stochastic or is_atari and not args.deterministic
     deterministic = not stochastic
 
-    episode_rewards, episode_lengths = [], []
-    ep_len = 0
-
-    total_step = 100000
-    val_step = 50
-    cur_step = 0
-    wins = 0
-    lose = 0
-    failure_by_diffusion = 0
-    failure_by_random = 0
-    done = False
-    regular_time = 0
+    # Init variables
     normal_case_list = []
     metric_list = []
     density_list = []
-
     sensitivity_list = []
     performance_list = []
-    novelty_list = []
     diffusion_failure_list = []
     diffusion_failure_clusters = []
     random_failure_list = []
     diffusion_failure_count = []
-    random_failure_count = []
-    #######################################################################################
-    trajectory_list = []
-    termination_list = []
     information_list = []
-    failure_flag = False
     
-    # ==========================================
-    # [新增] 数据采集容器初始化
-    # ==========================================
-    # TodyNet 容器
+    # [Alignment] 数据采集容器初始化
     all_window_data = [] 
     all_label_data = []
     todynet_success_count = 0  
     TODYNET_SUCCESS_SOFT_CAP = 5000
     
-    # Transitions 容器
     crash_transitions = []
     success_transitions = []
     TARGET_CRASH_COUNT = 10000
     TARGET_SUCCESS_COUNT = 20000
+    all_test_cases_log = []
 
-    # --- 阶段 1：严格遵循论文的初始化预热 (Strict Initialization) ---
+    # --- Stage 1: Initialization (Warm-up) ---
     print("--- Stage 1: Initialization (Warm-up) ---")
     initial_collection_count = 1000
-    
     for pre_step in tqdm.tqdm(range(initial_collection_count), desc="Initial Random Sampling"):
-        # 仅生成随机的初始状态，不进行 env.step() 执行
         normal_case = np.random.randint(low=1, high=4, size=15)
         normal_case_list.append(normal_case)
 
-    # --- 阶段 2：预训练扩散模型 (Pre-training) ---
+    # --- Stage 2: Pre-training Diffusion ---
     if len(normal_case_list) > 0:
         print(f"--- Pre-training Diffusion Model with {len(normal_case_list)} samples ---")
         normal_case_list = np.array(normal_case_list)
-        
         diffusion_model.train(normal_case_list, None, 'generative')
-        
         normal_case_list = []
         metric_list = []
         memory_model.clear()
         
-    # --- 阶段 3：正式测试循环 (Main Loop) ---
+    # --- Stage 3: Main Testing Loop ---
     start_time = time.time()
     current_time = time.time()
-    
-    # 初始化日志列表
-    all_test_cases_log = []
+    cur_step = 0
+    wins = 0
+    lose = 0
+    failure_by_diffusion = 0
 
     print("--- Stage 2: Main Testing Loop ---")
-    while current_time - start_time < 3600 * 4 : # 使用参数控制时间
+    while current_time - start_time < 3600 * 0.05 : 
 
         if cur_step > 0 and cur_step % args.step == 0:
-            # --- 扩散模型微调与生成阶段 ---
+            # --- Generative Phase ---
             normal_case_list = np.array(normal_case_list)
             metric_list      = np.array(metric_list)
 
-            if args.method == 'generative':
-                metrics = None
-            elif args.method == 'generative+density':
-                metrics = metric_list[:, [0]]
-            elif args.method == 'generative+sensitivity':
-                metrics = metric_list[:, [1]]
-            elif args.method == 'generative+performance':
-                metrics = metric_list[:, [2]]
-            elif args.method == 'generative+baseline':
-                metrics = metric_list[:, [0,1,2]]
-            elif args.method == 'generative+novelty':
-                metrics = metric_list[:, [3]]
+            if args.method == 'generative': metrics = None
+            elif args.method == 'generative+density': metrics = metric_list[:, [0]]
+            elif args.method == 'generative+sensitivity': metrics = metric_list[:, [1]]
+            elif args.method == 'generative+performance': metrics = metric_list[:, [2]]
+            elif args.method == 'generative+baseline': metrics = metric_list[:, [0,1,2]]
+            elif args.method == 'generative+novelty': metrics = metric_list[:, [3]]
             else:
                 print('Please check the method parameters!')
                 return
@@ -402,7 +350,7 @@ def main():
             metric_list = []
             memory_model.clear()
 
-            for _ in range(val_step):
+            for _ in range(50): # val_step fixed to 50
                 failure_flag = False
                 state = None
                 test_case = diffusion_model.generate()
@@ -410,37 +358,43 @@ def main():
                 sequences = [obs[0]]
                 episode_reward = 0.0
                 
-                # [新增] 采集变量
                 todynet_sequences = []   
                 current_ep_transitions = []
                 
-                # [新增] 行为多样性统计变量
                 total_x_pos_sum = 0.0
                 total_abs_angle_sum = 0.0
                 episode_steps = 0
 
                 for _ in range(args.n_timesteps):
-                    current_obs = obs[0].copy() # 捕获当前状态
+                    # [Alignment] 获取 Raw Observation (当前步)
+                    current_obs_norm = obs[0].copy()
+                    current_obs_raw = get_raw_obs(env, current_obs_norm)
+
                     action, state = model.predict(obs, state=state, deterministic=deterministic)
-                    current_action = action[0]  # 捕获当前动作
-                    
-                    # TodyNet 向量
-                    vec_28d = np.concatenate((current_obs, current_action))
+                    current_action = action[0]
+
+                    # [Alignment] TodyNet 使用 Raw Data
+                    # 注意: obs[0] 是 normalized 的，我们这里用 raw
+                    vec_28d = np.concatenate((current_obs_raw, current_action))
                     todynet_sequences.append(vec_28d)
 
+                    # 执行动作
                     obs, reward, done, infos = env.step(action)
                     
-                    # Transitions 记录
+                    # [Alignment] 获取 Raw Observation (下一步)
+                    next_obs_norm = obs[0].copy()
+                    next_obs_raw = get_raw_obs(env, next_obs_norm)
+
+                    # [Alignment] Transitions 使用 Raw Data
                     if args.save_transitions:
-                        current_ep_transitions.append((current_obs, current_action, reward[0], obs[0].copy(), done[0]))
+                        # 格式: (Raw_Obs, Action, Reward, Raw_Next_Obs, Done)
+                        current_ep_transitions.append((current_obs_raw, current_action, reward[0], next_obs_raw, done[0]))
                     
-                    # [新增] 获取底层数据以计算 Diversity
+                    # Diversity 计算
                     real_env = get_real_unwrapped_env(env)
                     if hasattr(real_env, 'hull'):
-                        raw_x_pos = real_env.hull.position[0]
-                        raw_angle = real_env.hull.angle
-                        total_x_pos_sum += raw_x_pos
-                        total_abs_angle_sum += abs(raw_angle)
+                        total_x_pos_sum += real_env.hull.position[0]
+                        total_abs_angle_sum += abs(real_env.hull.angle)
                         episode_steps += 1
                     
                     sequences.append(obs[0])
@@ -448,15 +402,12 @@ def main():
                     if done:
                         break
                 
-                # [新增] 计算行为特征
                 bd_dist = total_x_pos_sum / max(1, episode_steps)
                 bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
-
                 is_crash = (done or episode_reward < 10)
                 elapsed_time = time.time() - start_time
                 
-                # === [新增] 数据采集逻辑 (仅在 Generative 阶段) ===
-                # 1. Transitions 收集
+                # [Data Collection] 
                 if args.save_transitions:
                     if is_crash:
                         if len(crash_transitions) < TARGET_CRASH_COUNT:
@@ -465,56 +416,35 @@ def main():
                         if len(success_transitions) < TARGET_SUCCESS_COUNT:
                             success_transitions.extend(current_ep_transitions)
 
-                # 2. TodyNet 数据收集
                 if args.save_data:
                     label = 1 if is_crash else 0
-                    collect_this = False
-                    if label == 1:
-                        collect_this = True
-                    else:
-                        if todynet_success_count < TODYNET_SUCCESS_SOFT_CAP:
-                            collect_this = True
-                    
+                    collect_this = (label == 1) or (todynet_success_count < TODYNET_SUCCESS_SOFT_CAP)
                     if collect_this:
                         wins_data, labels_data = process_episode_data(todynet_sequences, label, args.window_size)
                         if wins_data is not None and len(wins_data) > 0:
                             all_window_data.append(wins_data)
                             all_label_data.append(labels_data)
-                            if label == 0:
-                                todynet_success_count += 1
+                            if label == 0: todynet_success_count += 1
                 
-                # [新增] 记录 bd_distance 和 bd_mean_angle
                 all_test_cases_log.append({
-                    "input": test_case.tolist(), 
-                    "is_crash": bool(is_crash),
-                    "source": "generative",
-                    "step": cur_step,
-                    "time": elapsed_time,
-                    "bd_distance": bd_dist,      
-                    "bd_mean_angle": bd_mean_angle 
+                    "input": test_case.tolist(), "is_crash": bool(is_crash), "source": "generative",
+                    "step": cur_step, "time": elapsed_time, "bd_distance": bd_dist, "bd_mean_angle": bd_mean_angle 
                 })
 
                 if is_crash:
                     save_case = test_case.tolist()
-                    if save_case in random_failure_list or save_case in diffusion_failure_list:
-                        pass
-                    else:
+                    if save_case not in random_failure_list and save_case not in diffusion_failure_list:
                         failure_flag = True
                         lose += 1
-                        done = False 
-                        regular_time = (current_time - start_time) / 3600
                         diffusion_failure_list.append(save_case)
                         failure_by_diffusion += 1
-                        print(regular_time, failure_by_diffusion, save_case)
-                        diffusion_failure_count.append([regular_time, failure_by_diffusion, save_case])
+                        print(f"{(current_time - start_time)/3600:.2f}h | Crash | {save_case}")
+                        diffusion_failure_count.append([(current_time - start_time)/3600, failure_by_diffusion, save_case])
                 else:
                     wins += 1  
 
                 abstract_id = novelty_grid.state_abstract(np.array([sequences[-1]]))[0]
-                if abstract_id in novelty_test_dict.keys():
-                    novelty_dict[abstract_id] += 1
-                else:
-                    novelty_dict[abstract_id] = 1
+                novelty_dict[abstract_id] = novelty_dict.get(abstract_id, 0) + 1
                 novelty = novelty_dict[abstract_id]
                 norm_novelty = 1 / (math.e ** (novelty - 1))
 
@@ -524,61 +454,48 @@ def main():
 
                 if failure_flag:
                     diffusion_failure_clusters.append(abstract_id)
-
-                print(failure_flag, abstract_id, len(novelty_dict.keys()), len(set(diffusion_failure_clusters)))
                 information_list.append([sequences[-1].tolist(), failure_flag, abstract_id, norm_novelty])
         else:
-            # --- 随机采样阶段 (不采集数据) ---
+            # --- Random Sampling Phase ---
             state = None
             normal_case = np.random.randint(low=1, high=4, size=15)
-            
             obs = env.reset(normal_case)
             sequences = [obs[0]]
             episode_reward = 0.0
             
-            # [新增] 行为多样性统计变量
             total_x_pos_sum = 0.0
             total_abs_angle_sum = 0.0
             episode_steps = 0
             
+            # 注意: 随机采样阶段我们这里不收集 TodyNet/Transition 数据，或者你可以选择收集
+            # 原逻辑中只用于 Metrics 计算，这里保持不变，只添加 Diversity 计算
             for _ in range(args.n_timesteps):
                 action, state = model.predict(obs, state=state, deterministic=deterministic)
                 obs, reward, done, infos = env.step(action)
                 
-                # [新增] 获取底层数据以计算 Diversity
                 real_env = get_real_unwrapped_env(env)
                 if hasattr(real_env, 'hull'):
-                    raw_x_pos = real_env.hull.position[0]
-                    raw_angle = real_env.hull.angle
-                    total_x_pos_sum += raw_x_pos
-                    total_abs_angle_sum += abs(raw_angle)
+                    total_x_pos_sum += real_env.hull.position[0]
+                    total_abs_angle_sum += abs(real_env.hull.angle)
                     episode_steps += 1
                 
                 sequences.append(obs[0])
                 episode_reward += reward[0]
-                if done:
-                    break
+                if done: break
             
-            # [新增] 计算行为特征
             bd_dist = total_x_pos_sum / max(1, episode_steps)
             bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
-
             is_crash = (done or episode_reward < 10)
             elapsed_time = time.time() - start_time
             
-            # [新增] 记录 bd_distance 和 bd_mean_angle
             all_test_cases_log.append({
-                "input": normal_case.tolist(), 
-                "is_crash": bool(is_crash),
-                "source": "random",
-                "step": cur_step,
-                "time": elapsed_time,
-                "bd_distance": bd_dist,      
-                "bd_mean_angle": bd_mean_angle 
+                "input": normal_case.tolist(), "is_crash": bool(is_crash), "source": "random",
+                "step": cur_step, "time": elapsed_time, "bd_distance": bd_dist, "bd_mean_angle": bd_mean_angle 
             })
 
             normal_case_list.append(normal_case)
             
+            # Metrics calculation (Density, Sensitivity, etc.)
             density, norm_density = 0, 0
             sensitivity, norm_sensitivity = 0, 0
             performance, norm_performance = 0, 0
@@ -595,46 +512,43 @@ def main():
                 sensitivity = compute_sensitivity(normal_case, cases_list, performance_list, episode_reward)
                 norm_sensitivity = normalize_data(sensitivity, memory_model.min_sensitivity, memory_model.max_sensitivity)
                 norm_sensitivity = 1 - norm_sensitivity
-                metric = norm_sensitivity
             
             if 'performance' in args.method:
                 performance_list = memory_model.get_performances()
                 performance = episode_reward
                 norm_performance = normalize_data(performance, memory_model.min_performance, memory_model.max_performance)
             
-            if 'novelty' in  args.method:
+            if 'novelty' in args.method:
                 abstract_id = novelty_grid.state_abstract(np.array([sequences[-1]]))[0]
-                if abstract_id in novelty_dict.keys():
-                    novelty_dict[abstract_id] += 1
-                else:
-                    novelty_dict[abstract_id] = 1
+                novelty_dict[abstract_id] = novelty_dict.get(abstract_id, 0) + 1
                 novelty = novelty_dict[abstract_id]
                 norm_novelty = 1 / (math.e ** (novelty - 1))
 
             metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
             memory_model.append(normal_case, density, sensitivity, performance, novelty)
-
-            print(cur_step, normal_case)
+            print(f"Step {cur_step} | Random Case")
 
         cur_step += 1
         current_time = time.time()
 
     # ==========================================
-    # [新增] 循环结束后的数据保存逻辑
+    # [Alignment] 保存阶段: 结构对齐
     # ==========================================
     
-    # 1. 保存 Transitions
+    # 1. 保存 Transitions (Dict format, Raw Data)
     if args.save_transitions:
-        final_transitions = crash_transitions + success_transitions
-        random.shuffle(final_transitions)
-        
+        save_payload = {
+            "crash": crash_transitions,
+            "success": success_transitions,
+            "is_raw": True
+        }
         trans_file = os.path.join(result_path, 'transitions.pkl')
-        print(f"Saving {len(final_transitions)} total transitions to {trans_file}...")
+        print(f"Saving labeled RAW transitions (Dict) to {trans_file}...")
         with open(trans_file, 'wb') as f_t:
-            pickle.dump(final_transitions, f_t, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(save_payload, f_t, protocol=pickle.HIGHEST_PROTOCOL)
         print("Transitions saved.")
 
-    # 2. 保存 TodyNet 数据
+    # 2. 保存 TodyNet 数据 (Raw Tensors)
     if args.save_data:
         balance_and_save_data(
             all_window_data, 
@@ -646,29 +560,20 @@ def main():
             target_crash_ratio=0.30
         )
 
-    file_path_diffusion = os.path.join(result_path, 'diffusion_failure_count.json')
-    with open(file_path_diffusion, 'w') as f:
+    # Save other logs
+    with open(os.path.join(result_path, 'diffusion_failure_count.json'), 'w') as f:
         json.dump(diffusion_failure_count, f)
-
-    file_path_info = os.path.join(result_path, 'information.json')
-    with open(file_path_info, 'w') as f:
+    with open(os.path.join(result_path, 'information.json'), 'w') as f:
         json.dump(information_list, f)
-
-    file_path_novelty = os.path.join(result_path, 'novelty_dict.json')
-    with open(file_path_novelty, 'w') as f:
+    with open(os.path.join(result_path, 'novelty_dict.json'), 'w') as f:
         json.dump(novelty_dict, f)
-        
-    log_filename = os.path.join(result_path, 'all_test_cases_log.pkl')
-    with open(log_filename, 'wb') as f:
+    with open(os.path.join(result_path, 'all_test_cases_log.pkl'), 'wb') as f:
         pickle.dump(all_test_cases_log, f)
 
 if __name__ == '__main__':  
     start_time = datetime.now()
-    start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"--- start time: {start_time_str} ---")
+    print(f"--- start time: {start_time.strftime('%Y-%m-%d %H:%M:%S')} ---")
     main()
     end_time = datetime.now()
-    end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"--- finish time: {end_time_str} ---")
-    duration = end_time - start_time
-    print(f"--- total time: {duration} ---")
+    print(f"--- finish time: {end_time.strftime('%Y-%m-%d %H:%M:%S')} ---")
+    print(f"--- total time: {end_time - start_time} ---")

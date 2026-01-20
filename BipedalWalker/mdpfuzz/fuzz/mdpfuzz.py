@@ -22,11 +22,13 @@ else:
     from .pool import Pool, IndexedPool, LightPool
 
 # ==========================================
-# 辅助函数
+# [Alignment] TodyNet 辅助函数 (与 CureFuzz 保持一致)
 # ==========================================
 def process_episode_data(sequence, label, window_size):
     """
-    TodyNet 严格采样: Success随机取1个，Failure取最后1个
+    处理单条序列数据：
+    - 输入 sequence shape: (Length, 28)
+    - 输出 window shape: (1, 28, Window_Size) -> 用于后续堆叠
     """
     seq_len = len(sequence)
     if seq_len < window_size:
@@ -37,15 +39,17 @@ def process_episode_data(sequence, label, window_size):
     labels = []
 
     if label == 0:
+        # Success: 随机采样
         max_idx = seq_len - window_size
         rand_idx = random.randint(0, max_idx)
         win = seq_array[rand_idx : rand_idx + window_size]
-        win = win.transpose() 
+        win = win.transpose() # (Window, Feat) -> (Feat, Window)
         windows.append(win)
         labels.append(0)
     else:
+        # Crash: 取最后一段
         win = seq_array[-window_size:] 
-        win = win.transpose()
+        win = win.transpose() # (Window, Feat) -> (Feat, Window)
         windows.append(win)
         labels.append(1)
         
@@ -53,7 +57,7 @@ def process_episode_data(sequence, label, window_size):
 
 def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size, target_total=3000, target_crash_ratio=0.30):
     """
-    平衡数据：强制 Crash 占比 target_crash_ratio (0.30)，且总数限制为 target_total (3000)
+    [Alignment] 数据平衡与保存，生成与 CureFuzz 兼容的 .pt 文件
     """
     if not X_list:
         return
@@ -65,25 +69,19 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     indices_fail = np.where(y_all == 1)[0]
     indices_succ = np.where(y_all == 0)[0]
     
-    # 目标计算: Total 3000 -> Fail 900, Success 2100
     n_crash_target = int(target_total * target_crash_ratio)
     n_succ_target = target_total - n_crash_target
     
-    print(f"  Raw Collected: Fail={len(indices_fail)}, Success={len(indices_succ)}")
-    print(f"  Target: Fail={n_crash_target}, Success={n_succ_target}")
-
-    # 1. 采样 Crash
+    # 采样 Crash
     if len(indices_fail) >= n_crash_target:
         final_fail = np.random.choice(indices_fail, size=n_crash_target, replace=False)
     else:
-        print(f"  [Warning] Not enough crash samples! Keeping all {len(indices_fail)}.")
         final_fail = indices_fail
         
-    # 2. 采样 Success
+    # 采样 Success
     if len(indices_succ) >= n_succ_target:
         final_succ = np.random.choice(indices_succ, size=n_succ_target, replace=False)
     else:
-        print(f"  [Warning] Not enough success samples! Keeping all {len(indices_succ)}.")
         final_succ = indices_succ
     
     final_indices = np.concatenate([final_fail, final_succ])
@@ -92,10 +90,13 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     X_balanced = X_all[final_indices]
     y_balanced = y_all[final_indices]
 
+    # 增加 Channel 维度: (N, 28, 25) -> (N, 1, 28, 25)
     X_final = np.expand_dims(X_balanced, axis=1)
+    
     X_tensor = torch.from_numpy(X_final).float()
     y_tensor = torch.from_numpy(y_balanced).long()
     
+    # 划分 Train/Valid
     total = X_tensor.size(0)
     indices = torch.randperm(total)
     split = int(0.8 * total)
@@ -109,8 +110,7 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     torch.save(X_tensor[indices[split:]], os.path.join(save_path, 'X_valid.pt'))
     torch.save(y_tensor[indices[split:]], os.path.join(save_path, 'y_valid.pt'))
     
-    final_ratio = y_tensor.float().mean().item()
-    print(f"[TodyNet Data] Saved {total} samples to {save_path} | Final Crash Ratio: {final_ratio:.2%}")
+    print(f"[TodyNet Data] Saved {total} samples to {save_path} (Format: N,1,Feat,Win)")
 
 
 class Fuzzer():
@@ -137,7 +137,6 @@ class Fuzzer():
         self.crash_transitions = []
         self.success_transitions = []
         
-        # TodyNet 收集计数
         self.todynet_success_count = 0
 
 
@@ -267,18 +266,15 @@ class Fuzzer():
         return exec_counter
 
     def _collect_data(self, transitions, crash, window_size, 
-                      TARGET_CRASH=10000, TARGET_SUCCESS=20000, 
+                      TARGET_CRASH=10000, TARGET_SUCCESS=90000, 
                       save_data=False, save_transitions=False):
         """
         统一的数据收集逻辑。
-        策略：
-        1. Transitions: 有固定上限 (10000/20000)，存满即止。
-        2. TodyNet: Success有软上限(3000)以节省内存，Crash无限收集，最后由 balance_and_save_data 进行截断。
         """
         if len(transitions) == 0:
             return
 
-        # 1. RL Transitions 收集 (带上限)
+        # 1. RL Transitions 收集 (Raw List)
         if save_transitions:
             if crash:
                 if len(self.crash_transitions) < TARGET_CRASH:
@@ -287,10 +283,8 @@ class Fuzzer():
                 if len(self.success_transitions) < TARGET_SUCCESS:
                     self.success_transitions.extend(transitions)
 
-        # 2. TodyNet 数据收集
+        # 2. TodyNet 数据收集 (Raw Tensors)
         if save_data:
-            # 策略：Crash 总是收集，Success 收集到一定量后停止，等待最后平衡。
-            # 目标只需 2100 个 Success，设置 3000 作为缓存上限
             TODYNET_SUCCESS_CAP = 3000 
             
             collect_this = False
@@ -301,7 +295,7 @@ class Fuzzer():
                     collect_this = True
             
             if collect_this:
-                # 构造 28维 序列
+                # 构造 28维 序列 (State + Action)
                 todynet_seq = []
                 for t in transitions:
                     s, a, _, _, _ = t
@@ -471,20 +465,24 @@ class Fuzzer():
 
         pbar.close()
         
-        # [最后保存数据]
+        # [保存阶段: 结构对齐]
         if path is not None:
             save_dir = os.path.dirname(path)
             
             if save_transitions:
-                final_trans = self.crash_transitions + self.success_transitions
-                random.shuffle(final_trans)
+                # [Fix] 保存为字典结构，对齐 CureFuzz
+                save_payload = {
+                    "crash": self.crash_transitions,
+                    "success": self.success_transitions,
+                    "is_raw": True
+                }
                 t_path = os.path.join(save_dir, 'transitions.pkl')
-                print(f"Saving {len(final_trans)} transitions to {t_path}")
+                print(f"Saving labeled RAW transitions (Dict) to {t_path}")
                 with open(t_path, 'wb') as f:
-                    pickle.dump(final_trans, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump(save_payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
             if save_data:
-                # 目标 Total=3000, Ratio=30%
+                # [Fix] TodyNet 平衡保存
                 balance_and_save_data(self.all_window_data, self.all_label_data, save_dir, "BipedalWalkerHC", window_size, target_total=3000, target_crash_ratio=0.30)
 
         if path is not None:
@@ -499,6 +497,7 @@ class Fuzzer():
 
 
     def fuzzing_no_coverage(self, n: int, policy: Any = None, **kwargs):
+        # [配置参数]
         save_data = kwargs.get('save_data', False)
         save_transitions = kwargs.get('save_transitions', False)
         window_size = kwargs.get('window_size', 20)
@@ -627,17 +626,21 @@ class Fuzzer():
 
         pbar.close()
         
-        # [最后保存数据]
+        # [保存阶段: 结构对齐]
         if path is not None:
             save_dir = os.path.dirname(path)
             
             if save_transitions:
-                final_trans = self.crash_transitions + self.success_transitions
-                random.shuffle(final_trans)
+                # [Fix] 保存为字典结构
+                save_payload = {
+                    "crash": self.crash_transitions,
+                    "success": self.success_transitions,
+                    "is_raw": True
+                }
                 t_path = os.path.join(save_dir, 'transitions.pkl')
-                print(f"Saving {len(final_trans)} transitions to {t_path}")
+                print(f"Saving labeled RAW transitions (Dict) to {t_path}")
                 with open(t_path, 'wb') as f:
-                    pickle.dump(final_trans, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump(save_payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
             if save_data:
                  balance_and_save_data(self.all_window_data, self.all_label_data, save_dir, "BipedalWalkerHC", window_size, target_total=3000, target_crash_ratio=0.30)
@@ -714,7 +717,7 @@ class Fuzzer():
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
         
-        # [新增] 获取数据收集参数
+        # [配置参数]
         save_data = kwargs.get('save_data', False)
         save_transitions = kwargs.get('save_transitions', False)
         window_size = kwargs.get('window_size', 20)
@@ -742,7 +745,7 @@ class Fuzzer():
             if execute:
                 acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(random_input, policy)
                 
-                # [新增] 收集数据 (调用 _collect_data)
+                # [数据收集]
                 self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
                 
                 episode_length = len(state_sequence)
@@ -761,22 +764,23 @@ class Fuzzer():
                 i += 1
         pbar.close()
 
-        # [新增] 循环结束后，保存收集到的数据
+        # [保存阶段: 结构对齐]
         if path is not None:
             save_dir = os.path.dirname(path)
 
-            # 1. 保存 Transitions
             if save_transitions:
-                final_trans = self.crash_transitions + self.success_transitions
-                random.shuffle(final_trans)
+                # [Fix] 保存为字典结构
+                save_payload = {
+                    "crash": self.crash_transitions,
+                    "success": self.success_transitions,
+                    "is_raw": True
+                }
                 t_path = os.path.join(save_dir, 'transitions.pkl')
-                print(f"Saving {len(final_trans)} transitions to {t_path}")
+                print(f"Saving labeled RAW transitions (Dict) to {t_path}")
                 with open(t_path, 'wb') as f:
-                    pickle.dump(final_trans, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump(save_payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-            # 2. 保存 TodyNet 数据 (Balance and Save)
             if save_data:
-                # 使用与 fuzzing 相同的参数: Target Total=3000, Ratio=30%
                 balance_and_save_data(
                     self.all_window_data, 
                     self.all_label_data, 

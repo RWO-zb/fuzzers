@@ -4,7 +4,7 @@ import torch as th
 import torch # 确保导入 torch
 import random # 确保导入 random
 from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecEnvWrapper, VecVideoRecorder
+from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecEnvWrapper, VecVideoRecorder, VecNormalize
 import utils.import_envs
 from utils import ALGOS, create_test_env, get_latest_run_id, get_saved_hyperparams
 from utils.exp_manager import ExperimentManager
@@ -15,12 +15,31 @@ import joblib
 from tapnet import predict_siamese, Hyperparameter
 
 # ==========================================
-# [新增] TodyNet 数据收集辅助函数 (来自 mdpfuzz)
+# [新增] 辅助函数：获取 Raw Observation
+# ==========================================
+def get_raw_obs(env, obs):
+    """
+    如果环境被 VecNormalize 包装，则进行反归一化以获取原始物理数值。
+    """
+    norm_env = env
+    # 处理嵌套情况 (DummyVecEnv -> VecNormalize)
+    if hasattr(norm_env, 'venv'):
+        if hasattr(norm_env.venv, 'envs') and len(norm_env.venv.envs) > 0:
+             possible_norm = norm_env.venv
+             if isinstance(possible_norm, VecNormalize):
+                 return possible_norm.unnormalize_obs(obs)
+    
+    # 直接检查
+    if isinstance(norm_env, VecNormalize):
+        return norm_env.unnormalize_obs(obs)
+    
+    # 尝试从 unwrapped env 获取
+    return obs
+
+# ==========================================
+# [新增] TodyNet 数据处理函数 (来自 mdpfuzz)
 # ==========================================
 def process_episode_data(sequence, label, window_size):
-    """
-    TodyNet 严格采样: Success随机取1个，Failure取最后1个
-    """
     seq_len = len(sequence)
     if seq_len < window_size:
         return None, None
@@ -45,9 +64,6 @@ def process_episode_data(sequence, label, window_size):
     return np.array(windows), np.array(labels)
 
 def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size, target_total=3000, target_crash_ratio=0.30):
-    """
-    平衡数据：强制 Crash 占比 target_crash_ratio (0.30)，且总数限制为 target_total (3000)
-    """
     if not X_list:
         return
     
@@ -58,25 +74,17 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     indices_fail = np.where(y_all == 1)[0]
     indices_succ = np.where(y_all == 0)[0]
     
-    # 目标计算
     n_crash_target = int(target_total * target_crash_ratio)
     n_succ_target = target_total - n_crash_target
     
-    print(f"  Raw Collected: Fail={len(indices_fail)}, Success={len(indices_succ)}")
-    print(f"  Target: Fail={n_crash_target}, Success={n_succ_target}")
-
-    # 1. 采样 Crash
     if len(indices_fail) >= n_crash_target:
         final_fail = np.random.choice(indices_fail, size=n_crash_target, replace=False)
     else:
-        print(f"  [Warning] Not enough crash samples! Keeping all {len(indices_fail)}.")
         final_fail = indices_fail
         
-    # 2. 采样 Success
     if len(indices_succ) >= n_succ_target:
         final_succ = np.random.choice(indices_succ, size=n_succ_target, replace=False)
     else:
-        print(f"  [Warning] Not enough success samples! Keeping all {len(indices_succ)}.")
         final_succ = indices_succ
     
     final_indices = np.concatenate([final_fail, final_succ])
@@ -86,24 +94,23 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     y_balanced = y_all[final_indices]
 
     X_final = np.expand_dims(X_balanced, axis=1)
-    X_tensor = torch.from_numpy(X_final).float()
-    y_tensor = torch.from_numpy(y_balanced).long()
+    X_tensor = th.from_numpy(X_final).float()
+    y_tensor = th.from_numpy(y_balanced).long()
     
     total = X_tensor.size(0)
-    indices = torch.randperm(total)
+    indices = th.randperm(total)
     split = int(0.8 * total)
     
     ds_id = f"{dataset_name}_{window_size}"
     save_path = os.path.join(output_dir, ds_id)
     os.makedirs(save_path, exist_ok=True)
     
-    torch.save(X_tensor[indices[:split]], os.path.join(save_path, 'X_train.pt'))
-    torch.save(y_tensor[indices[:split]], os.path.join(save_path, 'y_train.pt'))
-    torch.save(X_tensor[indices[split:]], os.path.join(save_path, 'X_valid.pt'))
-    torch.save(y_tensor[indices[split:]], os.path.join(save_path, 'y_valid.pt'))
+    th.save(X_tensor[indices[:split]], os.path.join(save_path, 'X_train.pt'))
+    th.save(y_tensor[indices[:split]], os.path.join(save_path, 'y_train.pt'))
+    th.save(X_tensor[indices[split:]], os.path.join(save_path, 'X_valid.pt'))
+    th.save(y_tensor[indices[split:]], os.path.join(save_path, 'y_valid.pt'))
     
-    final_ratio = y_tensor.float().mean().item()
-    print(f"[TodyNet Data] Saved {total} samples to {save_path} | Final Crash Ratio: {final_ratio:.2%}")
+    print(f"[TodyNet Data] Saved {total} samples to {save_path}")
 
 # --- 获取底层环境以访问物理状态 ---
 def get_real_unwrapped_env(env):
@@ -159,8 +166,8 @@ def main():
     )
     parser.add_argument("--em", action="store_true", default=True)
     
-    # [新增] 参数：是否收集 TodyNet 数据
-    parser.add_argument("--save-data", action="store_true", default=True, help="Save TodyNet training data")
+    # [新增] 数据收集参数
+    parser.add_argument("--save-data", action="store_true", default=True, help="Save TodyNet & Transition data")
     parser.add_argument("--window-size", type=int, default=25, help="Sliding window size")
 
     args = parser.parse_args()
@@ -273,13 +280,13 @@ def main():
 
     siamese_model = predict_siamese.load_tapnet_mode()
     siamese_model.cuda()
-    siamese_model.load_state_dict(torch.load(r'./tapnet/data/weights/tapnet.pkl'))
+    siamese_model.load_state_dict(th.load(r'./tapnet/data/weights/tapnet.pkl'))
     siamese_model.eval()
     bench_noCrash = Hyperparameter.bench_noCrash
     if len(bench_noCrash) == 0:
-        bench_noCrash = torch.zeros((1, Hyperparameter.Step, Hyperparameter.Dimension)).cuda()
+        bench_noCrash = th.zeros((1, Hyperparameter.Step, Hyperparameter.Dimension)).cuda()
     else:
-         bench_noCrash = torch.FloatTensor(np.array(bench_noCrash)).cuda()
+         bench_noCrash = th.FloatTensor(np.array(bench_noCrash)).cuda()
          if len(bench_noCrash.shape) == 2:
             bench_noCrash = bench_noCrash.unsqueeze(0)
    
@@ -293,15 +300,20 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 200000
+    seeds_num = 10
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
-    
-    # --- [新增] TodyNet 数据收集容器 ---
+
+    # [新增] 数据收集容器
     all_window_data = [] 
     all_label_data = []
     todynet_success_count = 0
-    # -------------------------------
+    
+    # [新增] Transition Lists (用于 Retrain)
+    crash_transitions = []
+    success_transitions = []
+    TARGET_CRASH_TRANS = 10000
+    TARGET_SUCCESS_TRANS = 90000
 
     # --- Corpus Generation Loop ---
     while i < seeds_num:
@@ -374,8 +386,7 @@ def main():
     timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
     seedcount = 0
     
-    # --- Fuzzing Loop ---
-    while current_time - start_fuzz_time < 3600 * 100 and len(fuzzer.corpus) > 0 :
+    while current_time - start_fuzz_time < 3600 * 0.05 and len(fuzzer.corpus) > 0 :
         is_crash = False
         seedcount+=1
         output_obs = []
@@ -385,40 +396,33 @@ def main():
         current_gen = fuzzer.current_generation + 1 
         state = None
         episode_reward = 0.0
+        
+        # [Fix] Reset and get Raw
         obs = env.reset(mutate_states)
         sequences = [obs[0]]
         
-        # --- [新增] 初始化行为特征和 TodyNet 序列容器 ---
-        total_x_pos_sum = 0.0
-        total_abs_angle_sum = 0.0
-        episode_steps = 0
-        current_episode_transitions_for_todynet = [] # 存储 (s, a) 对
-        # ---------------------------------------------
-
+        # [新增] 本 Episode 的临时数据容器
+        current_ep_transitions_raw = [] 
+        
         for _ in range(args.n_timesteps):
+            # [新增] 获取 Step 前的 Raw Obs
+            curr_obs_raw = get_raw_obs(env, obs[0].copy())
+            
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             
-            # --- [新增] 记录 TodyNet 所需的 (State, Action) ---
-            # obs 是当前的 State，action 是将要执行的动作
-            # 兼容处理：确保 obs 和 action 格式正确
-            curr_obs_copy = obs.copy() if isinstance(obs, np.ndarray) else obs
-            curr_action_copy = action.copy() if isinstance(action, np.ndarray) else action
-            current_episode_transitions_for_todynet.append((curr_obs_copy, curr_action_copy))
-            # -----------------------------------------------
+            # Step
+            next_obs, reward, done, infos = env.step(action)
+            
+            # [新增] 获取 Step 后的 Raw Obs
+            next_obs_raw = get_raw_obs(env, next_obs[0].copy())
+            
+            # [新增] 收集 Raw Transition: (s, a, r, s', d)
+            # action[0] 取出 scalar/array 动作
+            current_ep_transitions_raw.append((curr_obs_raw, action[0], reward[0], next_obs_raw, done))
 
-            obs, reward, done, infos = env.step(action)
+            # 原逻辑继续...
+            obs = next_obs
             sequences.append(obs[0])
-            
-            # --- [新增] 收集行为特征 (Distance & Angle) ---
-            real_env = get_real_unwrapped_env(env)
-            if real_env is not None and hasattr(real_env, 'hull'):
-                raw_x_pos = real_env.hull.position[0]
-                raw_angle = real_env.hull.angle
-                total_x_pos_sum += raw_x_pos
-                total_abs_angle_sum += abs(raw_angle)
-            episode_steps += 1
-            # ---------------------------------------------
-            
             if not args.no_render:
                 env.render("human")
             episode_reward += reward[0]
@@ -431,14 +435,9 @@ def main():
                 else:
                     print('continue')
             
-            # [Fix] 如果 done 了，提前 break，不需要等 for 循环结束
             if done:
                 break
 
-        # --- [新增] 计算本回合的 BD 指标 ---
-        bd_dist = total_x_pos_sum / max(1, episode_steps)
-        bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
-        
         temp2_time = time.time()
         time_of_env += temp2_time - temp1_time
         cvg = fuzzer.state_coverage(sequences)
@@ -556,25 +555,26 @@ def main():
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
         
-        # --- [新增] TodyNet 数据收集逻辑 ---
+        # --- [新增] 数据保存逻辑 (插入到循环末尾) ---
         if args.save_data:
-            TODYNET_SUCCESS_CAP = 3000
-            collect_this = False
+            # 1. 收集 Transitions
             if is_crash:
-                collect_this = True
+                if len(crash_transitions) < TARGET_CRASH_TRANS:
+                    crash_transitions.extend(current_ep_transitions_raw)
             else:
-                if todynet_success_count < TODYNET_SUCCESS_CAP:
-                    collect_this = True
+                if len(success_transitions) < TARGET_SUCCESS_TRANS:
+                    success_transitions.extend(current_ep_transitions_raw)
+
+            # 2. 收集 TodyNet 数据 (需要拼接 Raw Obs 和 Action)
+            TODYNET_SUCCESS_CAP = 3000
+            collect_this = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
             
             if collect_this:
-                # 构造序列: vec = [state, action]
                 todynet_seq = []
-                for (s, a) in current_episode_transitions_for_todynet:
-                    # s 可能为 (1, 24) 或 (24,), a 可能为 (1, 4) 或 (4,)
-                    # 确保展平
-                    s_flat = s.flatten()
-                    a_flat = a.flatten()
-                    vec = np.concatenate([s_flat, a_flat])
+                for t in current_ep_transitions_raw:
+                    s, a, _, _, _ = t
+                    # s is Raw Obs, a is Action
+                    vec = np.concatenate([s, a])
                     todynet_seq.append(vec)
                 
                 label = 1 if is_crash else 0
@@ -582,30 +582,16 @@ def main():
                 if wins is not None and len(wins) > 0:
                     all_window_data.append(wins)
                     all_label_data.append(labels)
-                    if not is_crash:
-                        todynet_success_count += 1
-        # -----------------------------------
+                    if not is_crash: todynet_success_count += 1
+        # --------------------------------------------
 
-        # --- [新增] 记录日志包含行为特征 ---
-        log_entry = {
-            'state': copy.deepcopy(mutate_states), 
-            'generation': current_gen,             
-            'crashed': is_crash,
-            'timestamp': time.time() - start_fuzz_time,
-            'bd_distance': bd_dist,      
-            'bd_mean_angle': bd_mean_angle 
-        }
-        mutation_log.append(log_entry)
-        # --- 日志记录结束 ---
-        
         current_time = time.time()
         time_of_fuzzer += current_time - temp2_time
         print('total reward: ', episode_reward, ', coverage: ', cvg, ', passed time: ', current_time - start_fuzz_time, ', corpus size: ', len(fuzzer.corpus), 'time_of_fuzzer: ', time_of_fuzzer, 'time_of_env: ', time_of_env)
         
-        # 打印当前 TodyNet 收集进度
-        if seedcount % 10 == 0:
-            print(f"[TodyNet Info] Collected: {todynet_success_count} success samples, Total collected episodes: {len(all_window_data)}")
-    
+        if seedcount % 10 == 0 and args.save_data:
+             print(f"[Info] Trans(F/S): {len(crash_transitions)}/{len(success_transitions)}, TodyNet(S): {todynet_success_count}")
+
     if args.em:
         file_name = os.path.join(result_path, 'crash_EM.pkl')
     else:
@@ -613,23 +599,22 @@ def main():
     with open(file_name, 'wb') as handle:
         pickle.dump(fuzzer.result, handle, protocol=pickle.HIGHEST_PROTOCOL)
     
-    # --- 保存完整的变异日志 ---
-    with open(os.path.join(result_path, 'all_run_seeds_0.pkl'), 'wb') as handle:
-        pickle.dump(mutation_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    
-    # --- [新增] 保存 TodyNet 数据 ---
+    # --- [新增] 保存 Transition 和 TodyNet 数据 ---
     if args.save_data:
-        balance_and_save_data(
-            all_window_data, 
-            all_label_data, 
-            result_path, 
-            "BipedalWalkerHC", 
-            args.window_size, 
-            target_total=3000, 
-            target_crash_ratio=0.30
-        )
-    # -------------------------------
-
+        # 1. 保存 TodyNet
+        balance_and_save_data(all_window_data, all_label_data, result_path, "BipedalWalkerHC", args.window_size)
+        
+        # 2. 保存 Transitions Dict (Critical for Retrain)
+        trans_file = os.path.join(result_path, 'transitions.pkl')
+        print(f"Saving {len(crash_transitions)} crash / {len(success_transitions)} success transitions to {trans_file}...")
+        save_payload = {
+            "crash": crash_transitions, 
+            "success": success_transitions, 
+            "is_raw": True
+        }
+        with open(trans_file, 'wb') as f_t:
+            pickle.dump(save_payload, f_t, protocol=pickle.HIGHEST_PROTOCOL)
+    # --------------------------------------------
 
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")

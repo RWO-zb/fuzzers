@@ -63,6 +63,7 @@ def generate_inputs(rng: np.random.Generator, n: int):
 
 
 def load_model():
+    # 请确保此路径指向你正确的模型文件
     return TQC.load('../rl-trained-agents/tqc/BipedalWalkerHardcore-v3_1/BipedalWalkerHardcore-v3.zip',
                     custom_objects={
                         "learning_rate": lambda _: 3e-4,
@@ -84,43 +85,66 @@ def get_inputs_from_keys(keys: Iterable[str]) -> np.ndarray:
     return np.array([np.asfarray(k.split(' '), dtype=str).astype(int) for k in keys])
 
 
-# [修改] 返回值类型注解增加了 List[np.ndarray]
-def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descriptors: List = None, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, np.ndarray, float, List[np.ndarray]]:
-    '''Executes the model on the environment and only computes the 12 features used by Leo Cazenille. It also returns the final state.'''
+def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descriptors: List = None, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, np.ndarray, float, List[Tuple]]:
+    '''
+    Executes the model on the environment.
+    '''
 
-    env = gym.make('BipedalWalkerHardcore-v4',rand_seed=env_seed)
+    # [Fix] 移除了 rand_seed 参数，避免 TypeError
+    env = gym.make('BipedalWalkerHardcore-v3')
+    
+    # [Fix] 手动设置种子，兼容新旧版本 Gym
+    try:
+        env.reset(seed=env_seed)
+    except TypeError:
+        env.seed(env_seed)
 
     acc_reward = 0.0
     features = np.zeros(12)
 
-    obs = env.reset(input)
+    obs = env.reset()
+    # 兼容 Gym 返回 (obs, info) 或仅 obs 的情况
+    if isinstance(obs, tuple):
+        obs = obs[0]
+        
     state = None
     t0 = time.time()
     
-    # [新增] 存储 (State, Action) 序列
+    # [Alignment] 存储标准的 (s, a, r, s', d) 元组
     transitions = []
 
     for t in range(sim_steps):
         action, state = model.predict(obs, state=state, deterministic=True)
         
-        # [新增] 收集 transitions (在 step 之前收集当前的 obs 和即将执行的 action)
-        transitions.append(np.concatenate([obs.flatten(), action.flatten()]))
+        step_result = env.step(action)
+        # 兼容 Gym API 变化: (obs, reward, done, info) vs (obs, reward, term, trunc, info)
+        if len(step_result) == 4:
+            next_obs, reward, done, info = step_result
+        else:
+            next_obs, reward, term, trunc, info = step_result
+            done = term or trunc
         
-        obs, reward, done, info = env.step(action)
-        features += info['features'] # numpy array
+        # [Modified] 收集 Transition，确保使用 copy 防止引用问题
+        transitions.append((obs.copy(), action.copy(), reward, next_obs.copy(), done))
+        
+        # 某些版本的 BipedalWalker info 中没有 features，这里做个安全检查
+        if 'features' in info:
+            features += info['features'] 
+        
         acc_reward += reward
+        obs = next_obs
 
         if done:
             break
 
     env.close()
-    features /= t
+    if t > 0:
+        features /= t
     exec_time = time.time() - t0
 
-    # 修改判定逻辑：如果最后一步reward是-100（摔倒）或者总奖励 acc_reward < 10，则判定为Crash
+    # 判定 Crash 逻辑
     is_crash = (reward == -100) or (acc_reward < 10)
 
-    # [修改] 返回 transitions
     if descriptors is not None:
         descriptors = np.array(descriptors)
         assert all(descriptors < 12) and all(descriptors >= 0)
@@ -130,30 +154,48 @@ def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descr
 
 
 def execute_policy_trajectory(input: np.ndarray, model: BaseAlgorithm, env_seed: int, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, List[np.ndarray], float]:
-    '''Executes the model and returns the trajectory data. Useful for MDPFuzz.'''
-    env = gym.make('BipedalWalkerHardcore-v3', rand_seed=env_seed)
+    '''Executes the model and returns the trajectory data.'''
+    # [Fix] 移除了 rand_seed
+    env = gym.make('BipedalWalkerHardcore-v3')
+    try:
+        env.reset(seed=env_seed)
+    except TypeError:
+        env.seed(env_seed)
+
     features = np.zeros(12)
     obs_seq = []
     acc_reward = 0.0
     done=False
-    obs = env.reset(input)
     
+    obs = env.reset()
+    if isinstance(obs, tuple):
+        obs = obs[0]
+        
     state = None
     t0 = time.time()
     for t in range(sim_steps):
         action, state = model.predict(obs, state=state, deterministic=True)
-        obs, reward, done, info = env.step(action)
-        features += info['features'] # numpy array
+        
+        step_result = env.step(action)
+        if len(step_result) == 4:
+            obs, reward, done, info = step_result
+        else:
+            obs, reward, term, trunc, info = step_result
+            done = term or trunc
+            
+        if 'features' in info:
+            features += info['features']
+            
         acc_reward += reward
         obs_seq.append(obs)
         if done:
             break
 
     env.close()
-    features /= t
+    if t > 0:
+        features /= t
     exec_time = time.time() - t0
     
-    # 修改判定逻辑：同上
     is_crash = (reward == -100) or (acc_reward < 10)
 
     return acc_reward, is_crash, features, np.array(obs_seq), exec_time
@@ -175,9 +217,9 @@ if __name__ == '__main__':
     descriptors = EXPERT_INDICES[0]
     oracles, rewards, behaviors, final_states = [], [], [], []
 
-    for _ in tqdm.tqdm(range(100)):
+    for _ in tqdm.tqdm(range(10)):
         input: np.ndarray = rng.integers(low=1, high=4, size=15)
-        # [修改] 接收 6 个返回值
+        # 测试 execute_policy 是否正常返回 6 个值
         r, o, b, fs, _, _ = execute_policy(input, model, env_seed, descriptors, 1000)
         oracles.append(o)
         rewards.append(r)

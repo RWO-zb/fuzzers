@@ -24,8 +24,8 @@ if __name__ == '__main__':
     torch.set_num_threads(1)
     
     test_budget = 80000
-    test_budget_in_seconds = 2400
-    init_budget = 1000
+    test_budget_in_seconds = 100
+    init_budget = 100
     k = 10
     tau = 0.01
     gamma = 0.01
@@ -39,8 +39,8 @@ if __name__ == '__main__':
     rl_key_arg = sys.argv[3]
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--save-data", action="store_true", default=False, help="Save TodyNet training data")
-    parser.add_argument("--save-transitions", action="store_true", default=False, help="Save RL transitions")
+    parser.add_argument("--save-data", action="store_true", default=True, help="Save TodyNet training data")
+    parser.add_argument("--save-transitions", action="store_true", default=True, help="Save RL transitions")
     # [新增] 物理轨迹保存参数
     parser.add_argument("--save-physics", action="store_true", default=False, help="Save full physics state trajectories for crash restoration")
     parser.add_argument("--window-size", type=int, default=25, help="Sliding window size")
