@@ -28,7 +28,7 @@ def main():
     parser.add_argument("-n", "--n-timesteps", help="Online training steps", default=0, type=int)
     parser.add_argument("--offline-steps", help="Offline gradient steps", default=50000, type=int)
     parser.add_argument("--lr", help="Learning rate", default=1e-7, type=float)
-    parser.add_argument("--crash-weight", help="Weight for crash samples", default=9, type=int)
+    parser.add_argument("--crash-weight", help="Weight for crash samples", default=10, type=int)
     
     parser.add_argument("--seed", help="Random seed", type=int, default=0)
     parser.add_argument("--no-render", action="store_true", default=False)

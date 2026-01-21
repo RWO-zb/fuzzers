@@ -70,7 +70,6 @@ class BipedalWalkerExecutor(Executor):
     def execute_policy(self, input: np.ndarray, policy: Any) -> Tuple[float, bool, np.ndarray, float, float, float, List]:
         '''
         Executes the model and returns the trajectory data and behaviour metrics.
-        [Alignment]: 该函数返回的 obs 是原始环境 (gym.make) 生成的，因此天然是 RAW 数据。
         '''
         env = gym.make('BipedalWalkerHardcore-v3')
         
@@ -104,10 +103,6 @@ class BipedalWalkerExecutor(Executor):
         t0 = time.time()
         
         for t in range(self.sim_steps):
-            # policy.predict 接受 Raw obs (前提是 Policy 训练时也见过 Raw，或者内部处理)
-            # CureFuzz 中 Policy 接受归一化，但这里是 MDPFuzz 的执行器，
-            # 只要这里保存出来的 transitions 中的 obs 是 Raw 的即可满足你的要求。
-            # gym.make 生成的 env 没有 VecNormalize，所以 obs 是 Raw。
             action, state = policy.predict(obs, state=state, deterministic=True)
             
             next_obs, reward, done, info = env.step(action)
@@ -117,9 +112,19 @@ class BipedalWalkerExecutor(Executor):
                 if phys:
                     current_episode_physics.append(phys)
 
-            # [Alignment] 构造标准 5元组 (Raw Obs, Action, Reward, Raw Next Obs, Done)
-            # 确保 action 是标量或数组的一致性处理
-            act_save = action[0].copy() if isinstance(action, np.ndarray) else action
+            # [Fix] 修复 Action 维度保存问题
+            # 原因: gym.make 创建的环境非向量化，predict 返回的 action 是 (4,)。
+            # 之前的 action[0] 错误地只取了第一个数值，导致维度变成了 1。
+            # 现在确保完整保存 4 维动作向量。
+            if isinstance(action, np.ndarray):
+                if action.ndim == 2: # 如果是向量化环境返回的 (1, 4)
+                    act_save = action[0].copy()
+                else: # 如果是原始环境返回的 (4,)
+                    act_save = action.copy()
+            else:
+                act_save = action
+            
+            # 保存 Transition (Obs 和 Next_Obs 天然是 Raw 的，因为没有 VecNormalize)
             transitions.append((obs.copy(), act_save, reward, next_obs.copy(), done))
 
             real_env = env.unwrapped
