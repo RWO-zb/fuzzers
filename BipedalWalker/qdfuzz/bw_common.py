@@ -84,8 +84,8 @@ def get_inputs_from_keys(keys: Iterable[str]) -> np.ndarray:
     return np.array([np.asfarray(k.split(' '), dtype=str).astype(int) for k in keys])
 
 
-# [修改] 返回值类型注解增加了 List[np.ndarray]
-def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descriptors: List = None, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, np.ndarray, float, List[np.ndarray]]:
+# [修改] 返回值类型注解增加了 List[Tuple] 用于返回 RL transitions
+def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descriptors: List = None, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, np.ndarray, float, List[np.ndarray], List[Tuple]]:
     '''Executes the model on the environment and only computes the 12 features used by Leo Cazenille. It also returns the final state.'''
 
     env = gym.make('BipedalWalkerHardcore-v4',rand_seed=env_seed)
@@ -97,36 +97,48 @@ def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descr
     state = None
     t0 = time.time()
     
-    # [新增] 存储 (State, Action) 序列
-    transitions = []
+    # [新增] 存储 TodyNet 所需的 (State+Action) 序列
+    todynet_trace = []
+    
+    # [新增] 存储 RL 重训所需的 (s, a, r, s', d) 序列
+    rl_transitions = []
 
     for t in range(sim_steps):
         action, state = model.predict(obs, state=state, deterministic=True)
         
-        # [新增] 收集 transitions (在 step 之前收集当前的 obs 和即将执行的 action)
-        transitions.append(np.concatenate([obs.flatten(), action.flatten()]))
+        # [新增] 收集 TodyNet 数据 (在 step 之前收集当前的 obs 和即将执行的 action)
+        todynet_trace.append(np.concatenate([obs.flatten(), action.flatten()]))
         
-        obs, reward, done, info = env.step(action)
+        # 执行环境交互
+        next_obs, reward, done, info = env.step(action)
+        
+        # [新增] 收集 RL Transition 数据 (Raw Obs, Action, Reward, Raw Next Obs, Done)
+        # 注意：这里的 env 是 raw gym env，所以 obs 已经是 raw 的，无需反归一化
+        rl_transitions.append((obs, action, reward, next_obs, done))
+        
         features += info['features'] # numpy array
         acc_reward += reward
+        
+        obs = next_obs # 更新 obs
 
         if done:
             break
 
     env.close()
-    features /= t
+    if t > 0:
+        features /= t
     exec_time = time.time() - t0
 
     # 修改判定逻辑：如果最后一步reward是-100（摔倒）或者总奖励 acc_reward < 10，则判定为Crash
     is_crash = (reward == -100) or (acc_reward < 10)
 
-    # [修改] 返回 transitions
+    # [修改] 返回值增加了 rl_transitions
     if descriptors is not None:
         descriptors = np.array(descriptors)
         assert all(descriptors < 12) and all(descriptors >= 0)
-        return acc_reward, is_crash, features[descriptors], obs, exec_time, transitions
+        return acc_reward, is_crash, features[descriptors], obs, exec_time, todynet_trace, rl_transitions
     else:
-        return acc_reward, is_crash, features, obs, exec_time, transitions
+        return acc_reward, is_crash, features, obs, exec_time, todynet_trace, rl_transitions
 
 
 def execute_policy_trajectory(input: np.ndarray, model: BaseAlgorithm, env_seed: int, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, List[np.ndarray], float]:
@@ -150,7 +162,8 @@ def execute_policy_trajectory(input: np.ndarray, model: BaseAlgorithm, env_seed:
             break
 
     env.close()
-    features /= t
+    if t > 0:
+        features /= t
     exec_time = time.time() - t0
     
     # 修改判定逻辑：同上
@@ -177,8 +190,8 @@ if __name__ == '__main__':
 
     for _ in tqdm.tqdm(range(100)):
         input: np.ndarray = rng.integers(low=1, high=4, size=15)
-        # [修改] 接收 6 个返回值
-        r, o, b, fs, _, _ = execute_policy(input, model, env_seed, descriptors, 1000)
+        # [修改] 接收 7 个返回值
+        r, o, b, fs, _, _, _ = execute_policy(input, model, env_seed, descriptors, 1000)
         oracles.append(o)
         rewards.append(r)
         behaviors.append(b)

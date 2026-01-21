@@ -167,7 +167,7 @@ def main():
     parser.add_argument("--em", action="store_true", default=True)
     
     # [新增] 数据收集参数
-    parser.add_argument("--save-data", action="store_true", default=True, help="Save TodyNet & Transition data")
+    parser.add_argument("--save-data", action="store_true", default=False, help="Save TodyNet & Transition data")
     parser.add_argument("--window-size", type=int, default=25, help="Sliding window size")
 
     args = parser.parse_args()
