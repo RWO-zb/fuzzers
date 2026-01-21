@@ -1,8 +1,8 @@
 import argparse, importlib, os, sys, time, copy, tqdm, pickle, yaml
 import numpy as np
 import torch as th
-import torch # 确保导入 torch
-import random # 确保导入 random
+import torch 
+import random 
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecEnvWrapper, VecVideoRecorder, VecNormalize
 import utils.import_envs
@@ -15,29 +15,26 @@ import joblib
 from tapnet import predict_siamese, Hyperparameter
 
 # ==========================================
-# [新增] 辅助函数：获取 Raw Observation
+# [Helper] 辅助函数：获取 Raw Observation
 # ==========================================
 def get_raw_obs(env, obs):
     """
     如果环境被 VecNormalize 包装，则进行反归一化以获取原始物理数值。
     """
     norm_env = env
-    # 处理嵌套情况 (DummyVecEnv -> VecNormalize)
     if hasattr(norm_env, 'venv'):
         if hasattr(norm_env.venv, 'envs') and len(norm_env.venv.envs) > 0:
              possible_norm = norm_env.venv
              if isinstance(possible_norm, VecNormalize):
                  return possible_norm.unnormalize_obs(obs)
     
-    # 直接检查
     if isinstance(norm_env, VecNormalize):
         return norm_env.unnormalize_obs(obs)
     
-    # 尝试从 unwrapped env 获取
     return obs
 
 # ==========================================
-# [新增] TodyNet 数据处理函数 (来自 mdpfuzz)
+# [Helper] TodyNet 数据处理函数
 # ==========================================
 def process_episode_data(sequence, label, window_size):
     seq_len = len(sequence)
@@ -112,7 +109,7 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     
     print(f"[TodyNet Data] Saved {total} samples to {save_path}")
 
-# --- 获取底层环境以访问物理状态 ---
+# --- 获取底层环境以访问物理状态 (用于计算 BD) ---
 def get_real_unwrapped_env(env):
     current_env = env
     while hasattr(current_env, 'venv'):
@@ -135,44 +132,24 @@ def main():
     parser.add_argument("--n-envs", help="number of environments", default=1, type=int)
     parser.add_argument("--exp-id", help="Experiment ID (default: 0: latest, -1: no exp folder)", default=0, type=int)
     parser.add_argument("--verbose", help="Verbose mode (0: no output, 1: INFO)", default=1, type=int)
-    parser.add_argument(
-        "--no-render", action="store_true", default=True, help="Do not render the environment (useful for tests)"
-    )
+    parser.add_argument("--no-render", action="store_true", default=True, help="Do not render the environment")
     parser.add_argument("--deterministic", action="store_true", default=False, help="Use deterministic actions")
-    parser.add_argument(
-        "--load-best", action="store_true", default=False, help="Load best model instead of last model if available"
-    )
-    parser.add_argument(
-        "--load-checkpoint",
-        type=int,
-        help="Load checkpoint instead of last model if available, "
-        "you must pass the number of timesteps corresponding to it",
-    )
+    parser.add_argument("--load-best", action="store_true", default=False, help="Load best model")
+    parser.add_argument("--load-checkpoint", type=int, help="Load checkpoint")
     parser.add_argument("--stochastic", action="store_true", default=False, help="Use stochastic actions")
-    parser.add_argument(
-        "--norm-reward", action="store_true", default=False, help="Normalize reward if applicable (trained with VecNormalize)"
-    )
+    parser.add_argument("--norm-reward", action="store_true", default=False, help="Normalize reward")
     parser.add_argument("--seed", help="Random generator seed", type=int, default=0)
     parser.add_argument("--reward-log", help="Where to log reward", default="", type=str)
-    parser.add_argument(
-        "--gym-packages",
-        type=str,
-        nargs="+",
-        default=[],
-        help="Additional external Gym environemnt package modules to import (e.g. gym_minigrid)",
-    )
-    parser.add_argument(
-        "--env-kwargs", type=str, nargs="+", action=StoreDict, help="Optional keyword argument to pass to the env constructor"
-    )
+    parser.add_argument("--gym-packages", type=str, nargs="+", default=[], help="External Gym packages")
+    parser.add_argument("--env-kwargs", type=str, nargs="+", action=StoreDict, help="Env constructor kwargs")
     parser.add_argument("--em", action="store_true", default=True)
     
-    # [新增] 数据收集参数
-    parser.add_argument("--save-data", action="store_true", default=False, help="Save TodyNet & Transition data")
+    # [Data Collection Args]
+    parser.add_argument("--save-data", action="store_true", default=True, help="Save TodyNet & Transition data")
     parser.add_argument("--window-size", type=int, default=25, help="Sliding window size")
 
     args = parser.parse_args()
     
-    # --- 创建结果文件夹 ---
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
     result_path = os.path.join('results', result_folder)
@@ -204,17 +181,17 @@ def main():
     for ext in ["zip"]:
         model_path = os.path.join(log_path, f"{env_id}.{ext}")
         found = os.path.isfile(model_path)
-        if found:
-            break
+        if found: break
 
     if args.load_best:
         model_path = os.path.join(log_path, "best_model.zip")
-        found = os.path.isfile(model_path)
+        found = os.path.isfile(model_path) # Update found status
 
     if args.load_checkpoint is not None:
         model_path = os.path.join(log_path, f"rl_model_{args.load_checkpoint}_steps.zip")
-        found = os.path.isfile(model_path)
+        found = os.path.isfile(model_path) # Update found status
 
+    # [Fix] Restored missing check and definition causing NameError
     if not found:
         raise ValueError(f"No model found for {algo} on {env_id}, path: {model_path}")
 
@@ -224,14 +201,10 @@ def main():
         args.n_envs = 1
 
     set_random_seed(args.seed)
-
     if args.num_threads > 0:
-        if args.verbose > 1:
-            print(f"Setting torch.num_threads to {args.num_threads}")
         th.set_num_threads(args.num_threads)
 
     is_atari = ExperimentManager.is_atari(env_id)
-
     stats_path = os.path.join(log_path, env_id)
     hyperparams, stats_path = get_saved_hyperparams(stats_path, norm_reward=args.norm_reward, test_mode=True)
 
@@ -262,10 +235,8 @@ def main():
     if algo in off_policy_algos:
         kwargs.update(dict(buffer_size=1))
 
-    newer_python_version = sys.version_info.major == 3 and sys.version_info.minor >= 8
-
     custom_objects = {}
-    if newer_python_version:
+    if sys.version_info.major == 3 and sys.version_info.minor >= 8:
         custom_objects = {
             "learning_rate": 0.0,
             "lr_schedule": lambda _: 0.0,
@@ -300,20 +271,23 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 1000
+    seeds_num = 10
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
 
-    # [新增] 数据收集容器
+    # [Data Containers]
     all_window_data = [] 
     all_label_data = []
     todynet_success_count = 0
     
-    # [新增] Transition Lists (用于 Retrain)
+    # [Transition Lists]
     crash_transitions = []
     success_transitions = []
     TARGET_CRASH_TRANS = 10000
     TARGET_SUCCESS_TRANS = 90000
+    
+    # [Restore] Plotting Data Container
+    all_run_results = []
 
     # --- Corpus Generation Loop ---
     while i < seeds_num:
@@ -327,14 +301,12 @@ def main():
             obs, reward, done, infos = env.step(action)
             sequences.append(obs[0])
             episode_reward += reward[0]
-            if done:
-                break
+            if done: break
         if not done:
             state = None
             episode_reward_mutate = 0.0
             delta_states = np.random.choice(2, 15, p=[0.9, 0.1])
-            if np.sum(delta_states) == 0:
-                delta_states[0] = 1
+            if np.sum(delta_states) == 0: delta_states[0] = 1
             mutate_states = states + delta_states
             mutate_states = np.remainder(mutate_states, 4)
             mutate_states = np.clip(mutate_states, 1, 3)
@@ -346,11 +318,10 @@ def main():
                 action, state = model.predict(obs, state=state, deterministic=deterministic)
                 obs, reward, done, infos = env.step(action)
                 episode_reward_mutate += reward[0]
-                if done:
-                    break
+                if done: break
             entropy = np.abs(episode_reward_mutate - episode_reward) / np.sum(delta_states)
             cvg = fuzzer.state_coverage(sequences)
-            fuzzer.further_mutation(states, episode_reward, entropy, cvg, states,0)
+            fuzzer.further_mutation(states, episode_reward, entropy, cvg, states, 0)
             print(entropy, episode_reward, episode_reward_mutate, done, cvg)
             i += 1
             pbar.update(1)
@@ -369,7 +340,6 @@ def main():
     fuzzer.original = copy.deepcopy(fuzzer.corpus)
     mutation_log = [] 
 
-    # HACK: start fuzzing
     start_fuzz_time = time.time()
     cvg_threshold = 0.02
 
@@ -386,7 +356,7 @@ def main():
     timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
     seedcount = 0
     
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 :
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<100:
         is_crash = False
         seedcount+=1
         output_obs = []
@@ -397,15 +367,20 @@ def main():
         state = None
         episode_reward = 0.0
         
-        # [Fix] Reset and get Raw
+        # Reset Env
         obs = env.reset(mutate_states)
         sequences = [obs[0]]
         
-        # [新增] 本 Episode 的临时数据容器
+        # [Fix] Containers for this episode
         current_ep_transitions_raw = [] 
         
+        # [Restore] Variables for plotting metrics (BD)
+        total_x_pos_sum = 0.0
+        total_abs_angle_sum = 0.0
+        episode_steps = 0
+        
         for _ in range(args.n_timesteps):
-            # [新增] 获取 Step 前的 Raw Obs
+            # [Fix] Get Raw Observation (Current)
             curr_obs_raw = get_raw_obs(env, obs[0].copy())
             
             action, state = model.predict(obs, state=state, deterministic=deterministic)
@@ -413,14 +388,19 @@ def main():
             # Step
             next_obs, reward, done, infos = env.step(action)
             
-            # [新增] 获取 Step 后的 Raw Obs
+            # [Fix] Get Raw Observation (Next)
             next_obs_raw = get_raw_obs(env, next_obs[0].copy())
             
-            # [新增] 收集 Raw Transition: (s, a, r, s', d)
-            # action[0] 取出 scalar/array 动作
+            # [Fix] Collect Raw Transition: (s, a, r, s', d)
             current_ep_transitions_raw.append((curr_obs_raw, action[0], reward[0], next_obs_raw, done))
 
-            # 原逻辑继续...
+            # [Restore] Calculate BD statistics (from raw env)
+            real_env = get_real_unwrapped_env(env)
+            if hasattr(real_env, 'hull'):
+                total_x_pos_sum += real_env.hull.position[0]
+                total_abs_angle_sum += abs(real_env.hull.angle)
+                episode_steps += 1
+
             obs = next_obs
             sequences.append(obs[0])
             if not args.no_render:
@@ -430,13 +410,9 @@ def main():
             output_obs.append(obs[0])
             if (len(output_obs) == Hyperparameter.Step): 
                 ret = predict_siamese.predict_once(siamese_model, bench_noCrash, output_obs)
-                if ret == 1:
-                    print('end')
-                else:
-                    print('continue')
+                if ret == 1: pass # print('end')
             
-            if done:
-                break
+            if done: break
 
         temp2_time = time.time()
         time_of_env += temp2_time - temp1_time
@@ -444,40 +420,28 @@ def main():
         temp3_time = time.time()
         time_of_DynEM += temp3_time - temp2_time
         local_sensitivity = np.abs(episode_reward - fuzzer.current_reward)
+        
+        # [Restore] Calculate Metrics for Plotting
+        bd_dist = total_x_pos_sum / max(1, episode_steps)
+        bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
+        elapsed_time = current_time - start_fuzz_time
+
         if done or episode_reward < 10:
             is_crash = True
             if len(output_obs) == Hyperparameter.Step:
                 for i in range(len(output_obs)):
                     outputStr = ''
-                    for d in output_obs[i]:
-                        outputStr = outputStr + str(d) + ', '
-                    crashF_40.write(outputStr)
-                    crashF_40.write('\n')
-                crashF_40.write('######')
-                crashF_40.write('\n')
-
-                current_time = time.time()
-                s = 'fail_40: '
-                timeStamp.write(s)
-                timeStamp.write(str(current_time))
-                timeStamp.write('\n')
-
+                    for d in output_obs[i]: outputStr = outputStr + str(d) + ', '
+                    crashF_40.write(outputStr + '\n')
+                crashF_40.write('######\n')
+                timeStamp.write(f'fail_40: {current_time}\n')
             else:
                 for i in range(len(output_obs)):
                     outputStr = ''
-                    for d in output_obs[i]:
-                        outputStr = outputStr + str(d) + ', '
-                    failObs.write(outputStr)
-                    failObs.write('\n')
-                failObs.write('######')
-                failObs.write('\n')
-
-                current_time = time.time()
-                s = 'fail: '
-                timeStamp.write(s)
-                timeStamp.write(str(current_time))
-                timeStamp.write('\n')
-
+                    for d in output_obs[i]: outputStr = outputStr + str(d) + ', '
+                    failObs.write(outputStr + '\n')
+                failObs.write('######\n')
+                timeStamp.write(f'fail: {current_time}\n')
 
             pbar1.update(1)
             fuzzer.add_crash(mutate_states)
@@ -486,33 +450,17 @@ def main():
             if len(output_obs) == Hyperparameter.Step:
                 for i in range(len(output_obs)):
                     outputStr = ''
-                    for d in output_obs[i]:
-                        outputStr = outputStr + str(d) + ', '
-                    noCrashF_40.write(outputStr)
-                    noCrashF_40.write('\n')
-                noCrashF_40.write('######')
-                noCrashF_40.write('\n')
-                current_time = time.time()
-
-                s = 'success_40: '
-                timeStamp.write(s)
-                timeStamp.write(str(current_time))
-                timeStamp.write('\n')
+                    for d in output_obs[i]: outputStr = outputStr + str(d) + ', '
+                    noCrashF_40.write(outputStr + '\n')
+                noCrashF_40.write('######\n')
+                timeStamp.write(f'success_40: {current_time}\n')
             else:
                 for i in range(len(output_obs)):
                     outputStr = ''
-                    for d in output_obs[i]:
-                        outputStr = outputStr + str(d) + ', '
-                    successObs.write(outputStr)
-                    successObs.write('\n')
-                successObs.write('######')
-                successObs.write('\n')
-                current_time = time.time()
-
-                s = 'success: '
-                timeStamp.write(s)
-                timeStamp.write(str(current_time))
-                timeStamp.write('\n')
+                    for d in output_obs[i]: outputStr = outputStr + str(d) + ', '
+                    successObs.write(outputStr + '\n')
+                successObs.write('######\n')
+                timeStamp.write(f'success: {current_time}\n')
 
             if cvg < cvg_threshold or episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
@@ -522,42 +470,37 @@ def main():
             if len(output_obs) == Hyperparameter.Step:
                 for i in range(len(output_obs)):
                     outputStr = ''
-                    for d in output_obs[i]:
-                        outputStr = outputStr + str(d) + ', '
-                    noCrashF_40.write(outputStr)
-                    noCrashF_40.write('\n')
-                noCrashF_40.write('######')
-                noCrashF_40.write('\n')
-                current_time = time.time()
-
-                s = 'success_40: '
-                timeStamp.write(s)
-                timeStamp.write(str(current_time))
-                timeStamp.write('\n')
+                    for d in output_obs[i]: outputStr = outputStr + str(d) + ', '
+                    noCrashF_40.write(outputStr + '\n')
+                noCrashF_40.write('######\n')
+                timeStamp.write(f'success_40: {current_time}\n')
             else:
                 for i in range(len(output_obs)):
                     outputStr = ''
-                    for d in output_obs[i]:
-                        outputStr = outputStr + str(d) + ', '
-                    successObs.write(outputStr)
-                    successObs.write('\n')
-                successObs.write('######')
-                successObs.write('\n')
-                current_time = time.time()
-
-                s = 'success: '
-                timeStamp.write(s)
-                timeStamp.write(str(current_time))
-                timeStamp.write('\n')
+                    for d in output_obs[i]: outputStr = outputStr + str(d) + ', '
+                    successObs.write(outputStr + '\n')
+                successObs.write('######\n')
+                timeStamp.write(f'success: {current_time}\n')
 
             if episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
         
-        # --- [新增] 数据保存逻辑 (插入到循环末尾) ---
+        # [Restore] Record Data for seqfuzzplot.py (Exact format requested)
+        log_entry = {
+            'state': copy.deepcopy(mutate_states), 
+            'generation': current_gen,             
+            'crashed': is_crash,
+            'timestamp': time.time() - start_fuzz_time,
+            'bd_distance': bd_dist,      
+            'bd_mean_angle': bd_mean_angle 
+        }
+        all_run_results.append(log_entry)
+
+        # --- [Fix] Data Saving Logic (Aligned) ---
         if args.save_data:
-            # 1. 收集 Transitions
+            # 1. Transitions Collection
             if is_crash:
                 if len(crash_transitions) < TARGET_CRASH_TRANS:
                     crash_transitions.extend(current_ep_transitions_raw)
@@ -565,16 +508,16 @@ def main():
                 if len(success_transitions) < TARGET_SUCCESS_TRANS:
                     success_transitions.extend(current_ep_transitions_raw)
 
-            # 2. 收集 TodyNet 数据 (需要拼接 Raw Obs 和 Action)
+            # 2. TodyNet Collection
             TODYNET_SUCCESS_CAP = 3000
             collect_this = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
             
             if collect_this:
+                # Use RAW data for TodyNet
                 todynet_seq = []
                 for t in current_ep_transitions_raw:
                     s, a, _, _, _ = t
-                    # s is Raw Obs, a is Action
-                    vec = np.concatenate([s, a])
+                    vec = np.concatenate([s, a]) # s and a are Raw
                     todynet_seq.append(vec)
                 
                 label = 1 if is_crash else 0
@@ -583,8 +526,8 @@ def main():
                     all_window_data.append(wins)
                     all_label_data.append(labels)
                     if not is_crash: todynet_success_count += 1
-        # --------------------------------------------
-
+        # -----------------------------------------
+        
         current_time = time.time()
         time_of_fuzzer += current_time - temp2_time
         print('total reward: ', episode_reward, ', coverage: ', cvg, ', passed time: ', current_time - start_fuzz_time, ', corpus size: ', len(fuzzer.corpus), 'time_of_fuzzer: ', time_of_fuzzer, 'time_of_env: ', time_of_env)
@@ -599,12 +542,18 @@ def main():
     with open(file_name, 'wb') as handle:
         pickle.dump(fuzzer.result, handle, protocol=pickle.HIGHEST_PROTOCOL)
     
-    # --- [新增] 保存 Transition 和 TodyNet 数据 ---
+    # [Restore] Save all_run_seeds_X.pkl for Plotting
+    plot_file = os.path.join(result_path, f'all_run_seeds_{args.seed}.pkl')
+    with open(plot_file, 'wb') as f_plot:
+        pickle.dump(all_run_results, f_plot)
+    print(f"[Restored] Plotting data saved to {plot_file}")
+
+    # --- [Fix] Save Aligned Data ---
     if args.save_data:
-        # 1. 保存 TodyNet
+        # 1. Save TodyNet
         balance_and_save_data(all_window_data, all_label_data, result_path, "BipedalWalkerHC", args.window_size)
         
-        # 2. 保存 Transitions Dict (Critical for Retrain)
+        # 2. Save Transitions Dict (Critical for Retrain)
         trans_file = os.path.join(result_path, 'transitions.pkl')
         print(f"Saving {len(crash_transitions)} crash / {len(success_transitions)} success transitions to {trans_file}...")
         save_payload = {

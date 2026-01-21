@@ -15,7 +15,7 @@ from bw_common import load_model, EXPERT_INDICES, execute_policy, get_edges
 from common import compute_cell, EXPERIMENT_SEEDS
 
 # ==========================================
-# [新增] TodyNet 数据收集辅助函数
+# [辅助函数] TodyNet 数据收集 (保持不变)
 # ==========================================
 def process_episode_data(sequence, label, window_size):
     seq_len = len(sequence)
@@ -111,11 +111,9 @@ class Framework():
         assert len(self.descriptors) == 2
         assert all(self.descriptors < 12) and all(self.descriptors >= 0)
 
-        # as indices
         self.last_cell_selected = None
         self.last_cell_updated = None
 
-        # data structure consists of a list of cells (list of integers) and a list of list of test results
         self.cells: list[list[int]] = []
         # a 6-tuple: (input, performance, oracle result, behavior, mutation_count, elapsed_time)
         self.cells_data: list[list[tuple[np.ndarray, float, bool, np.ndarray, int, float]]] = []
@@ -127,7 +125,6 @@ class Framework():
             'use_case': 'Bipedal Walker'
         }
 
-        # kwargs (name to include in the experimental configuration etc.)
         self.name = kwargs.get('name')
         if self.name is not None:
             self.config['name'] = self.name
@@ -142,9 +139,6 @@ class Framework():
 
 
     def save_configuration(self, filepath: str):
-        '''
-        Saves the configuration of the object.
-        '''
         if not filepath.endswith('config'):
             filepath += '_config'
         f = open(f'{filepath}.json', 'w')
@@ -153,7 +147,6 @@ class Framework():
 
 
     def save_random_state(self, filepath: str):
-        '''Saves the state of the BitGenerator instance (of the Generator).'''
         f = open(f'{filepath}_state.json', 'w')
         f.write(json.dumps(self.rng.bit_generator.state))
         f.close()
@@ -161,9 +154,6 @@ class Framework():
 
 
     def save_state(self, filepath: str):
-        '''
-        Saves the current state of the framework to possibly resume execution.
-        '''
         cell_dfs = []
         base_columns = ['score', 'is_faulty', 'cell_index'] + [f'cell{i}' for i in range(2)] + [f'behavior{i}' for i in range(2)]
         all_columns = base_columns + ['input', 'mutation_count', 'elapsed_time']
@@ -202,7 +192,6 @@ class Framework():
 
 
     def load_configuration(self, filepath: str):
-        '''Loads and sets the configuration attribute of the instance.'''
         if not filepath.endswith('config'):
             filepath += '_config'
         f = open(f'{filepath}.json', 'r')
@@ -211,7 +200,6 @@ class Framework():
 
 
     def load_random_state(self, filepath: str):
-        '''Loads and sets the state of BitGenerator instance (of the Generator).'''
         if not filepath.endswith('state'):
             filepath += '_state'
         f = open(f'{filepath}.json', 'r')
@@ -220,9 +208,6 @@ class Framework():
 
 
     def load_state(self, filepath: str):
-        '''
-        Loads a state of an instance to resume testing and returns the number of test cases loaded.
-        '''
         df_fp = f'{filepath}_data.csv'
         assert os.path.exists(df_fp), 'file is missing.'
         self.cells = []
@@ -260,24 +245,16 @@ class Framework():
 
 
     def select_input(self, index: int):
-        '''
-        Samples from the indexed cell the next input.
-        Returns both input and its mutation_count.
-        '''
         input_index: int = self.rng.integers(0, len(self.cells_data[index]))
         selected_data = self.cells_data[index][input_index]
         return selected_data[0], selected_data[4]
 
 
     def select_cell(self):
-        '''Selects the cell for the next search iteration.'''
         return int(self.rng.integers(0, len(self.cells)))
 
 
     def update_cell(self, cell: List[int], input: np.ndarray, performance: float, is_faulty: bool, behavior: np.ndarray, mutation_count: int, elapsed_time: float):
-        '''
-        Records the execution result to the corresponding cell.
-        '''
         index = None
         try:
             index = self.cells.index(cell)
@@ -347,7 +324,7 @@ class Framework():
         cells_buffer = open(f'{filepath}_cells.txt', 'w', buffering=1)
         logs_buffer = open(f'{filepath}_logs.txt', 'w', buffering=1)
 
-        print(f'Starting test_policy. Time Budget: {time_budget_hours}h, Execution Budget: {execution_budget}')
+        print(f'Starting test_policy. Time Budget: {time_budget_hours}h, Execution Budget: {execution_budget} (Init not counted)')
 
         inputs: List[np.ndarray] = []
         behaviors = []
@@ -355,9 +332,9 @@ class Framework():
         acc_rewards: List[float] = []
         oracles: List[bool] = []
         
-        testing_start_time = time.time()
+        testing_start_time = time.time() # 记录总时间
         execution_times = []
-        n_executions = 0 
+        n_executions = 0 # 记录总执行次数
         
         # [容器]
         all_window_data = [] 
@@ -371,39 +348,17 @@ class Framework():
         TRANSITION_SUCCESS_CAP = 90000
 
         print("Starting initialization phase...")
+        # [修改] Init 阶段不检查 Budget，也不收集数据
         for _ in tqdm.tqdm(range(init_budget), disable=disable_pbar):
-            if not self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
-                break
-
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
 
             t0 = time.time()
-            # [修改] 接收 7 个返回值
-            episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data = execute_policy(input, model, env_seed, self.descriptors)
+            # 执行策略，解包数据但不使用 todynet_trace 和 rl_data
+            episode_reward, oracle, behavior, fs, _, _, _ = execute_policy(input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
 
-            if save_data:
-                is_crash = oracle
-                label = 1 if is_crash else 0
-                
-                # TodyNet
-                collect_todynet = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
-                if collect_todynet:
-                    wins, labels = process_episode_data(todynet_trace, label, window_size)
-                    if wins is not None:
-                        all_window_data.append(wins)
-                        all_label_data.append(labels)
-                        if not is_crash:
-                            todynet_success_count += 1
-                
-                # RL Transitions
-                if is_crash:
-                    if len(crash_transitions) < TRANSITION_CRASH_CAP:
-                        crash_transitions.extend(rl_data)
-                else:
-                    if len(success_transitions) < TRANSITION_SUCCESS_CAP:
-                        success_transitions.extend(rl_data)
+            # [注意] 这里移除了 save_data 逻辑
 
             inputs.append(input)
             behaviors.append(behavior)
@@ -436,17 +391,21 @@ class Framework():
             np.savetxt(final_states_buffer, final_states[i].reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
 
+        # [修改] 重置 Budget 计数器，只计算 Fuzzing 阶段
+        fuzz_executions = 0
+        fuzzing_start_time = time.time()
+
         if execution_budget is not None:
-            pbar = tqdm.tqdm(total=execution_budget, initial=n_executions, disable=disable_pbar)
+            pbar = tqdm.tqdm(total=execution_budget, initial=0, disable=disable_pbar)
             pbar.set_description(f"Fuzzing (max {execution_budget} execs)")
         else:
             pbar = tqdm.tqdm(disable=disable_pbar)
             pbar.set_description(f"Fuzzing (max {time_budget_hours}h)")
 
-        print("Starting fuzzing loop...")
-        fuzzing_start_time = time.time()
-
-        while self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
+        print("Starting fuzzing loop (Data Collection Active)...")
+        
+        # [修改] 使用 fuzzing_start_time 和 fuzz_executions 进行预算检查
+        while self._check_budget(fuzzing_start_time, fuzz_executions, time_budget_hours, execution_budget):
             cell_index = self.select_cell()
             self.last_cell_selected = cell_index
             input, parent_mutation_count = self.select_input(cell_index)
@@ -454,13 +413,15 @@ class Framework():
             mutated_input = self.mutate(input)
             t0 = time.time()
             
-            # [修改] 接收 7 个返回值
+            # [Fuzz阶段] 接收并使用数据
             episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data = execute_policy(mutated_input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
             
             n_executions += 1 
+            fuzz_executions += 1 # 增加 Fuzz 计数
 
+            # [Fuzz阶段] 数据收集逻辑
             if save_data:
                 is_crash = oracle
                 label = 1 if is_crash else 0
@@ -537,7 +498,7 @@ class Framework():
                     save_data: bool = True,
                     window_size: int = 25
                     ):
-        '''Random testing loop baseline.'''
+        '''Random testing loop baseline. (All phases considered fuzzing/testing)'''
         
         if time_budget_hours is None and execution_budget is None:
             raise ValueError("At least one budget must be provided.")
@@ -590,7 +551,6 @@ class Framework():
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
             t0 = time.time()
             
-            # [修改] 接收 7 个返回值
             episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data = execute_policy(input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
@@ -601,7 +561,6 @@ class Framework():
                 is_crash = oracle
                 label = 1 if is_crash else 0
                 
-                # TodyNet
                 collect_todynet = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
                 if collect_todynet:
                     wins, labels = process_episode_data(todynet_trace, label, window_size)
@@ -611,7 +570,6 @@ class Framework():
                         if not is_crash:
                             todynet_success_count += 1
                 
-                # RL Transitions
                 if is_crash:
                     if len(crash_transitions) < TRANSITION_CRASH_CAP:
                         crash_transitions.extend(rl_data)
@@ -674,7 +632,7 @@ class Framework():
                     save_data: bool = True,
                     window_size: int = 25
                     ):
-        '''Does not use cached data anymore.'''
+        '''Does not use cached data anymore. Budget only counts evolutionary phase.'''
 
         if time_budget_hours is None and execution_budget is None:
             raise ValueError("At least one budget must be provided.")
@@ -701,7 +659,8 @@ class Framework():
         logs_buffer = open(f'{filepath}_logs.txt', 'w', buffering=1)
 
         testing_start_time = time.time()
-        n_executions = 0
+        n_executions = 0 # 总执行次数
+        fuzz_executions = 0 # 仅 Fuzz 阶段执行次数
         
         # [容器]
         all_window_data = [] 
@@ -714,7 +673,7 @@ class Framework():
         TRANSITION_CRASH_CAP = 10000
         TRANSITION_SUCCESS_CAP = 90000
         
-        print(f'Starting novelty_search. Time Budget: {time_budget_hours}h, Execution Budget: {execution_budget}')
+        print(f'Starting novelty_search. Time Budget: {time_budget_hours}h, Execution Budget: {execution_budget} (Init not counted)')
 
         self.xedges, self.yedges = get_edges(env_seed, self.descriptors)
         self.config['xedges'] = list(self.xedges)
@@ -729,25 +688,29 @@ class Framework():
             np.savetxt(final_states_buffer, final_state.reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
         
-        def evaluate(individuals: np.ndarray, mutation_counts: np.ndarray, loop_start_time: float = None) -> np.ndarray:
+        # [修改] evaluate 增加 check_budget 和 collect_data 参数
+        def evaluate(individuals: np.ndarray, mutation_counts: np.ndarray, loop_start_time: float = None, check_budget: bool = True, collect_data: bool = True) -> np.ndarray:
             nonlocal n_executions 
+            nonlocal fuzz_executions
             nonlocal todynet_success_count 
-            # nonlocal crash_transitions, success_transitions (Python 3 nonlocal can access outer scope)
             
             behaviors = []
             for i, ind in enumerate(individuals):
-                if not self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
-                    break 
+                # 如果处于 Fuzz 阶段 (check_budget=True)，则检查预算
+                if check_budget:
+                    if not self._check_budget(loop_start_time, fuzz_executions, time_budget_hours, execution_budget):
+                        break 
                 
-                # [修改] 接收 7 个返回值
-                r, o, b, fs, _, todynet_trace, rl_data = execute_policy(ind, model, env_seed, self.descriptors, 300)
+                episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data = execute_policy(ind, model, env_seed, self.descriptors, 300)
                 n_executions += 1
+                if check_budget:
+                    fuzz_executions += 1 # 仅 Fuzz 阶段增加计数
                 
-                if save_data:
-                    is_crash = o
+                # 如果 collect_data 为 True (仅 Fuzz 阶段)，则收集数据
+                if collect_data and save_data:
+                    is_crash = oracle
                     label = 1 if is_crash else 0
                     
-                    # TodyNet
                     collect_todynet = True if is_crash else (todynet_success_count < TODYNET_SUCCESS_CAP)
                     if collect_todynet:
                         wins, labels = process_episode_data(todynet_trace, label, window_size)
@@ -757,7 +720,6 @@ class Framework():
                             if not is_crash:
                                 todynet_success_count += 1
                     
-                    # RL Transitions
                     if is_crash:
                         if len(crash_transitions) < TRANSITION_CRASH_CAP:
                             crash_transitions.extend(rl_data)
@@ -770,8 +732,8 @@ class Framework():
                 else:
                     e_time = time.time() - loop_start_time
 
-                record(ind, r, o, b, fs, mutation_counts[i], e_time)
-                behaviors.append(b)
+                record(ind, episode_reward, oracle, behavior, fs, mutation_counts[i], e_time)
+                behaviors.append(behavior)
             return np.array(behaviors)
         
         def mutate(inputs: np.ndarray):
@@ -786,10 +748,11 @@ class Framework():
         pop = self.rng.integers(low=1, high=4, size=(pop_size, 15))
         pop_mutation_counts = np.zeros(pop_size, dtype=int)
         
-        pop_behaviors = evaluate(pop, pop_mutation_counts, loop_start_time=None)
+        # [修改] Init 阶段: check_budget=False, collect_data=False
+        pop_behaviors = evaluate(pop, pop_mutation_counts, loop_start_time=None, check_budget=False, collect_data=False)
         
-        if not pop_behaviors.any() or not self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
-             print("Budget reached or no behaviors generated.")
+        if not pop_behaviors.any():
+             print("No behaviors generated in init.")
              ns_logs_buffer.close()
              nov_scores_buffer.close()
              behaviors_buffer.close()
@@ -807,20 +770,23 @@ class Framework():
         
         i = 1
         if execution_budget is not None:
-             pbar = tqdm.tqdm(total=execution_budget, initial=n_executions, disable=disable_pbar)
+             pbar = tqdm.tqdm(total=execution_budget, initial=0, disable=disable_pbar)
         else:
              pbar = tqdm.tqdm(disable=disable_pbar)
 
-        print("Starting Novelty Search loop...")
-        ns_start_time = time.time()
+        print("Starting Novelty Search loop (Data Collection Active)...")
+        ns_start_time = time.time() # 记录 Fuzz 开始时间
 
-        while self._check_budget(testing_start_time, n_executions, time_budget_hours, execution_budget):
+        # [修改] 使用 Fuzz 计数器检查预算
+        while self._check_budget(ns_start_time, fuzz_executions, time_budget_hours, execution_budget):
             offspring = mutate(pop)
             offspring_mutation_counts = pop_mutation_counts + 1
             
-            prev_executions = n_executions
-            offspring_behaviors = evaluate(offspring, offspring_mutation_counts, loop_start_time=ns_start_time)
-            executions_diff = n_executions - prev_executions
+            prev_executions = fuzz_executions
+            # [修改] Loop 阶段: check_budget=True, collect_data=True
+            offspring_behaviors = evaluate(offspring, offspring_mutation_counts, loop_start_time=ns_start_time, check_budget=True, collect_data=True)
+            
+            executions_diff = fuzz_executions - prev_executions
             pbar.update(executions_diff)
             
             if not offspring_behaviors.any():
