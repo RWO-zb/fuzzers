@@ -139,7 +139,7 @@ def plot_behaviour_heatmap(dedup_df, output_dir, grid_size=(50, 50)):
     plt.close()
 
 def main():
-    search_dir = 'data/bw'
+    search_dir = 'results/bw'
     target_file = None
     if os.path.exists(search_dir):
         files = [os.path.join(search_dir, f) for f in os.listdir(search_dir) if f.endswith('_data.csv')]

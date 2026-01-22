@@ -871,7 +871,7 @@ if __name__ == '__main__':
     model = load_model()
 
     # --- 配置区域 ---
-    TIME_BUDGET_HOURS = 0.08      
+    TIME_BUDGET_HOURS = 12      
     EXECUTION_BUDGET = None     
     
     init_budget = 1000

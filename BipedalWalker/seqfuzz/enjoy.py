@@ -271,7 +271,7 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 10
+    seeds_num = 1000
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
 
@@ -356,7 +356,7 @@ def main():
     timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
     seedcount = 0
     
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<100:
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0:
         is_crash = False
         seedcount+=1
         output_obs = []
