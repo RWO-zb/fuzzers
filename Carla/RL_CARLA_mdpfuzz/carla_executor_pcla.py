@@ -9,6 +9,8 @@ import pandas as pd
 from pathlib import Path
 from typing import Any, Optional
 import pygame 
+import gc     # [新增] 用于强制垃圾回收
+import torch  # [新增] 用于清理显存
 
 # 设置 SDL 视频驱动为 dummy，以支持无显示器运行
 os.environ["SDL_VIDEODRIVER"] = "dummy"
@@ -720,6 +722,13 @@ class PCLAExecutor(Executor):
                 self.env.world.tick()
             except Exception:
                 pass
+            
+            # 9. [新增] 强制回收 Python 垃圾对象
+            gc.collect()
+            
+            # 10. [新增] 强制清空 PyTorch 显存缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         # ========================================================
 
             current_global_time = time.time() - self.experiment_start_time

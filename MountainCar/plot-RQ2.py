@@ -259,6 +259,32 @@ class DiversityAnalyzer:
             
         return history
 
+# ================= [新增] 打印统计函数 =================
+def print_final_stats(all_histories):
+    """
+    打印每种方法的最终多样性统计计数 (取 history 列表的最后一个值)
+    """
+    print("\n" + "="*65)
+    print(f"{'Method':<15} | {'State Cov':<12} | {'Behav Div':<12} | {'Fault Div':<12}")
+    print("-" * 65)
+    
+    # 对方法名进行排序，保证输出顺序稳定
+    sorted_names = sorted(all_histories.keys())
+    
+    for name in sorted_names:
+        history = all_histories[name]
+        
+        # 你的 analyzer 返回的字典键名是: 'state_coverage', 'behavior_diversity', 'fault_diversity'
+        # 获取列表最后一个元素作为最终计数，如果列表为空则为0
+        
+        sc = history['state_coverage'][-1] if history['state_coverage'] else 0
+        bd = history['behavior_diversity'][-1] if history['behavior_diversity'] else 0
+        fd = history['fault_diversity'][-1] if history['fault_diversity'] else 0
+        
+        print(f"{name:<15} | {sc:<12} | {bd:<12} | {fd:<12}")
+    
+    print("="*65 + "\n")
+
 # ================= 主程序 =================
 
 def main():
@@ -297,8 +323,12 @@ def main():
     data_seq = DataParser.parse_seqfuzz(FILE_PATHS['SeqFuzz']['obs'], FILE_PATHS['SeqFuzz']['log'])
     all_histories['SeqFuzz'] = analyzer.calculate_metrics(data_seq)
 
+    # ================= [新增] 打印统计表格 =================
+    print_final_stats(all_histories)
+    # ======================================================
+
     # ================= 绘图 =================
-    print("\n=== Plotting ===")
+    print("=== Plotting ===")
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     metrics = [

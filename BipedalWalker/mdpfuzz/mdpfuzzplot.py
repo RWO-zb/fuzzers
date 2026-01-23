@@ -9,7 +9,7 @@ import time
 import ast 
 
 # --- 1. 配置 ---
-LOG_FILE = 'fuzzer_10_0.01_0.01_0_logs.txt' 
+LOG_FILE = 'rt_10_0.01_0.01_1_logs.txt' 
 PLOT_1_FILE = 'rt_crashes_over_unique_inputs.png'
 PLOT_2_FILE = 'rt_full_input_space_tsne.png'
 PLOT_3_FILE = 'rt_crash_generation_histogram.png'
@@ -211,11 +211,11 @@ def main():
 
     # 调用绘图函数
     plot_crashes_over_time(unique_log_df)
-    plot_crash_generation_histogram(unique_log_df)
+    #plot_crash_generation_histogram(unique_log_df)
     plot_crashes_over_wallclock_time(unique_log_df)
     
     # [新增] 调用行为多样性分析
-    calculate_behaviour_diversity(unique_log_df)
+   # calculate_behaviour_diversity(unique_log_df)
 
     end_time = time.time()
     print(f"\n--- 脚本执行完毕，总耗时: {end_time - start_time:.2f} 秒 ---")

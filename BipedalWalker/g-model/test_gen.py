@@ -328,7 +328,7 @@ def main():
     failure_by_diffusion = 0
 
     print("--- Stage 2: Main Testing Loop ---")
-    while current_time - start_time < 3600 * 0.05 : 
+    while current_time - start_time < 3600 * 12: 
 
         if cur_step > 0 and cur_step % args.step == 0:
             # --- Generative Phase ---
@@ -446,7 +446,12 @@ def main():
                 abstract_id = novelty_grid.state_abstract(np.array([sequences[-1]]))[0]
                 novelty_dict[abstract_id] = novelty_dict.get(abstract_id, 0) + 1
                 novelty = novelty_dict[abstract_id]
-                norm_novelty = 1 / (math.e ** (novelty - 1))
+                
+                # ==========================================
+                # [修改] 修复 OverflowError
+                # ==========================================
+                # 原代码: norm_novelty = 1 / (math.e ** (novelty - 1))
+                norm_novelty = math.exp(-(novelty - 1)) # 使用 math.exp 避免数值溢出
 
                 normal_case_list.append(test_case)
                 metric_list.append([0, 0, 0, norm_novelty])
@@ -522,7 +527,12 @@ def main():
                 abstract_id = novelty_grid.state_abstract(np.array([sequences[-1]]))[0]
                 novelty_dict[abstract_id] = novelty_dict.get(abstract_id, 0) + 1
                 novelty = novelty_dict[abstract_id]
-                norm_novelty = 1 / (math.e ** (novelty - 1))
+                
+                # ==========================================
+                # [修改] 修复 OverflowError
+                # ==========================================
+                # 原代码: norm_novelty = 1 / (math.e ** (novelty - 1))
+                norm_novelty = math.exp(-(novelty - 1)) # 使用 math.exp 避免数值溢出
 
             metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
             memory_model.append(normal_case, density, sensitivity, performance, novelty)
