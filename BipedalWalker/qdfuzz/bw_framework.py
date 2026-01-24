@@ -115,8 +115,9 @@ class Framework():
         self.last_cell_updated = None
 
         self.cells: list[list[int]] = []
-        # a 6-tuple: (input, performance, oracle result, behavior, mutation_count, elapsed_time)
-        self.cells_data: list[list[tuple[np.ndarray, float, bool, np.ndarray, int, float]]] = []
+        # a 7-tuple: (input, performance, oracle result, behavior, mutation_count, elapsed_time, seed_id)
+        # [修改] 注释更新：增加了 seed_id
+        self.cells_data: list[list[tuple[np.ndarray, float, bool, np.ndarray, int, float, int]]] = []
 
         self.config = {
             'rand_seed': self.rand_seed,
@@ -156,12 +157,14 @@ class Framework():
     def save_state(self, filepath: str):
         cell_dfs = []
         base_columns = ['score', 'is_faulty', 'cell_index'] + [f'cell{i}' for i in range(2)] + [f'behavior{i}' for i in range(2)]
-        all_columns = base_columns + ['input', 'mutation_count', 'elapsed_time']
+        # [修改] 增加了 seed_id 列
+        all_columns = base_columns + ['input', 'mutation_count', 'elapsed_time', 'seed_id']
 
         for i, cell_data in enumerate(self.cells_data):
             records = []
             for item in cell_data:
-                _input, score, is_faulty, behavior, mutation_count, elapsed_time = item
+                # [修改] 解包增加 seed_id
+                _input, score, is_faulty, behavior, mutation_count, elapsed_time, seed_id = item
                 record = [
                     score, 
                     is_faulty, 
@@ -170,7 +173,8 @@ class Framework():
                     behavior[0], behavior[1],
                     json.dumps(_input.tolist()),
                     mutation_count,
-                    elapsed_time
+                    elapsed_time,
+                    seed_id # [修改] 保存 seed_id
                 ]
                 records.append(record)
 
@@ -220,6 +224,7 @@ class Framework():
 
         has_elapsed_time = 'elapsed_time' in df.columns
         has_mutation_count = 'mutation_count' in df.columns
+        has_seed_id = 'seed_id' in df.columns # [修改] 检查 seed_id
 
         for i, row in df.iterrows():
             cell = row[cell_cols].astype(int).tolist()
@@ -235,8 +240,9 @@ class Framework():
             
             mutation_count = int(row['mutation_count']) if has_mutation_count else 0
             elapsed_time = float(row['elapsed_time']) if has_elapsed_time else 0.0
+            seed_id = int(row['seed_id']) if has_seed_id else -1 # [修改] 加载 seed_id，缺省为 -1
             
-            self.update_cell(cell, input_vec, performance, is_faulty, np.array(behavior), mutation_count, elapsed_time)
+            self.update_cell(cell, input_vec, performance, is_faulty, np.array(behavior), mutation_count, elapsed_time, seed_id)
 
         self.load_random_state(filepath)
         self.load_configuration(filepath)
@@ -247,21 +253,23 @@ class Framework():
     def select_input(self, index: int):
         input_index: int = self.rng.integers(0, len(self.cells_data[index]))
         selected_data = self.cells_data[index][input_index]
-        return selected_data[0], selected_data[4]
+        # [修改] 返回 (input, mutation_count, seed_id)
+        return selected_data[0], selected_data[4], selected_data[6]
 
 
     def select_cell(self):
         return int(self.rng.integers(0, len(self.cells)))
 
 
-    def update_cell(self, cell: List[int], input: np.ndarray, performance: float, is_faulty: bool, behavior: np.ndarray, mutation_count: int, elapsed_time: float):
+    def update_cell(self, cell: List[int], input: np.ndarray, performance: float, is_faulty: bool, behavior: np.ndarray, mutation_count: int, elapsed_time: float, seed_id: int):
+        # [修改] 增加了 seed_id 参数
         index = None
         try:
             index = self.cells.index(cell)
-            self.cells_data[index].append((input, performance, is_faulty, behavior, mutation_count, elapsed_time))
+            self.cells_data[index].append((input, performance, is_faulty, behavior, mutation_count, elapsed_time, seed_id))
         except ValueError:
             self.cells.append(cell)
-            self.cells_data.append([(input, performance, is_faulty, behavior, mutation_count, elapsed_time)])
+            self.cells_data.append([(input, performance, is_faulty, behavior, mutation_count, elapsed_time, seed_id)])
         finally:
             assert len(self.cells) == len(self.cells_data), 'inconsistent cells and cells_data lists!'
             self.last_cell_updated = index if index is not None else (len(self.cells) - 1)
@@ -331,6 +339,7 @@ class Framework():
         final_states: List[np.ndarray] = []
         acc_rewards: List[float] = []
         oracles: List[bool] = []
+        seed_ids: List[int] = [] # [修改] 记录 Init 阶段的 seed_id
         
         testing_start_time = time.time() # 记录总时间
         execution_times = []
@@ -349,8 +358,11 @@ class Framework():
 
         print("Starting initialization phase...")
         # [修改] Init 阶段不检查 Budget，也不收集数据
-        for _ in tqdm.tqdm(range(init_budget), disable=disable_pbar):
+        for i in tqdm.tqdm(range(init_budget), disable=disable_pbar):
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
+            
+            # [修改] Init 阶段分配唯一的 seed_id (即循环索引 i)
+            current_seed_id = i 
 
             t0 = time.time()
             # 执行策略，解包数据但不使用 todynet_trace 和 rl_data
@@ -365,6 +377,7 @@ class Framework():
             final_states.append(fs)
             acc_rewards.append(episode_reward)
             oracles.append(oracle)
+            seed_ids.append(current_seed_id) # [修改]
             n_executions += 1
         
         if not inputs:
@@ -384,7 +397,8 @@ class Framework():
         for i in range(len(inputs)): 
             behavior = behaviors[i]
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
-            mutated_input_index = self.update_cell(cell, inputs[i], acc_rewards[i], oracles[i], behavior, 0, 0.0)
+            # [修改] 传入 seed_id
+            mutated_input_index = self.update_cell(cell, inputs[i], acc_rewards[i], oracles[i], behavior, 0, 0.0, seed_ids[i])
             print(f'episode_reward: {acc_rewards[i]}, oracle: {float(oracles[i])}, cell_selected_index: -1, cell_updated_index: {mutated_input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, inputs[i].reshape(1, -1), fmt='%1.0f', delimiter=',')
             np.savetxt(behaviors_buffer, behavior.reshape(1, -1), delimiter=',')
@@ -408,7 +422,8 @@ class Framework():
         while self._check_budget(fuzzing_start_time, fuzz_executions, time_budget_hours, execution_budget):
             cell_index = self.select_cell()
             self.last_cell_selected = cell_index
-            input, parent_mutation_count = self.select_input(cell_index)
+            # [修改] 从父代获取 seed_id
+            input, parent_mutation_count, parent_seed_id = self.select_input(cell_index)
 
             mutated_input = self.mutate(input)
             t0 = time.time()
@@ -448,7 +463,8 @@ class Framework():
             new_mutation_count = parent_mutation_count + 1
             elapsed_time = time.time() - fuzzing_start_time
             
-            mutated_input_index = self.update_cell(cell, mutated_input, episode_reward, oracle, behavior, new_mutation_count, elapsed_time)
+            # [修改] 传递 parent_seed_id 给子代
+            mutated_input_index = self.update_cell(cell, mutated_input, episode_reward, oracle, behavior, new_mutation_count, elapsed_time, parent_seed_id)
             print(f'episode_reward: {episode_reward}, oracle: {float(oracle)}, cell_selected_index: {cell_index}, cell_updated_index: {mutated_input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, mutated_input.reshape(1, -1), fmt='%1.0f', delimiter=',')
             np.savetxt(behaviors_buffer, behavior.reshape(1, -1), delimiter=',')
@@ -549,6 +565,9 @@ class Framework():
 
         while self._check_budget(start_time, n_executions, time_budget_hours, execution_budget):
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
+            # [修改] Random Testing 每次都是新种子，使用 n_executions 作为 ID
+            current_seed_id = n_executions 
+            
             t0 = time.time()
             
             episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data = execute_policy(input, model, env_seed, self.descriptors)
@@ -580,7 +599,8 @@ class Framework():
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
             elapsed_time = time.time() - start_time
 
-            input_index = self.update_cell(cell, input, episode_reward, oracle, behavior, 0, elapsed_time)
+            # [修改] 传递 seed_id
+            input_index = self.update_cell(cell, input, episode_reward, oracle, behavior, 0, elapsed_time, current_seed_id)
             print(f'episode_reward: {episode_reward}, oracle: {float(oracle)}, cell_selected_index: -1, cell_updated_index: {input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, input.reshape(1, -1), fmt='%1.0f', delimiter=',')
             np.savetxt(behaviors_buffer, behavior.reshape(1, -1), delimiter=',')
@@ -679,17 +699,19 @@ class Framework():
         self.config['xedges'] = list(self.xedges)
         self.config['yedges'] = list(self.xedges)
 
-        def record(input: np.ndarray, reward: float, oracle: bool, behavior: np.ndarray, final_state: np.ndarray, mutation_count: int, elapsed_time: float) -> None:
+        # [修改] record 增加 seed_id
+        def record(input: np.ndarray, reward: float, oracle: bool, behavior: np.ndarray, final_state: np.ndarray, mutation_count: int, elapsed_time: float, seed_id: int) -> None:
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
-            updated_cell_index = self.update_cell(cell, input, reward, oracle, behavior, mutation_count, elapsed_time)
+            # [修改] 传递 seed_id
+            updated_cell_index = self.update_cell(cell, input, reward, oracle, behavior, mutation_count, elapsed_time, seed_id)
             print(f'episode_reward: {reward}, oracle: {float(oracle)}, cell_updated_index: {updated_cell_index}, nb_cells: {len(self.cells)}', file=logs_buffer)
             np.savetxt(inputs_buffer, input.reshape(1, -1), fmt='%1.0f', delimiter=',')
             np.savetxt(behaviors_buffer, behavior.reshape(1, -1), delimiter=',')
             np.savetxt(final_states_buffer, final_state.reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
         
-        # [修改] evaluate 增加 check_budget 和 collect_data 参数
-        def evaluate(individuals: np.ndarray, mutation_counts: np.ndarray, loop_start_time: float = None, check_budget: bool = True, collect_data: bool = True) -> np.ndarray:
+        # [修改] evaluate 增加 seed_ids 参数
+        def evaluate(individuals: np.ndarray, mutation_counts: np.ndarray, seed_ids: np.ndarray, loop_start_time: float = None, check_budget: bool = True, collect_data: bool = True) -> np.ndarray:
             nonlocal n_executions 
             nonlocal fuzz_executions
             nonlocal todynet_success_count 
@@ -732,7 +754,8 @@ class Framework():
                 else:
                     e_time = time.time() - loop_start_time
 
-                record(ind, episode_reward, oracle, behavior, fs, mutation_counts[i], e_time)
+                # [修改] 传递 seed_ids[i]
+                record(ind, episode_reward, oracle, behavior, fs, mutation_counts[i], e_time, seed_ids[i])
                 behaviors.append(behavior)
             return np.array(behaviors)
         
@@ -748,8 +771,11 @@ class Framework():
         pop = self.rng.integers(low=1, high=4, size=(pop_size, 15))
         pop_mutation_counts = np.zeros(pop_size, dtype=int)
         
-        # [修改] Init 阶段: check_budget=False, collect_data=False
-        pop_behaviors = evaluate(pop, pop_mutation_counts, loop_start_time=None, check_budget=False, collect_data=False)
+        # [修改] 为初始种群分配 seed_id (0 到 pop_size-1)
+        pop_seed_ids = np.arange(pop_size, dtype=int)
+        
+        # [修改] Init 阶段: 传递 pop_seed_ids
+        pop_behaviors = evaluate(pop, pop_mutation_counts, pop_seed_ids, loop_start_time=None, check_budget=False, collect_data=False)
         
         if not pop_behaviors.any():
              print("No behaviors generated in init.")
@@ -781,10 +807,12 @@ class Framework():
         while self._check_budget(ns_start_time, fuzz_executions, time_budget_hours, execution_budget):
             offspring = mutate(pop)
             offspring_mutation_counts = pop_mutation_counts + 1
+            # [修改] 子代继承父代的 seed_id (因为是逐个突变，顺序对应)
+            offspring_seed_ids = pop_seed_ids.copy()
             
             prev_executions = fuzz_executions
-            # [修改] Loop 阶段: check_budget=True, collect_data=True
-            offspring_behaviors = evaluate(offspring, offspring_mutation_counts, loop_start_time=ns_start_time, check_budget=True, collect_data=True)
+            # [修改] Loop 阶段: 传递 offspring_seed_ids
+            offspring_behaviors = evaluate(offspring, offspring_mutation_counts, offspring_seed_ids, loop_start_time=ns_start_time, check_budget=True, collect_data=True)
             
             executions_diff = fuzz_executions - prev_executions
             pbar.update(executions_diff)
@@ -798,6 +826,8 @@ class Framework():
             joined_pop = np.vstack([pop, offspring[:len(offspring_behaviors)]]) 
             joined_scores = np.hstack([pop_nov_scores, offspring_nov_scores])
             joined_mutation_counts = np.hstack([pop_mutation_counts, offspring_mutation_counts[:len(offspring_behaviors)]])
+            # [修改] 合并 seed_ids
+            joined_seed_ids = np.hstack([pop_seed_ids, offspring_seed_ids[:len(offspring_behaviors)]])
             
             median_score = np.median(joined_scores)
 
@@ -808,6 +838,8 @@ class Framework():
             pop = joined_pop[mask].copy()
             pop_behaviors = np.vstack([pop_behaviors, offspring_behaviors])[mask]
             pop_mutation_counts = joined_mutation_counts[mask]
+            # [修改] 筛选 seed_ids
+            pop_seed_ids = joined_seed_ids[mask]
             
             pop_nov_scores = nov_archive.score(pop_behaviors)
             if len(pop) > pop_size:
@@ -815,6 +847,8 @@ class Framework():
                 pop_behaviors = pop_behaviors[:pop_size]
                 pop_nov_scores = pop_nov_scores[:pop_size]
                 pop_mutation_counts = pop_mutation_counts[:pop_size]
+                # [修改] 截断 seed_ids
+                pop_seed_ids = pop_seed_ids[:pop_size]
 
             [np.savetxt(nov_scores_buffer, s.reshape(1, -1), delimiter=',') for s in pop_nov_scores]
             print(f'iteration: {i}, archive_size: {nov_archive.size()}, archive_sparseness: {nov_archive.archive_sparseness():0.5f}', file=ns_logs_buffer)
@@ -856,12 +890,13 @@ class MAPElitesFramework(Framework):
 
     def select_input(self, index: int):
         '''
-        Returns both input and its mutation_count.
+        Returns input, mutation_count, and seed_id.
         '''
         scores = list(map(lambda x: x[1], self.cells_data[index]))
         best_performer_index = int(np.argmin(scores))
         selected_data = self.cells_data[index][best_performer_index]
-        return selected_data[0], selected_data[4]
+        # [修改] 增加返回 seed_id (index 6)
+        return selected_data[0], selected_data[4], selected_data[6]
 
 
 if __name__ == '__main__':
@@ -871,8 +906,8 @@ if __name__ == '__main__':
     model = load_model()
 
     # --- 配置区域 ---
-    TIME_BUDGET_HOURS = 12      
-    EXECUTION_BUDGET = None     
+    TIME_BUDGET_HOURS = None    
+    EXECUTION_BUDGET = 5000    
     
     init_budget = 1000
     cell_granularity = 50
@@ -898,7 +933,7 @@ if __name__ == '__main__':
                 results_fp=results_fp,
                 time_budget_hours=TIME_BUDGET_HOURS,    
                 execution_budget=EXECUTION_BUDGET,
-                save_data=True,
+                save_data=False,
                 window_size=25
             )
             

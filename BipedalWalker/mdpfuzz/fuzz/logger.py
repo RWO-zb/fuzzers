@@ -85,11 +85,11 @@ class FuzzerLogger:
 
     def __init__(self, filepath: str) -> None:
         self.filepath = filepath
-        # [新增] 增加了 BD_Distance 和 BD_MeanAngle
+        # [修改] 新增 RootID 列
         self.columns = [
             'Input', 'Oracle', 'Reward', 'EpisodeLength', 'Sensitivity', 
             'Coverage', 'Generation', 'TestExecTime', 'CoverageTime', 'RunTime',
-            'BD_Distance', 'BD_MeanAngle'
+            'BD_Distance', 'BD_MeanAngle', 'RootID'
         ]
         self.delimiter = '; '
 
@@ -104,9 +104,10 @@ class FuzzerLogger:
             run_time: Optional[float] = None,
             test_exec_time: Optional[float] = None,
             coverage_time: Optional[float] = None,
-            # [新增] 参数
             bd_distance: Optional[float] = None,
-            bd_mean_angle: Optional[float] = None
+            bd_mean_angle: Optional[float] = None,
+            # [修改] 新增 root_id 参数
+            root_id: Optional[int] = None
         ) -> None:
         '''
         Log values to the file.
@@ -122,9 +123,10 @@ class FuzzerLogger:
             'RunTime': str(run_time) if run_time is not None else 'None',
             'TestExecTime': str(test_exec_time) if test_exec_time is not None else 'None',
             'CoverageTime': str(coverage_time) if coverage_time is not None else 'None',
-            # [新增] 序列化逻辑
             'BD_Distance': str(bd_distance) if bd_distance is not None else 'None',
-            'BD_MeanAngle': str(bd_mean_angle) if bd_mean_angle is not None else 'None'
+            'BD_MeanAngle': str(bd_mean_angle) if bd_mean_angle is not None else 'None',
+            # [修改] 记录 RootID
+            'RootID': str(root_id) if root_id is not None else 'None'
         }
         
         log_line = self.delimiter.join([log_data[k] for k in self.columns])
@@ -141,29 +143,34 @@ class FuzzerLogger:
         malformed_lines = []
         with open(self.filepath, 'r') as file:
             header_line = file.readline().strip()
-            # 确保头部匹配新增的列
-            assert header_line.split(self.delimiter) == self.columns, header_line.split(self.delimiter)
+            # 简单校验列数是否大致匹配（兼容旧日志可能报错的情况）
+            file_cols = header_line.split(self.delimiter)
             
             for num_line, line in enumerate(file):
                 try:
                     values = [v.strip() for v in line.strip().split(self.delimiter)]
-                    # 动态解析，避免索引硬编码错误
+                    
                     row_dict = {}
+                    # 按照 self.columns 的顺序解析，如果日志列数少于代码定义列数（比如旧日志），则填充 None
                     for i, col in enumerate(self.columns):
-                        val_str = values[i]
+                        if i < len(values):
+                            val_str = values[i]
+                        else:
+                            val_str = 'None'
+
                         if col == 'Input':
                              val = np.array(eval('np.array(' + val_str + ')')) if val_str != 'None' else None
                         elif col == 'Oracle':
                              val = val_str == 'True' if val_str != 'None' else None
-                        elif col in ['EpisodeLength', 'Generation']:
-                             val = int(val_str) if val_str != 'None' else None
+                        elif col in ['EpisodeLength', 'Generation', 'RootID']:
+                             val = int(float(val_str)) if val_str != 'None' else None
                         else:
                              val = float(val_str) if val_str != 'None' else None
                         row_dict[col] = val
                     
                     data.append([row_dict[c] for c in self.columns])
                 except Exception as e:
-                    malformed_lines.append(f'\tLine {num_line}: "{line.strip()}" - Error: {e}')
+                    malformed_lines.append(f'\tLine {num_line}: Error: {e}')
         
         return pd.DataFrame(data, columns=self.columns)
 

@@ -236,34 +236,20 @@ def get_bw_data(base_dir='bw'):
         label = cfg['label']
         times = np.array([])
         
-        # --- BW Specific Parsers ---
         if cfg['type'] == 'mdpfuzz':
             if os.path.exists(path):
                 try:
-                    # 1. 尝试读取 (更鲁棒的读取方式)
                     df = pd.read_csv(path, sep=';', on_bad_lines='skip', skipinitialspace=True)
-                    # 如果读取结果只有1列，可能分隔符是逗号
                     if df.shape[1] < 2:
                         df = pd.read_csv(path, sep=',', on_bad_lines='skip', skipinitialspace=True)
-                    
-                    # 2. 清理列名 (去除前后空格)
                     df.columns = [c.strip() for c in df.columns]
-
                     if 'Oracle' in df.columns:
-                        # 3. 更鲁棒的布尔转换：转字符串 -> 去空格 -> 比较
                         df['is_crash'] = df['Oracle'].astype(str).str.strip() == 'True'
-                        
                         if 'RunTime' in df.columns:
                             df['RunTime'] = pd.to_numeric(df['RunTime'], errors='coerce')
-                            
-                            # 4. 筛选 Crash
                             crashes = df[df['is_crash'] == True].copy()
-                            
-                            # 5. 去重 (Input列)
                             if 'Input' in crashes.columns:
                                 crashes = crashes.drop_duplicates(subset=['Input'], keep='first')
-                            
-                            # 6. 计算时间
                             if not crashes.empty:
                                 start_time = df['RunTime'].min()
                                 times = np.sort(crashes['RunTime'] - start_time)
@@ -335,9 +321,13 @@ def get_bw_data(base_dir='bw'):
     return data_map
 
 # ==========================================
-# 6. 绘图核心函数 (统一逻辑)
+# 6. 绘图核心函数 (统一逻辑 + 标签防重叠)
 # ==========================================
 def plot_subplot(ax, data_map, title):
+    # 存储需要绘制标签的信息: {'label': str, 'x': float, 'y': float, 'color': str}
+    final_labels = []
+    max_y_value_in_plot = 0
+
     for label, times in data_map.items():
         color = COLORS.get(label, '#333333')
         
@@ -354,12 +344,25 @@ def plot_subplot(ax, data_map, title):
             x_plot = np.concatenate(([0], times_h))
             y_plot = np.concatenate(([0], np.arange(1, len(times_h) + 1)))
             ax.step(x_plot, y_plot, where='post', label=label, color=color)
+            
             last_crash_time = times_h[-1]
+            last_y_val = y_plot[-1]
+            
+            # 记录最大Y值用于计算缓冲距离
+            if last_y_val > max_y_value_in_plot:
+                max_y_value_in_plot = last_y_val
+
+            # 收集标签信息，稍后统一处理位置
+            final_labels.append({
+                'label': label,
+                'x': x_plot[-1],
+                'y': last_y_val,
+                'color': color
+            })
         else:
             last_crash_time = 0
-            # 不画线，但保留循环以处理 potential
         
-        # Markers
+        # Markers (三角形标记)
         valid_markers_x = []
         valid_markers_y = []
         
@@ -374,12 +377,40 @@ def plot_subplot(ax, data_map, title):
             ax.plot(valid_markers_x, valid_markers_y, linestyle='none', marker='^', 
                      color=color, markersize=8, markeredgecolor='white', markeredgewidth=1)
 
+    # --- 标签防重叠处理 ---
+    if final_labels:
+        # 1. 按Y轴高度排序 (从低到高)
+        final_labels.sort(key=lambda k: k['y'])
+        
+        # 2. 定义最小垂直间距 (例如：Y轴最大值的 4%)
+        # 如果Y值很小(比如刚开始)，给一个绝对最小值
+        min_dist = max(max_y_value_in_plot * 0.04, 1.0) 
+        
+        # 3. 遍历并调整位置
+        for i in range(1, len(final_labels)):
+            prev = final_labels[i-1]
+            curr = final_labels[i]
+            
+            dist = curr['y'] - prev['y']
+            
+            # 如果距离太近，将当前的标签向上推
+            if dist < min_dist:
+                curr['y'] = prev['y'] + min_dist
+
+        # 4. 绘制调整后的标签
+        for item in final_labels:
+            ax.text(item['x'] + 0.15, item['y'], item['label'], 
+                    color=item['color'], fontsize=10, 
+                    verticalalignment='center', fontweight='bold',
+                    clip_on=False)
+
     ax.set_xlim(0, VIEW_LIMIT_H)
     ax.set_xticks(np.arange(0, 13, 2))
     ax.set_xlabel("Time (h)")
     ax.set_ylabel("Unique Crashes")
     ax.set_title(title)
-    ax.legend(loc='upper left', frameon=True)
+    
+    # 移除 Grid 方便看清文字
     ax.grid(True, linestyle='--', alpha=0.6)
 
 # ==========================================
@@ -389,22 +420,26 @@ def main():
     print("Initializing plots...")
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 5))
     
+    # --- 1. 最左侧: Mountain Car ---
     print("--- Loading Mountain Car Data ---")
     mc_data = get_mc_data('mc')
     plot_subplot(ax1, mc_data, "MountainCar")
     
-    print("--- Loading CARLA Data ---")
-    carla_data = get_carla_data('carla')
-    plot_subplot(ax2, carla_data, "CARLA")
-    
+    # --- 2. 中间: BipedalWalker ---
     print("--- Loading BipedalWalker Data ---")
     bw_data = get_bw_data('bw')
-    plot_subplot(ax3, bw_data, "BipedalWalker")
+    plot_subplot(ax2, bw_data, "BipedalWalker")
+    
+    # --- 3. 最右侧: CARLA ---
+    print("--- Loading CARLA Data ---")
+    carla_data = get_carla_data('carla')
+    plot_subplot(ax3, carla_data, "CARLA")
     
     plt.tight_layout()
     output_file = 'RQ1.png'
     try:
-        plt.savefig(output_file, dpi=300)
+        # bbox_inches='tight' 确保右侧突出的文字不被切掉
+        plt.savefig(output_file, dpi=300, bbox_inches='tight') 
         print(f"\n[Success] Combined chart saved to: {output_file}")
     except Exception as e:
         print(f"\n[Error] Failed to save chart: {e}")

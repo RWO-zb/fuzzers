@@ -11,7 +11,7 @@ PLOT_1_FILE = 'crashes_over_unique_inputs.png'
 PLOT_2_FILE = 'full_input_space_tsne.png'
 PLOT_3_FILE = 'crash_generation_histogram.png'
 PLOT_4_FILE = 'crashes_over_time.png'
-PLOT_5_FILE = 'behaviour_coverage_heatmap.png' # [新增] 行为覆盖率热力图
+PLOT_5_FILE = 'behaviour_coverage_heatmap.png' 
 
 def load_data(file_path):
     """加载 pickle 日志文件"""
@@ -71,6 +71,46 @@ def deduplicate_log(original_log_data):
         return None, None, 0
 
     return deduplicated_log, dtype_to_use, expected_size
+
+def print_data_statistics(original_log, deduplicated_log):
+    """
+    [新增] 计算并打印去重前后的统计数据
+    """
+    # 1. 计算原始统计 (Before Deduplication)
+    original_count = len(original_log)
+    original_crashes = sum(1 for entry in original_log if entry.get('did_crash', False))
+    
+    # 2. 计算去重后统计 (After Deduplication)
+    unique_count = len(deduplicated_log)
+    unique_crashes = sum(1 for entry in deduplicated_log if entry.get('did_crash', False))
+    
+    # 3. 打印对比表格
+    print(f"\n{'='*50}")
+    print(f"{'Data Statistics Report':^50}")
+    print(f"{'='*50}")
+    
+    # Header
+    print(f"{'Metric':<25} | {'Original (Raw)':<10} | {'Deduplicated (Unique)':<10}")
+    print(f"{'-'*25} | {'-'*14} | {'-'*20}")
+    
+    # Test Cases Row
+    print(f"{'Total Test Cases':<25} | {original_count:<14} | {unique_count:<20}")
+    
+    # Crashes Row
+    print(f"{'Total Crashes':<25} | {original_crashes:<14} | {unique_crashes:<20}")
+    
+    print(f"{'-'*53}")
+    
+    # Additional Stats
+    if original_count > 0:
+        duplication_rate = (1 - unique_count / original_count) * 100
+        print(f" Duplication Rate: {duplication_rate:.2f}%")
+    
+    if original_crashes > 0:
+        crash_duplication_rate = (1 - unique_crashes / original_crashes) * 100
+        print(f" Crash Redundancy: {crash_duplication_rate:.2f}% (Redundant crashes removed)")
+        
+    print(f"{'='*50}\n")
 
 def plot_crash_trend(deduplicated_log):
     """[图表 1] 绘制故障发现趋势"""
@@ -205,7 +245,7 @@ def plot_crashes_over_time(deduplicated_log):
     plt.close()
 
 def analyze_crash_statistics(deduplicated_log):
-    """打印基本的故障统计信息"""
+    """打印基本的故障统计信息 (基于去重后数据)"""
     unique_crash_inputs = 0
     unique_causing_seeds = set()
     
@@ -220,17 +260,16 @@ def analyze_crash_statistics(deduplicated_log):
                 except Exception:
                     pass
 
-    print(f"\n{'='*40}\n       Crash Statistics\n{'='*40}")
+    print(f"\n{'='*40}\n       Crash Analysis (Deep)\n{'='*40}")
     print(f"  Unique Crash Inputs: {unique_crash_inputs}")
     print(f"  Unique Source Seeds: {len(unique_causing_seeds)}")
     print(f"{'='*40}\n")
 
-# --- [新增] QD-Fuzz 风格的行为多样性计算 ---
+# --- QD-Fuzz 风格的行为多样性计算 ---
 
 def calculate_behaviour_diversity(deduplicated_log, grid_size=(50, 50)):
     """
-    [新增] 计算基于 2D 网格 (Distance, Hull Angle) 的行为多样性 (覆盖率)。
-    这对应于 QD-Fuzz 论文中的 Behaviour Diversity 和 Fault Diversity 指标。
+    计算基于 2D 网格 (Distance, Hull Angle) 的行为多样性 (覆盖率)。
     """
     print(f"\n{'='*40}\n       Behaviour Diversity Analysis (QD-Fuzz)\n{'='*40}")
     
@@ -246,7 +285,6 @@ def calculate_behaviour_diversity(deduplicated_log, grid_size=(50, 50)):
         a = entry.get('bd_mean_angle')
         c = entry.get('did_crash', False)
         
-        # 检查日志中是否存在 BD 数据 (旧日志可能没有)
         if d is not None and a is not None:
             dists.append(d)
             angles.append(a)
@@ -255,19 +293,17 @@ def calculate_behaviour_diversity(deduplicated_log, grid_size=(50, 50)):
             
     if not found_bd:
         print("Warning: No behavior descriptors ('bd_distance', 'bd_mean_angle') found in log.")
-        print("To generate these metrics, please use the modified 'enjoy_cure.py' script.")
         print("Skipping behavior diversity calculation.")
         return
 
     dists = np.array(dists)
     angles = np.array(angles)
     
-    # 2. 定义网格边界 (根据数据动态确定，或使用 BipedalWalker 的经验值)
-    # BipedalWalker Hardcore 赛道长度通常 > 100，机身角度范围 -pi 到 pi
+    # 2. 定义网格边界
     min_dist, max_dist = np.min(dists), np.max(dists)
     min_angle, max_angle = np.min(angles), np.max(angles)
     
-    # 给边界加一点缓冲，防止最大值溢出索引
+    # 给边界加一点缓冲
     max_dist += 1e-5
     max_angle += 1e-5
     
@@ -305,13 +341,12 @@ def calculate_behaviour_diversity(deduplicated_log, grid_size=(50, 50)):
     print(f"  Fault Diversity (Total Crash Bins):     {len(filled_crash_bins)} (Unique crash types in behavior space)")
     print(f"{'='*40}\n")
     
-    # 5. 绘制覆盖率热力图 (可选)
+    # 5. 绘制覆盖率热力图
     heatmap = np.zeros(grid_size)
     for i in range(len(dists)):
         heatmap[dist_indices[i], angle_indices[i]] += 1
         
     plt.figure(figsize=(10, 8))
-    # 使用 log1p (log(1+x)) 使得低频和高频格子都能看清
     plt.imshow(np.log1p(heatmap).T, origin='lower', aspect='auto', cmap='viridis', 
                extent=[min_dist, max_dist, min_angle, max_angle])
     plt.colorbar(label='Log(Count)')
@@ -333,14 +368,17 @@ def main():
         print("Log data is empty or invalid.")
         return
     
-    # 运行原有的绘图逻辑
+    # [新增] 打印去重前后统计数据
+    print_data_statistics(original_log_data, deduplicated_log)
+
+    # 运行绘图逻辑
     plot_crash_trend(deduplicated_log)
     #plot_full_space(deduplicated_log, dtype, expected_size)
     #plot_generation_histogram(deduplicated_log)
-    #plot_crashes_over_time(deduplicated_log)
+    plot_crashes_over_time(deduplicated_log)
     #analyze_crash_statistics(deduplicated_log)
     
-    # 运行新增的 QD-Fuzz 行为多样性分析
+    # 运行行为多样性分析
     #calculate_behaviour_diversity(deduplicated_log)
 
     print("\nAll analysis and plotting completed.")

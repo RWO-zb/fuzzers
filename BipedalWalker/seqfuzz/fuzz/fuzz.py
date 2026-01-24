@@ -12,7 +12,8 @@ class fuzzing:
         self.coverage = []
         self.original = []
         self.count = []
-        self.generations = []  # <--- 新增：存储种子的代数
+        self.generations = []  
+        self.root_ids = [] # <--- 新增：存储每个种子的根ID (初始种子ID)
 
         self.current_pose = None
         self.current_reward = None
@@ -20,7 +21,8 @@ class fuzzing:
         self.current_coverage = None
         self.current_original = None
         self.current_index = None
-        self.current_generation = None # <--- 新增：当前种子的代数
+        self.current_generation = None 
+        self.current_root_id = None # <--- 新增：当前种子的根ID
 
         self.GMM = None
         self.GMMupdate = None
@@ -40,7 +42,9 @@ class fuzzing:
         self.current_entropy = self.entropy[choose_index]
         self.current_coverage = self.coverage[choose_index]
         self.current_original = self.original[choose_index]
-        self.current_generation = self.generations[choose_index] # <--- 新增：获取当前代数
+        self.current_generation = self.generations[choose_index]
+        self.current_root_id = self.root_ids[choose_index] # <--- 新增：获取当前ID
+        
         if self.count[choose_index] <= 0:
             self.corpus.pop(choose_index)
             self.rewards.pop(choose_index)
@@ -48,7 +52,8 @@ class fuzzing:
             self.coverage.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
-            self.generations.pop(choose_index) # <--- 新增：移除对应代数
+            self.generations.pop(choose_index)
+            self.root_ids.pop(choose_index) # <--- 新增：同步移除
             self.current_index = None
 
         return self.current_pose
@@ -63,10 +68,12 @@ class fuzzing:
             self.coverage.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
-            self.generations.pop(choose_index) # <--- 新增：移除对应代数
+            self.generations.pop(choose_index) 
+            self.root_ids.pop(choose_index) # <--- 新增：同步移除
             self.current_index = None
 
-    def further_mutation(self, current_pose, rewards, entropy, cvg, original, generation):
+    # <--- 修改：增加 root_id 参数
+    def further_mutation(self, current_pose, rewards, entropy, cvg, original, generation, root_id):
         choose_index = self.current_index
         copy_pose = copy.deepcopy(current_pose)
 
@@ -76,7 +83,8 @@ class fuzzing:
             self.entropy[choose_index] = entropy
             self.coverage[choose_index] = cvg
             self.count[choose_index] = 5
-            self.generations[choose_index] = generation # <--- 新增：更新代数
+            self.generations[choose_index] = generation
+            self.root_ids[choose_index] = root_id # <--- 新增：更新ID
         else:
             self.corpus.append(copy_pose)
             self.rewards.append(rewards)
@@ -84,7 +92,8 @@ class fuzzing:
             self.coverage.append(cvg)
             self.original.append(original)
             self.count.append(5)
-            self.generations.append(generation) # <--- 新增：添加代数
+            self.generations.append(generation)
+            self.root_ids.append(root_id) # <--- 新增：添加ID
 
     def mutation(self, states):
         delta_states = np.random.choice(2, 15, p=[0.9, 0.1])
@@ -104,7 +113,8 @@ class fuzzing:
             self.coverage.pop(choose_index)
             self.original.pop(choose_index)
             self.count.pop(choose_index)
-            self.generations.pop(choose_index) # <--- 新增：移除对应代数
+            self.generations.pop(choose_index) 
+            self.root_ids.pop(choose_index) # <--- 新增：同步移除
             self.current_index = None
 
     def flatten_states(self, states):
@@ -256,7 +266,8 @@ if __name__ == '__main__':
     fuzzer = fuzzing()
     for i in range(50):
         cur_seq = np.random.rand(17)
-        fuzzer.further_mutation(copy.deepcopy(cur_seq), np.random.uniform(0, 1), np.random.uniform(0, 1), np.random.uniform(0, 1), copy.deepcopy(cur_seq))
+        # 这里仅用于测试，root_id 传入 i 即可
+        fuzzer.further_mutation(copy.deepcopy(cur_seq), np.random.uniform(0, 1), np.random.uniform(0, 1), np.random.uniform(0, 1), copy.deepcopy(cur_seq), 0, root_id=i)
     
     states_seq = []
     for i in range(100):

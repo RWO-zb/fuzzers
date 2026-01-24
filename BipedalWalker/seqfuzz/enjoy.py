@@ -321,7 +321,8 @@ def main():
                 if done: break
             entropy = np.abs(episode_reward_mutate - episode_reward) / np.sum(delta_states)
             cvg = fuzzer.state_coverage(sequences)
-            fuzzer.further_mutation(states, episode_reward, entropy, cvg, states, 0)
+            # <--- 修改：传入 root_id=i，标记初始种子ID
+            fuzzer.further_mutation(states, episode_reward, entropy, cvg, states, 0, root_id=i)
             print(entropy, episode_reward, episode_reward_mutate, done, cvg)
             i += 1
             pbar.update(1)
@@ -356,12 +357,13 @@ def main():
     timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
     seedcount = 0
     
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0:
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<5000:
         is_crash = False
         seedcount+=1
         output_obs = []
         temp1_time = time.time()
         states = fuzzer.get_pose()
+        current_root_id = fuzzer.current_root_id # <--- 新增：获取当前种子ID
         mutate_states = fuzzer.mutation(states)
         current_gen = fuzzer.current_generation + 1 
         state = None
@@ -465,7 +467,8 @@ def main():
             if cvg < cvg_threshold or episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
-                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
+                # <--- 修改：传入 root_id=current_root_id
+                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose, current_gen, root_id=current_root_id)
         else:
             if len(output_obs) == Hyperparameter.Step:
                 for i in range(len(output_obs)):
@@ -485,11 +488,13 @@ def main():
             if episode_reward < fuzzer.current_reward:
                 current_pose = copy.deepcopy(mutate_states)
                 orig_pose = fuzzer.current_original
-                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
+                # <--- 修改：传入 root_id=current_root_id
+                fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose, current_gen, root_id=current_root_id)
         
         # [Restore] Record Data for seqfuzzplot.py (Exact format requested)
         log_entry = {
-            'state': copy.deepcopy(mutate_states), 
+            'state': copy.deepcopy(mutate_states),
+            'root_id': current_root_id, # <--- 新增：记录 root_id 用于统计
             'generation': current_gen,             
             'crashed': is_crash,
             'timestamp': time.time() - start_fuzz_time,

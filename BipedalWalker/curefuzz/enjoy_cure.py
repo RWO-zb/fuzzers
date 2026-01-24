@@ -314,7 +314,7 @@ def main():
     print(f"\n[Goal] Collecting RAW Transitions. Save Physics: {args.save_physics}")
     
     # --- Fuzzing Loop ---
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0:
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 and seedcount<5000:
         seedcount += 1
         selected_info = fuzzer.get_pose()
         states = selected_info['seed_state']
@@ -443,9 +443,12 @@ def main():
                     all_label_data.append(labels)
                     if label == 0: todynet_success_count += 1
         
+
+
         fuzz_selection_log.append({
             'seed_state': selected_info['seed_state'],
             'mutate_state': mutate_states,
+            'root_seed': fuzzer.current_original,
             'parent_depth': current_mutation_depth,
             'did_crash': did_crash,
             'elapsed_time': time.time() - start_fuzz_time,

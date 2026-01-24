@@ -6,7 +6,7 @@ import seaborn as sns
 from matplotlib.ticker import MaxNLocator
 from sklearn.manifold import TSNE
 import time
-from collections import Counter # 新增引入
+from collections import Counter
 
 # ==========================================
 # 全局配置与风格设置
@@ -26,7 +26,7 @@ COLORS = {
 # 注意：请根据 test_gen.py 实际生成的文件夹名称修改此处
 RESULT_DIR = os.path.join("results", "generative+novelty_50_seed_0")
 LOG_FILENAME = os.path.join(RESULT_DIR, "all_test_cases_log.pkl")
-PLOT_5_FILE = os.path.join(RESULT_DIR, '5_behaviour_coverage_heatmap.png') # 新增
+PLOT_5_FILE = os.path.join(RESULT_DIR, '5_behaviour_coverage_heatmap.png')
 
 def load_data():
     """加载日志数据"""
@@ -84,27 +84,38 @@ def process_and_plot_bars(log_data):
         len(log_data)
     )
 
-    # --- 2. 去重后 (Unique Data) ---
-    unique_data = []
-    seen_inputs = set()
+    # --- 2. 去重后 (Unique Data) [修复版逻辑] ---
+    # 逻辑：找出所有发生过 Crash 的唯一输入，无论其第一次运行是否成功
     
+    unique_crash_inputs = set()
+    crash_sources = {'random': 0, 'generative': 0}
+    
+    # 遍历所有日志，专门寻找 Crash
     for entry in log_data:
-        # 将 input 列表转为 tuple 以便用于 set 去重
-        t_in = tuple(entry['input'])
-        if t_in not in seen_inputs:
-            seen_inputs.add(t_in)
-            unique_data.append(entry)
+        if entry.get('is_crash'):
+            t_in = tuple(entry['input'])
             
-    unique_crashes = [e for e in unique_data if e.get('is_crash')]
-    uniq_rand = sum(1 for c in unique_crashes if c.get('source') == 'random')
-    uniq_gen = sum(1 for c in unique_crashes if c.get('source') == 'generative')
+            # 如果这是一个新的 Crash 输入
+            if t_in not in unique_crash_inputs:
+                unique_crash_inputs.add(t_in)
+                
+                # 记录来源
+                src = entry.get('source', 'random') # 默认为 random 防止报错
+                if src in crash_sources:
+                    crash_sources[src] += 1
+    
+    uniq_rand = crash_sources['random']
+    uniq_gen = crash_sources['generative']
+    
+    # 计算总唯一样本数（无论是否Crash）
+    unique_inputs_total = len(set(tuple(e['input']) for e in log_data))
     
     plot_bar_chart(
         uniq_rand, 
         uniq_gen, 
         'Unique Crashes Detected (After Dedup)', 
         '2_crash_counts_unique.png',
-        len(unique_data)
+        unique_inputs_total
     )
 
 def plot_total_crashes_over_time(log_data):
@@ -198,15 +209,21 @@ def run_tsne(data, n_samples):
 def plot_tsne_distribution(log_data):
     """
     提取所有唯一输入，并绘制 t-SNE 散点图
-    红色 = Crash, 蓝色 = Safe
+    [修复版逻辑]：只要输入曾导致 Crash，就标记为 Crash
     """
     print("\n=== 开始绘制 t-SNE 分布图 ===")
+    
+    # --- [Step 1] 预扫描：找出所有曾经导致 Crash 的输入 ---
+    known_crash_inputs = set()
+    for entry in log_data:
+        if entry.get('is_crash'):
+            known_crash_inputs.add(tuple(entry['input']))
     
     unique_inputs = []
     labels = []  # 0: Safe, 1: Crash
     seen_inputs = set()
 
-    # 1. 数据准备与去重
+    # --- [Step 2] 准备数据 ---
     for entry in log_data:
         t_in = tuple(entry['input'])
         if t_in not in seen_inputs:
@@ -216,11 +233,11 @@ def plot_tsne_distribution(log_data):
             input_arr = np.array(t_in)
             unique_inputs.append(input_arr)
             
-            # 标记 Label
-            if entry.get('is_crash'):
-                labels.append(1)
+            # 标记 Label：依据是否在“已知崩溃名单”中
+            if t_in in known_crash_inputs:
+                labels.append(1) # Crash
             else:
-                labels.append(0)
+                labels.append(0) # Safe
     
     if not unique_inputs:
         print("未找到有效输入数据，跳过 t-SNE。")
@@ -230,10 +247,10 @@ def plot_tsne_distribution(log_data):
     y = np.array(labels)
     n_samples = X.shape[0]
 
-    # 2. 运行 t-SNE
+    # --- [Step 3] 运行 t-SNE ---
     tsne_results = run_tsne(X, n_samples)
     
-    # 3. 绘图
+    # --- [Step 4] 绘图 ---
     plt.figure(figsize=(12, 10))
     
     # 分离数据点
@@ -274,12 +291,11 @@ def plot_tsne_distribution(log_data):
     plt.close()
 
 # ==========================================
-# [新增] Behaviour Diversity / Coverage 相关功能
+# Behaviour Diversity / Coverage 相关功能
 # ==========================================
 def calculate_behaviour_diversity(log_data, grid_size=(50, 50)):
     """
-    [新增] 计算基于 2D 网格 (Distance, Hull Angle) 的行为多样性 (覆盖率)。
-    这对应于 Behaviour Diversity 和 Fault Diversity 指标。
+    计算基于 2D 网格 (Distance, Hull Angle) 的行为多样性 (覆盖率)。
     """
     print(f"\n{'='*40}\n       Behaviour Diversity Analysis\n{'='*40}")
     
@@ -291,7 +307,6 @@ def calculate_behaviour_diversity(log_data, grid_size=(50, 50)):
     found_bd = False
     
     for entry in log_data:
-        # 使用 .get 以兼容旧日志文件
         d = entry.get('bd_distance')
         a = entry.get('bd_mean_angle')
         c = entry.get('is_crash', False)
@@ -303,8 +318,7 @@ def calculate_behaviour_diversity(log_data, grid_size=(50, 50)):
             found_bd = True
             
     if not found_bd:
-        print("Warning: No behavior descriptors ('bd_distance', 'bd_mean_angle') found in log.")
-        print("Please rerun test_gen.py with the modified code to generate these metrics.")
+        print("Warning: No behavior descriptors found in log.")
         return
 
     dists = np.array(dists)
@@ -325,7 +339,6 @@ def calculate_behaviour_diversity(log_data, grid_size=(50, 50)):
     filled_bins = set()
     filled_crash_bins = set()
     
-    # 归一化并计算索引 [0, grid_size)
     if max_dist > min_dist:
         dist_indices = ((dists - min_dist) / (max_dist - min_dist) * grid_size[0]).astype(int)
     else:
@@ -336,11 +349,9 @@ def calculate_behaviour_diversity(log_data, grid_size=(50, 50)):
     else:
         angle_indices = np.zeros_like(angles, dtype=int)
     
-    # 安全裁剪索引范围
     dist_indices = np.clip(dist_indices, 0, grid_size[0] - 1)
     angle_indices = np.clip(angle_indices, 0, grid_size[1] - 1)
     
-    # 构建热力图矩阵
     heatmap = np.zeros(grid_size)
 
     for i in range(len(dists)):
@@ -359,7 +370,6 @@ def calculate_behaviour_diversity(log_data, grid_size=(50, 50)):
     
     # 5. 绘制覆盖率热力图
     plt.figure(figsize=(10, 8))
-    # 使用 log1p (log(1+x)) 使得低频和高频格子都能看清
     plt.imshow(np.log1p(heatmap).T, origin='lower', aspect='auto', cmap='viridis', 
                extent=[min_dist, max_dist, min_angle, max_angle])
     plt.colorbar(label='Log(Count)')
@@ -372,7 +382,6 @@ def calculate_behaviour_diversity(log_data, grid_size=(50, 50)):
     plt.close()
 
 def main():
-    # 检查结果目录是否存在
     if not os.path.exists(RESULT_DIR):
         print(f"错误：目录 {RESULT_DIR} 不存在。")
         print("请运行 test_gen.py 生成数据，或修改本脚本中的 RESULT_DIR 变量。")
@@ -383,16 +392,16 @@ def main():
     if log_data:
         print("\n=== 开始绘制图表 ===")
         
-        # 1. 绘制柱状图 (Raw & Unique)
+        # 1. 绘制柱状图 (Raw & Unique) - [修复版]
         process_and_plot_bars(log_data)
         
-        # 2. 绘制时间曲线图 (Total Only - Time in Hours)
+        # 2. 绘制时间曲线图 (Total Only)
         plot_total_crashes_over_time(log_data)
         
-        # 3. 绘制 t-SNE 输入空间分布图
-        plot_tsne_distribution(log_data)
+        # 3. 绘制 t-SNE 输入空间分布图 - [修复版]
+        #plot_tsne_distribution(log_data)
 
-        # 4. [新增] 绘制行为多样性热力图与计算覆盖率
+        # 4. 绘制行为多样性热力图与计算覆盖率
         calculate_behaviour_diversity(log_data)
         
     print("\n=== 所有绘图任务完成 ===")
