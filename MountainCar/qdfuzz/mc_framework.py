@@ -15,7 +15,8 @@ class MAPElitesFramework:
         self.descriptors = np.array(descriptors)
         
         self.cells = []
-        # 数据结构: (input, performance, oracle, behavior, mutation_count, discovery_time)
+        # 数据结构修改: (input, performance, oracle, behavior, mutation_count, discovery_time, seed_id)
+        # 增加了最后一项 seed_id 用于溯源
         self.cells_data = []
 
         self.config = {
@@ -27,12 +28,14 @@ class MAPElitesFramework:
     def save_state(self, filepath: str):
         cell_dfs = []
         base_cols = ['score', 'is_faulty', 'cell_index'] + [f'cell{i}' for i in range(2)] + [f'behavior{i}' for i in range(2)]
-        all_cols = base_cols + ['input', 'mutation_count', 'discovery_time']
+        # [修改] CSV 列头增加 'seed_id'
+        all_cols = base_cols + ['input', 'mutation_count', 'discovery_time', 'seed_id']
 
         for i, cell_data in enumerate(self.cells_data):
+            # [修改] 解包时增加 seed_id，并在构建列表时包含它
             cell_dfs.append(pd.DataFrame.from_records(
-                data=[[score, is_faulty, i] + self.cells[i] + behavior.tolist() + [inp.tolist()] + [cnt] + [dt]
-                      for (inp, score, is_faulty, behavior, cnt, dt) in cell_data],
+                data=[[score, is_faulty, i] + self.cells[i] + behavior.tolist() + [inp.tolist()] + [cnt] + [dt] + [sid]
+                      for (inp, score, is_faulty, behavior, cnt, dt, sid) in cell_data],
                 columns=all_cols
             ))
         
@@ -46,18 +49,22 @@ class MAPElitesFramework:
         scores = [x[1] for x in self.cells_data[index]]
         best_idx = int(np.argmin(scores))
         selected = self.cells_data[index][best_idx]
-        return selected[0], selected[4]
+        # [修改] 返回值增加 seed_id (selected[6])
+        return selected[0], selected[4], selected[6]
 
     def select_cell(self):
         return int(self.rng.integers(0, len(self.cells)))
 
-    def update_cell(self, cell, inp, perf, is_faulty, beh, cnt, discovery_time):
+    # [修改] 增加 seed_id 参数
+    def update_cell(self, cell, inp, perf, is_faulty, beh, cnt, discovery_time, seed_id):
         try:
             idx = self.cells.index(cell)
-            self.cells_data[idx].append((inp, perf, is_faulty, beh, cnt, discovery_time))
+            # [修改] 存储时包含 seed_id
+            self.cells_data[idx].append((inp, perf, is_faulty, beh, cnt, discovery_time, seed_id))
         except ValueError:
             self.cells.append(cell)
-            self.cells_data.append([(inp, perf, is_faulty, beh, cnt, discovery_time)])
+            # [修改] 存储时包含 seed_id
+            self.cells_data.append([(inp, perf, is_faulty, beh, cnt, discovery_time, seed_id)])
             idx = len(self.cells) - 1
         return idx
 
@@ -176,7 +183,8 @@ class MAPElitesFramework:
                 self.xedges, self.yedges = get_edges(env_seed, self.descriptors)
                 for i in range(len(inputs)):
                     cell = compute_cell(behaviors[i], self.xedges, self.yedges).tolist()
-                    self.update_cell(cell, inputs[i], acc_rewards[i], oracles[i], behaviors[i], 0, discovery_times[i])
+                    # [修改] 传入 seed_id=i，将初始化的索引作为种子ID
+                    self.update_cell(cell, inputs[i], acc_rewards[i], oracles[i], behaviors[i], 0, discovery_times[i], seed_id=i)
              for f in files.values(): f.close()
              self.save_state(filepath)
              return
@@ -187,7 +195,8 @@ class MAPElitesFramework:
         
         for i in range(len(inputs)):
             cell = compute_cell(behaviors[i], self.xedges, self.yedges).tolist()
-            self.update_cell(cell, inputs[i], acc_rewards[i], oracles[i], behaviors[i], 0, discovery_times[i])
+            # [修改] 传入 seed_id=i
+            self.update_cell(cell, inputs[i], acc_rewards[i], oracles[i], behaviors[i], 0, discovery_times[i], seed_id=i)
             
             np.savetxt(files['inputs'], inputs[i].reshape(1, -1), fmt='%f', delimiter=',')
             np.savetxt(files['behaviors'], behaviors[i].reshape(1, -1), delimiter=',')
@@ -205,7 +214,8 @@ class MAPElitesFramework:
                 break
 
             cell_idx = self.select_cell()
-            parent_inp, parent_cnt = self.select_input(cell_idx)
+            # [修改] 接收返回的 parent_seed_id
+            parent_inp, parent_cnt, parent_seed_id = self.select_input(cell_idx)
             
             mutated_inp = self.mutate(parent_inp)
             
@@ -217,7 +227,9 @@ class MAPElitesFramework:
             current_generation = parent_cnt + 1
 
             cell = compute_cell(beh, self.xedges, self.yedges).tolist()
-            self.update_cell(cell, mutated_inp, rew, oracle, beh, current_generation, current_discovery_time)
+            
+            # [修改] 传入继承的 parent_seed_id
+            self.update_cell(cell, mutated_inp, rew, oracle, beh, current_generation, current_discovery_time, seed_id=parent_seed_id)
             
             self.save_trajectory_log(files['obs'], current_generation, mutated_inp, oracle, traj)
 
@@ -227,6 +239,9 @@ class MAPElitesFramework:
             
             pbar.update(1)
             # 可选：更新进度条后缀显示当前状态
+            # [注意] 这里原代码的列表推导式需要解包7个值，或者改用索引。
+            # 原代码: np.sum([1 for c in self.cells_data for x in c if x[2]])
+            # 这里的 x[2] 对应 is_faulty，依然有效，不需要修改
             pbar.set_postfix({'Execs': total_executions, 'Crashes': np.sum([1 for c in self.cells_data for x in c if x[2]])})
             
         pbar.close()

@@ -2,17 +2,21 @@ import os
 import json
 import numpy as np
 import matplotlib.pyplot as plt
+from collections import Counter
 
+# --- 配置区域 ---
 OBS_FILE = 'logs/MC_DQN_NoCov_5_0.01_0.1_0_7000it_obs.txt' 
+# 自动推断 Log 文件路径 (假设文件名仅后缀不同)
+LOG_FILE = OBS_FILE.replace('_obs.txt', '_logs.txt')
+
 LABEL = 'MDPFuzz'
 IS_RT = False 
 
-# 示例 2: Random Testing 的日志 (取消注释使用)
-#OBS_FILE = 'logs/MC_DQN_RT_0_5000it_obs.txt'
-#LABEL = 'Random Testing'
-#IS_RT = True   # 设置为 True，会保留所有数据
-PLOT_FILE = 'RQ2_Diversity_Filtered.png'
+# 输出图片名称
+PLOT_DIVERSITY_FILE = 'RQ2_Diversity_Filtered.png'
+PLOT_SEEDS_FILE = 'RQ2_Crash_Seeds_Distribution.png'
 
+# 绘图风格设置
 plt.style.use('seaborn-v0_8-whitegrid')
 plt.rcParams.update({
     'font.family': 'serif',
@@ -26,50 +30,105 @@ plt.rcParams.update({
 })
 
 class MdpFuzzLogParser:
+    """解析 _obs.txt 文件，用于多样性分析"""
     def __init__(self, filepath, is_rt=False):
         self.filepath = filepath
         self.is_rt = is_rt
 
     def parse(self):
-        print(f"Parsing file: {self.filepath} ...")
+        print(f"Parsing Obs file: {self.filepath} ...")
         print(f"Mode: {'Random Testing (Keep All)' if self.is_rt else 'MDPFuzz (Exclude Init Phase/Gen 0)'}")
         count = 0
         skipped = 0
-        with open(self.filepath, 'r') as f:
-            current_info = None
-            current_data = []
-            for line in f:
-                line = line.strip()
-                if not line: continue
-                if line.startswith("--- Test Case Info:"):
-                    if current_info is not None:
-                        gen = current_info.get('Generation', 0)
-                        if not self.is_rt and gen == 0:
-                            skipped += 1
-                        else:
-                            yield current_info, np.array(current_data)
-                            count += 1
-                    
-                    json_part = line[len("--- Test Case Info: "):-len(" ---")]
-                    current_info = json.loads(json_part)
-                    current_data = []
-                    
-                else:
-                    if current_info is not None:
-                        vals = [float(x) for x in line.split(',')]
-                        current_data.append(vals)
+        try:
+            with open(self.filepath, 'r') as f:
+                current_info = None
+                current_data = []
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
+                    if line.startswith("--- Test Case Info:"):
+                        if current_info is not None:
+                            gen = current_info.get('Generation', 0)
+                            if not self.is_rt and gen == 0:
+                                skipped += 1
+                            else:
+                                yield current_info, np.array(current_data)
+                                count += 1
                         
-            if current_info is not None:
-                gen = current_info.get('Generation', 0)
-                if not self.is_rt and gen == 0:
-                    skipped += 1
-                else:
-                    yield current_info, np.array(current_data)
-                    count += 1
+                        json_part = line[len("--- Test Case Info: "):-len(" ---")]
+                        current_info = json.loads(json_part)
+                        current_data = []
+                        
+                    else:
+                        if current_info is not None:
+                            vals = [float(x) for x in line.split(',')]
+                            current_data.append(vals)
+                            
+                if current_info is not None:
+                    gen = current_info.get('Generation', 0)
+                    if not self.is_rt and gen == 0:
+                        skipped += 1
+                    else:
+                        yield current_info, np.array(current_data)
+                        count += 1
+        except FileNotFoundError:
+            print(f"Error: Obs file not found at {self.filepath}")
                     
-        print(f"\nParsing Complete.")
         print(f"  - Valid Episodes Used: {count}")
         print(f"  - Skipped (Init Phase): {skipped}")
+
+class SeedCrashAnalyzer:
+    """新增：解析 _logs.txt 文件，用于统计初始种子导致的 Crash"""
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self.delimiter = '; ' # 与 logger.py 中定义的一致
+
+    def analyze(self):
+        print(f"\nParsing Log file for Seeds: {self.filepath} ...")
+        seed_crashes = []
+        try:
+            with open(self.filepath, 'r') as f:
+                header_line = f.readline().strip()
+                if not header_line:
+                    return {}
+                headers = header_line.split(self.delimiter)
+                
+                # 检查是否存在 SeedID 列
+                if 'SeedID' not in headers:
+                    print("Warning: 'SeedID' column not found in logs. Please ensure you are using the modified logger.")
+                    return {}
+                if 'Oracle' not in headers:
+                    print("Warning: 'Oracle' column not found.")
+                    return {}
+
+                idx_oracle = headers.index('Oracle')
+                idx_seed = headers.index('SeedID')
+
+                for line in f:
+                    values = [v.strip() for v in line.strip().split(self.delimiter)]
+                    # 确保行数据完整
+                    if len(values) <= max(idx_oracle, idx_seed):
+                        continue
+
+                    oracle_str = values[idx_oracle]
+                    seed_id_str = values[idx_seed]
+
+                    # 只统计发生了 Crash 且拥有有效 SeedID 的条目
+                    if oracle_str == 'True' and seed_id_str != 'None':
+                        try:
+                            seed_crashes.append(int(seed_id_str))
+                        except ValueError:
+                            pass
+                            
+        except FileNotFoundError:
+            print(f"Error: Log file not found at {self.filepath}")
+            return {}
+
+        counts = Counter(seed_crashes)
+        print(f"  - Total Crashes Linked to Seeds: {len(seed_crashes)}")
+        print(f"  - Unique Initial Seeds Causing Crashes: {len(counts)}")
+        return counts
 
 class DiversityAnalyzer:
     def __init__(self, state_grid_size=(50, 50), behavior_grid_size=(50, 50)):
@@ -143,7 +202,7 @@ class DiversityAnalyzer:
 
 def plot_metrics(history, save_path, label, is_rt):
     if not history or not history['episodes']:
-        print("No data to plot.")
+        print("No diversity data to plot.")
         return
 
     episodes = history['episodes']
@@ -184,20 +243,67 @@ def plot_metrics(history, save_path, label, is_rt):
         ax.set_ylim(bottom=0)
         ax.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
-    print(f"Saving plot to {save_path}")
+    print(f"Saving diversity plot to {save_path}")
+    plt.savefig(save_path, dpi=300)
+    plt.show()
+
+def plot_seed_crash_distribution(seed_counts, save_path):
+    """新增：绘制初始种子导致Crash的分布图"""
+    if not seed_counts:
+        print("No seed crash data to plot.")
+        return
+
+    # 按 SeedID 排序，以便X轴有序
+    sorted_seeds = sorted(seed_counts.keys())
+    counts = [seed_counts[s] for s in sorted_seeds]
+    
+    # 如果种子数量太多，只显示 Top N 或者调整图表大小
+    plt.figure(figsize=(12, 6))
+    
+    # 绘制柱状图
+    bars = plt.bar(sorted_seeds, counts, color='#d62728', alpha=0.8, edgecolor='black')
+    
+    plt.xlabel('Initial Seed ID')
+    plt.ylabel('Number of Crashes Derived')
+    plt.title(f'Distribution of Crashes by Initial Seed ({LABEL})', fontweight='bold')
+    
+    # 只有当种子数量不多时，才强制显示所有 X 轴刻度
+    if len(sorted_seeds) <= 30:
+        plt.xticks(sorted_seeds)
+    
+    plt.grid(axis='y', linestyle='--', alpha=0.6)
+    
+    # 在柱子上显示具体数值
+    for bar in bars:
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2., height,
+                 f'{height}', ha='center', va='bottom', fontsize=9)
+                 
+    plt.tight_layout()
+    print(f"Saving seed distribution plot to {save_path}")
     plt.savefig(save_path, dpi=300)
     plt.show()
 
 def main():
     print(f"Target Obs File: {OBS_FILE}")
+    print(f"Target Log File: {LOG_FILE}")
     
+    # 1. 多样性分析 (原有功能)
     parser = MdpFuzzLogParser(OBS_FILE, is_rt=IS_RT)
     analyzer = DiversityAnalyzer(
         state_grid_size=(50, 50),
         behavior_grid_size=(50, 50)
     )
     history = analyzer.calculate_trends(parser)
-    plot_metrics(history, save_path=PLOT_FILE, label=LABEL, is_rt=IS_RT)
+    plot_metrics(history, save_path=PLOT_DIVERSITY_FILE, label=LABEL, is_rt=IS_RT)
+
+    # 2. 初始种子Crash分布分析 (新增功能)
+    if not IS_RT: # Random Testing 没有 SeedID 血缘概念，通常不绘制此图
+        seed_analyzer = SeedCrashAnalyzer(LOG_FILE)
+        seed_counts = seed_analyzer.analyze()
+        plot_seed_crash_distribution(seed_counts, save_path=PLOT_SEEDS_FILE)
+    else:
+        print("\nSkipping Seed Analysis for Random Testing mode (SeedID not applicable).")
 
 if __name__ == "__main__":
     main()

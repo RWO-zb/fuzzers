@@ -346,7 +346,10 @@ def main():
     if not deduplicated_log:
         print("未能从日志中提取任何有效数据。退出。")
         return
-        
+    
+    unique_crashes_count = sum(1 for entry in deduplicated_log if entry.get('crashed', False))
+    print(f"\n[统计] 发现的独特 Crash 输入总数: {unique_crashes_count}")   
+    
     plot_crash_trend(deduplicated_log)
     plot_full_space(deduplicated_log, dtype, expected_size)
     plot_generation_histogram(deduplicated_log)

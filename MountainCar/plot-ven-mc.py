@@ -6,18 +6,14 @@ import matplotlib.pyplot as plt
 from upsetplot import from_contents, plot as upset_plot
 from venn import venn
 
-# ================= 配置区域 (复用 RQ2) =================
+# ================= 配置区域 =================
 # 确保安装: pip install upsetplot venn matplotlib
 
-# 文件路径配置 (与 plot-RQ2.py 保持一致)
+# 文件路径配置 (已移除 Random 和 G-Model)
 FILE_PATHS = {
     "CureFuzz": {
         "obs": "obs_sequences.pkl",
         "log": "selection_log.pkl"
-    },
-    "G-Model": {
-        "traj": "all_trajectories.pkl",
-        "log": "all_test_cases_log.pkl"
     },
     "MDPFuzz": {
         "obs": "MC_DQN_NoCov_5_0.01_0.1_0_7000it_obs.txt"
@@ -25,23 +21,20 @@ FILE_PATHS = {
     "QDFuzz": {
         "obs": "mc_test_obs.txt"
     },
-    "Random": {
-        "obs": "MC_DQN_RT_0_5000it_obs.txt"
-    },
     "SeqFuzz": {
         "obs": "all_episodes_obs.txt",
         "log": "all_run_seeds_0.pkl"
     }
 }
 
-# MountainCar 物理参数范围 (与 RQ2 一致)
+# MountainCar 物理参数范围
 RANGES = {
     'bd_pos': (-1.2, 0.6),
     'bd_speed': (0.0, 0.05)
 }
 GRID_SIZE = (50, 50)  # 网格大小
 
-# ================= 数据解析类 (直接复用 RQ2 逻辑) =================
+# ================= 数据解析类 =================
 
 class DataParser:
     @staticmethod
@@ -72,23 +65,13 @@ class DataParser:
                             if len(vals) >= 2: current_seq.append(vals[:2])
                         except: continue
             if current_seq: obs_seqs.append(np.array(current_seq))
+        
         logs = DataParser.load_pickle(log_path)
         data = []
         min_len = min(len(obs_seqs), len(logs))
         for i in range(min_len):
             is_crash = logs[i].get('crashed', False)
             data.append((obs_seqs[i], is_crash))
-        return data
-
-    @staticmethod
-    def parse_gmodel(traj_path, log_path):
-        traj_seqs = DataParser.load_pickle(traj_path)
-        logs = DataParser.load_pickle(log_path)
-        data = []
-        min_len = min(len(traj_seqs), len(logs))
-        for i in range(min_len):
-            is_crash = logs[i].get('is_crash', False)
-            data.append((traj_seqs[i], is_crash))
         return data
 
     @staticmethod
@@ -104,7 +87,12 @@ class DataParser:
 
     @staticmethod
     def parse_mdpfuzz_style(obs_path, skip_gen0=True):
+        """
+        解析 MDPFuzz 风格数据。
+        skip_gen0=True 表示跳过 Generation 0 (初始种子)，与 RQ2 逻辑一致。
+        """
         if not os.path.exists(obs_path):
+            print(f"[Warn] File not found: {obs_path}")
             return []
         data = []
         current_info = None
@@ -114,11 +102,14 @@ class DataParser:
                 line = line.strip()
                 if not line: continue
                 if line.startswith("--- Test Case Info:"):
+                    # 处理上一条记录
                     if current_info is not None:
                         gen = current_info.get('Generation', 0)
+                        # 核心逻辑：如果 skip_gen0 为 True 且是第0代，则不添加
                         if not (skip_gen0 and gen == 0):
                             is_crash = current_info.get('Oracle', False)
                             data.append((np.array(current_data), is_crash))
+                    # 开始新记录
                     try:
                         json_part = line.split("--- Test Case Info:")[1].split("---")[0].strip()
                         current_info = json.loads(json_part)
@@ -130,6 +121,7 @@ class DataParser:
                             parts = line.split(',')
                             if len(parts) >= 2: current_data.append([float(parts[0]), float(parts[1])])
                         except: continue
+            # 处理最后一条
             if current_info is not None:
                 gen = current_info.get('Generation', 0)
                 if not (skip_gen0 and gen == 0):
@@ -139,9 +131,10 @@ class DataParser:
 
     @staticmethod
     def parse_qdfuzz(obs_path):
+        # QDFuzz 同样跳过 Gen 0
         return DataParser.parse_mdpfuzz_style(obs_path, skip_gen0=True)
 
-# ================= 核心分析类 (修改为返回集合) =================
+# ================= 集合提取类 =================
 
 class DiversitySetExtractor:
     def __init__(self):
@@ -166,7 +159,8 @@ class DiversitySetExtractor:
 
     def get_crash_grid_set(self, data):
         """
-        返回该方法发现的所有崩溃对应的网格索引集合 (Grid IDs)
+        输入 data: List of (seq, is_crash)
+        输出: Set of Grid IDs where crash occurred
         """
         crash_grids = set()
         
@@ -190,57 +184,49 @@ def main():
     extractor = DiversitySetExtractor()
     crash_sets = {}
     
-    print("=== Extracting Crash Diversity Sets (Grid Based) ===")
+    print("=== Extracting Crash Diversity Sets (4 Methods) ===")
 
     # 1. CureFuzz
     print("Processing CureFuzz...")
     d = DataParser.parse_curefuzz(FILE_PATHS['CureFuzz']['obs'], FILE_PATHS['CureFuzz']['log'])
     crash_sets['CureFuzz'] = extractor.get_crash_grid_set(d)
 
-    # 2. G-Model
-    print("Processing G-Model...")
-    d = DataParser.parse_gmodel(FILE_PATHS['G-Model']['traj'], FILE_PATHS['G-Model']['log'])
-    crash_sets['G-Model'] = extractor.get_crash_grid_set(d)
-
-    # 3. MDPFuzz
-    print("Processing MDPFuzz...")
+    # 2. MDPFuzz (Skip Gen 0 = True)
+    print("Processing MDPFuzz (skip_gen0=True)...")
     d = DataParser.parse_mdpfuzz_style(FILE_PATHS['MDPFuzz']['obs'], skip_gen0=True)
     crash_sets['MDPFuzz'] = extractor.get_crash_grid_set(d)
 
-    # 4. QDFuzz
-    print("Processing QDFuzz...")
+    # 3. QDFuzz (Skip Gen 0 = True)
+    print("Processing QDFuzz (skip_gen0=True)...")
     d = DataParser.parse_qdfuzz(FILE_PATHS['QDFuzz']['obs'])
     crash_sets['QDFuzz'] = extractor.get_crash_grid_set(d)
 
-    # 5. Random
-    print("Processing Random...")
-    d = DataParser.parse_mdpfuzz_style(FILE_PATHS['Random']['obs'], skip_gen0=False)
-    crash_sets['Random'] = extractor.get_crash_grid_set(d)
-
-    # 6. SeqFuzz
+    # 4. SeqFuzz
     print("Processing SeqFuzz...")
     d = DataParser.parse_seqfuzz(FILE_PATHS['SeqFuzz']['obs'], FILE_PATHS['SeqFuzz']['log'])
     crash_sets['SeqFuzz'] = extractor.get_crash_grid_set(d)
 
-    # 打印简报
-    print("\nUnique Crash Grids Found:")
-    for k, v in crash_sets.items():
-        print(f"  {k}: {len(v)}")
+    # 打印统计信息
+    print("\nUnique Crash Grids Found (Cardinality):")
+    sorted_keys = sorted(crash_sets.keys())
+    for k in sorted_keys:
+        print(f"  {k}: {len(crash_sets[k])}")
 
     # ================= 绘图逻辑 =================
 
     # 1. UpSet Plot
     print("\nGenerating UpSet Plot...")
     try:
+        # 检查是否所有集合都为空
         if all(len(s) == 0 for s in crash_sets.values()):
             print("[Error] No crashes found in any method. Check data paths.")
         else:
             upset_data = from_contents(crash_sets)
-            fig = plt.figure(figsize=(12, 7))
+            fig = plt.figure(figsize=(10, 6))
             upset_plot(upset_data, subset_size='count', show_counts=True, sort_by='cardinality', fig=fig)
-            plt.title("Intersection of Crash Faults (Grid-based Diversity)")
-            plt.savefig("MC_Diversity_UpSet.png", dpi=300, bbox_inches='tight')
-            print("Saved MC_Diversity_UpSet.png")
+            plt.title("Intersection of Crash Faults (Excluding Init Seeds)")
+            plt.savefig("MC_Diversity_UpSet_4Methods.png", dpi=300, bbox_inches='tight')
+            print("Saved MC_Diversity_UpSet_4Methods.png")
     except Exception as e:
         print(f"UpSet Plot Error: {e}")
 
@@ -250,11 +236,12 @@ def main():
         if all(len(s) == 0 for s in crash_sets.values()):
             pass
         else:
-            plt.figure(figsize=(10, 10))
+            plt.figure(figsize=(8, 8))
+            # 绘制韦恩图 (4个集合会生成经典的椭圆形状)
             venn(crash_sets, cmap="plasma", alpha=0.3, legend_loc="upper right")
-            plt.title("Venn Diagram of Crash Faults (Grid-based)")
-            plt.savefig("MC_Diversity_Venn.png", dpi=300, bbox_inches='tight')
-            print("Saved MC_Diversity_Venn.png")
+            plt.title("Venn Diagram of Crash Faults")
+            plt.savefig("MC_Diversity_Venn_4Methods.png", dpi=300, bbox_inches='tight')
+            print("Saved MC_Diversity_Venn_4Methods.png")
     except Exception as e:
         print(f"Venn Plot Error: {e}")
 

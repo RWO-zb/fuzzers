@@ -55,6 +55,11 @@ class CureFuzz:
         self.depths = []             
         self.current_depth = None   
         
+        # --- 新增：ID 追踪相关属性 ---
+        self.root_ids = []           # 存储 Corpus 中每个种子的初始祖先 ID
+        self.current_root_id = None  # 当前选中种子的祖先 ID
+        self.id_counter = 0          # 全局 ID 计数器
+        # ---------------------------
 
         self.rnd = RND(input_size, hidden_size, output_size)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -71,6 +76,11 @@ class CureFuzz:
         choose_index = np.random.choice(range(len(self.corpus)), 1, p=new_prob/np.array(new_prob).sum())[0]
 
         self.current_depth = self.depths[choose_index]
+        
+        # --- 新增：获取当前种子的 Root ID ---
+        self.current_root_id = self.root_ids[choose_index]
+        # ----------------------------------
+
         selected_info = {
             'seed_state': self.corpus[choose_index],
             'depth': self.depths[choose_index] 
@@ -84,6 +94,7 @@ class CureFuzz:
         self.current_entropy = self.entropy[choose_index]
         self.current_intrinsic_reward = self.intrinsic_reward[choose_index]
         self.current_original = self.original[choose_index]
+        
         if self.count[choose_index] <= 0:
             self.corpus.pop(choose_index)
             self.final_state.pop(choose_index)
@@ -93,13 +104,25 @@ class CureFuzz:
             self.original.pop(choose_index)
             self.count.pop(choose_index)
             self.depths.pop(choose_index)
+            
+            # --- 新增：同步移除 ID ---
+            self.root_ids.pop(choose_index)
+            # -----------------------
+            
             self.current_index = None
 
         return  selected_info
 
 
     def add_crash(self, result_pose):
-        self.result.append(result_pose)
+        # --- 修改：存储包含 ID 的字典，而不仅仅是状态 ---
+        crash_info = {
+            'state': result_pose,
+            'root_id': self.current_root_id
+        }
+        self.result.append(crash_info)
+        # --------------------------------------------
+        
         choose_index = self.current_index
         if self.current_index != None:
             self.corpus.pop(choose_index)
@@ -110,6 +133,11 @@ class CureFuzz:
             self.original.pop(choose_index)
             self.count.pop(choose_index)
             self.depths.pop(choose_index)
+            
+            # --- 新增：同步移除 ID ---
+            self.root_ids.pop(choose_index)
+            # -----------------------
+            
             self.current_index = None
     
 
@@ -129,6 +157,7 @@ class CureFuzz:
             self.intrinsic_reward[choose_index] = intrinsic_reward
             self.count[choose_index] = 5
             self.depths[choose_index] = new_depth 
+            # 注意：如果是更新现有种子，Root ID 保持不变，无需操作
         else:
             self.corpus.append(copy_pose)
             self.final_state.append(final_state)
@@ -138,6 +167,16 @@ class CureFuzz:
             self.original.append(original)
             self.count.append(5)
             self.depths.append(new_depth)
+            
+            # --- 新增：处理新种子的 ID ---
+            if self.current_root_id is not None:
+                # 如果是基于现有种子变异（或其被pop后的子代），继承 ID
+                self.root_ids.append(self.current_root_id)
+            else:
+                # 如果是初始生成的种子（current_root_id 为 None），分配新 ID
+                self.root_ids.append(self.id_counter)
+                self.id_counter += 1
+            # ---------------------------
 
     def mutation(self, states):
         noise = np.random.normal(scale=0.05, size=2) 
@@ -158,6 +197,11 @@ class CureFuzz:
             self.original.pop(choose_index)
             self.count.pop(choose_index)
             self.depths.pop(choose_index)
+            
+            # --- 新增：同步移除 ID ---
+            self.root_ids.pop(choose_index)
+            # -----------------------
+            
             self.current_index = None
 
     def flatten_states(self, states):

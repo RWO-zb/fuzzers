@@ -153,7 +153,15 @@ def main():
 
     print(f"Processing {target_file}")
     df = load_data_from_csv(target_file)
+    
     if df is not None:
+        # --- 新增代码开始 ---
+        # 筛选出 is_faulty 为 True 的行，并对 input 列去重
+        unique_crashes = df[df['is_faulty'] == True].drop_duplicates(subset=['input'])
+        print(f"========================================")
+        print(f"Unique Crashes Found: {len(unique_crashes)}") # 这里会打印出你要的数字
+        print(f"========================================")
+        # --- 新增代码结束 ---
         dedup_df = deduplicate_inputs(df)
         output_dir = os.path.dirname(target_file)
         plot_crash_trend(df, output_dir)

@@ -98,7 +98,8 @@ class Fuzzer():
                 episode_length=episode_length,
                 Generation=generation,
                 test_exec_time=exec_time_perturbed,
-                run_time=time.time()
+                run_time=time.time(),
+                seed_id=kwargs.get('seed_id', None) # 传递 seed_id
             )
 
         sensitivity = np.abs(acc_reward - acc_reward_perturbed) / perturbation
@@ -143,7 +144,8 @@ class Fuzzer():
                     episode_length=len(state_sequence),
                     Generation=0,
                     test_exec_time=exec_time,
-                    run_time=time.time()
+                    run_time=time.time(),
+                    seed_id=None # 初始随机输入没有特定的种子血缘
                     )
 
         if len(state_sequence) < self.k + 1:
@@ -173,15 +175,15 @@ class Fuzzer():
         self.config['num_initial_executions'] = num_initial_executions
         
         pbar = tqdm.tqdm(total=n)
-        for state in initial_inputs:
-            sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, **kwargs)
+        for i, state in enumerate(initial_inputs): # 使用 enumerate 获取 seed_id
+            sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, seed_id=i, **kwargs)
             self._save_observations(path, state, oracle, state_sequence, 0)
 
             state_sequence_conc = self._concatenate_state_sequence(state_sequence)
             t0 = time.time()
             coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
             coverage_time = time.time() - t0
-            pool.add(state, acc_reward, coverage, sensitivity, oracle, generation=0)
+            pool.add(state, acc_reward, coverage, sensitivity, oracle, generation=0, seed_id=i) # 传入 seed_id
 
             if self.logger is not None:
                 self.logger.log(
@@ -194,7 +196,8 @@ class Fuzzer():
                     Generation=0,
                     test_exec_time=exec_time,
                     coverage_time=coverage_time,
-                    run_time=time.time()
+                    run_time=time.time(),
+                    seed_id=i # 传入 seed_id
                 )
             if oracle:
                 pool.add_crash(state)
@@ -215,7 +218,7 @@ class Fuzzer():
             if test_budget is not None and num_iterations >= test_budget:
                 break
 
-            input, acc_reward_input, generation = pool.select(self.rng)
+            input, acc_reward_input, generation, parent_seed_id = pool.select(self.rng) # 接收 seed_id
             new_generation = generation + 1
             mutant = self.mutate_validate(input, **kwargs)
             acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
@@ -234,8 +237,8 @@ class Fuzzer():
                 if local_sensitivity:
                     sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                 else:
-                    sensitivity, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
-                pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle, generation=new_generation)
+                    sensitivity, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, seed_id=parent_seed_id, **kwargs)
+                pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle, generation=new_generation, seed_id=parent_seed_id) # 传入 parent_seed_id
 
             if self.logger is not None:
                 self.logger.log(
@@ -248,7 +251,8 @@ class Fuzzer():
                     Generation=new_generation,
                     test_exec_time=exec_time,
                     coverage_time=coverage_time,
-                    run_time=time.time()
+                    run_time=time.time(),
+                    seed_id=parent_seed_id # 传入 parent_seed_id
                 )
             
             num_iterations += 1
@@ -281,10 +285,10 @@ class Fuzzer():
         test_budget = kwargs.get('test_budget', None)
 
         pbar = tqdm.tqdm(total=n, desc="Initialization")
-        for state in initial_inputs:
-            sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, **kwargs)
+        for i, state in enumerate(initial_inputs): # Enumerate seed_id
+            sensitivity, acc_reward, oracle, state_sequence, exec_time = self.sentivity(state, policy=policy, generation=0, seed_id=i, **kwargs)
             self._save_observations(path, state, oracle, state_sequence, 0)
-            pool.add(state, acc_reward, 0, sensitivity, oracle, generation=0)
+            pool.add(state, acc_reward, 0, sensitivity, oracle, generation=0, seed_id=i) # Pass seed_id
 
             if self.logger is not None:
                 self.logger.log(
@@ -295,7 +299,8 @@ class Fuzzer():
                     sensitivity=sensitivity,
                     Generation=0,
                     test_exec_time=exec_time,
-                    run_time=time.time()
+                    run_time=time.time(),
+                    seed_id=i # Pass seed_id
                 )
             if oracle:
                 pool.add_crash(state)
@@ -328,7 +333,7 @@ class Fuzzer():
                 if num_iterations >= test_budget:
                     break
 
-            input, acc_reward_input, generation = pool.select(self.rng)
+            input, acc_reward_input, generation, parent_seed_id = pool.select(self.rng) # Receive seed_id
             new_generation = generation + 1
             mutant = self.mutate_validate(input, **kwargs)
             acc_reward_mutant, oracle, state_sequence, exec_time = self.mdp(mutant, policy)
@@ -344,8 +349,8 @@ class Fuzzer():
                 if local_sensitivity:
                     sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
                 else:
-                    sensitivity, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
-                pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle, generation=new_generation)
+                    sensitivity, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, seed_id=parent_seed_id, **kwargs)
+                pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle, generation=new_generation, seed_id=parent_seed_id) # Pass parent_seed_id
 
             if self.logger is not None:
                 self.logger.log(
@@ -357,7 +362,8 @@ class Fuzzer():
                     Generation=new_generation,
                     test_exec_time=exec_time,
                     run_time=current_time,
-                    crash_time=crash_time
+                    crash_time=crash_time,
+                    seed_id=parent_seed_id # Pass parent_seed_id
                 )
 
             num_iterations += 1
@@ -426,6 +432,9 @@ class Fuzzer():
                 self._save_observations(path, random_input, oracle, state_sequence, 0)
 
                 if self.logger is not None:
+                    # In Random Testing, each input is independent and technically a new 'seed'.
+                    # It doesn't descend from previous seeds.
+                    # We can pass None for seed_id.
                     self.logger.log(
                         input=random_input,
                         oracle=oracle,
@@ -434,7 +443,8 @@ class Fuzzer():
                         Generation=0,
                         test_exec_time=exec_time,
                         run_time=current_time,
-                        crash_time=crash_time
+                        crash_time=crash_time,
+                        seed_id=None # RT doesn't have lineage
                     )
                 pbar.update(1)
                 i += 1

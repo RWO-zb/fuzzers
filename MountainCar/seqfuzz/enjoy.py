@@ -161,7 +161,8 @@ def main():
     model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, **kwargs)
 
     # --- Initial Random State ---
-    np.random.seed(2021)
+    # [随机数修复] 已注释掉硬编码种子，确保 --seed 参数生效
+    # np.random.seed(2021) 
     states = np.array([np.random.uniform(-0.6, -0.4), 0.0])
     obs = env.reset()
     env.envs[0].unwrapped.state = states
@@ -206,7 +207,7 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 1500
+    seeds_num = 2000
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     
@@ -496,13 +497,14 @@ def main():
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
         
-        # --- 修改位置：添加 crash_time ---
+        # --- 修改位置：添加 crash_time 和 root_seed ---
         current_time_log = time.time()
         log_entry = {
             'state': copy.deepcopy(mutate_states),
             'generation': current_gen,
             'crashed': is_crash,
-            'crash_time': current_time_log - start_fuzz_time # [修改] 添加时间字段
+            'crash_time': current_time_log - start_fuzz_time, # [修改] 添加时间字段
+            'root_seed': copy.deepcopy(fuzzer.current_original) # [修改] 添加原始种子信息，方便后续绘图分析
         }
         mutation_log.append(log_entry)
         
@@ -527,6 +529,23 @@ def main():
     
     with open(os.path.join(result_path, 'all_run_seeds_0.pkl'), 'wb') as handle:
         pickle.dump(mutation_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # --- [新增] 统计导致 Crash 的不同初始种子数量 ---
+    unique_root_seeds = set()
+    for item in fuzzer.result:
+        # 检查 item 是否为字典且包含 root_seed (兼容修改后的 fuzz.py)
+        if isinstance(item, dict) and "root_seed" in item:
+            seed = item["root_seed"]
+            # 如果 seed 是 numpy 数组，转换为 tuple 以便放入 set (因为 numpy array 不可哈希)
+            if isinstance(seed, np.ndarray):
+                seed = tuple(seed.tolist())
+            elif isinstance(seed, list):
+                seed = tuple(seed)
+            unique_root_seeds.add(seed)
+    
+    print(f"Total Crashes Found: {len(fuzzer.result)}")
+    print(f"Unique Root Seeds Causing Crash: {len(unique_root_seeds)}")
+    # ------------------------------------------------
 
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")

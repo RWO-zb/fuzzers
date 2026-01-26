@@ -7,7 +7,8 @@ class fuzzing:
     def __init__(self):
         self.corpus = []
         self.rewards = []
-        self.result = []
+        # result 列表现在将存储字典，包含 'crash_state' 和 'root_seed'
+        self.result = [] 
         self.entropy = []
         self.coverage = []
         self.original = []
@@ -61,7 +62,14 @@ class fuzzing:
         return self.current_pose
 
     def add_crash(self, result_pose):
-        self.result.append(result_pose)
+        # [修改] 保存详细的 Crash 信息，包括溯源信息 (root_seed)
+        # 这样 crash_*.pkl 文件中也会包含种子溯源信息
+        crash_info = {
+            "crash_state": result_pose,      # 导致 Crash 的具体状态
+            "root_seed": self.current_original # 该状态所属的原始种子
+        }
+        self.result.append(crash_info)
+
         choose_index = self.current_index
         if self.current_index != None:
             self.corpus.pop(choose_index)
@@ -99,7 +107,7 @@ class fuzzing:
         delta_states = np.random.normal(0, 0.05, size=states.shape)
         mutate_states = states + delta_states
         mutate_states[0] = np.clip(mutate_states[0], -0.6, -0.4)
-        mutate_states[1] = np.clip(mutate_states[1], 0,0)
+        mutate_states[1] = np.clip(mutate_states[1], 0, 0)
             
         return mutate_states
 

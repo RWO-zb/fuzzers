@@ -436,7 +436,8 @@ def main():
     plot_subplot(ax3, carla_data, "CARLA")
     
     plt.tight_layout()
-    output_file = 'RQ1.png'
+    # 修改输出文件名为 PDF 格式
+    output_file = 'RQ1.pdf'
     try:
         # bbox_inches='tight' 确保右侧突出的文字不被切掉
         plt.savefig(output_file, dpi=300, bbox_inches='tight') 

@@ -314,7 +314,7 @@ def main():
     print(f"\n[Goal] Collecting RAW Transitions. Save Physics: {args.save_physics}")
     
     # --- Fuzzing Loop ---
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 and seedcount<5000:
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
         seedcount += 1
         selected_info = fuzzer.get_pose()
         states = selected_info['seed_state']

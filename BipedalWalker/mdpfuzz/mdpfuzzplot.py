@@ -10,11 +10,16 @@ import ast
 
 # --- 1. 配置 ---
 LOG_FILE = 'rt_10_0.01_0.01_1_logs.txt' 
+
+# [修改] 数据行数限制
+# 如果是 Random Fuzzer 或需要对齐评估预算，设为 330000；
+# 如果需要分析所有数据，请设为 None
+ROW_LIMIT = 330000 
+
 PLOT_1_FILE = 'rt_crashes_over_unique_inputs.png'
 PLOT_2_FILE = 'rt_full_input_space_tsne.png'
 PLOT_3_FILE = 'rt_crash_generation_histogram.png'
 PLOT_4_FILE = 'rt_crashes_over_time.png'
-# [新增] 图表文件定义
 PLOT_5_FILE = 'rt_behaviour_coverage_heatmap.png' 
 
 # --- 2. 核心辅助函数 ---
@@ -27,24 +32,30 @@ def load_and_prepare_data(file_path):
     try:
         print(f"正在从 {file_path} 加载原始日志数据...")
         
+        # 读取 CSV
         df = pd.read_csv(
             file_path, 
             delimiter=';', 
             on_bad_lines='skip', 
-            skipinitialspace=True 
+            skipinitialspace=True
         )
         
+        # [修改] 如果设置了行数限制，在此处截断数据
+        if ROW_LIMIT is not None:
+            print(f"   >>> 注意：已启用数据限制，仅保留前 {ROW_LIMIT} 条记录 <<<")
+            df = df.iloc[:ROW_LIMIT]
+
         if df['Oracle'].dtype == 'object':
             df['Oracle'] = df['Oracle'].map({'True': True, 'False': False, 'None': None})
         
         df['is_crash'] = (df['Oracle'] == True)
         
-        # [修改] 包含新增的列 BD_Distance 和 BD_MeanAngle
+        # 处理数值列
         for col in ['Sensitivity', 'Coverage', 'CoverageTime', 'RunTime', 'BD_Distance', 'BD_MeanAngle']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        print(f"原始日志加载完成，总共 {len(df)} 条记录。")
+        print(f"原始日志加载完成，当前处理记录数: {len(df)} 条。")
         return df
         
     except Exception as e:
@@ -54,6 +65,7 @@ def load_and_prepare_data(file_path):
 def deduplicate_log(original_data_df):
     if original_data_df is None: return None
     try:
+        # 基于 Input 去重
         unique_df = original_data_df.drop_duplicates(subset=['Input'], keep='first')
         unique_df = unique_df.reset_index(drop=True)
         return unique_df
@@ -62,12 +74,13 @@ def deduplicate_log(original_data_df):
     except Exception as e:
         return None
 
-# --- 3. 绘图函数 (保留原有的) ---
+# --- 3. 绘图函数 ---
 
 def plot_crashes_over_time(unique_log_df):
     if unique_log_df is None: return
     print("\n[图表 1] 正在生成 '独特崩溃 vs 独特输入' 图...")
     cumulative_crashes = unique_log_df['is_crash'].cumsum()
+    
     plt.figure(figsize=(12, 7))
     plt.plot(cumulative_crashes)
     plt.title('Total Unique Crashes Found Over Time')
@@ -122,11 +135,9 @@ def plot_crashes_over_wallclock_time(unique_log_df):
     plt.savefig(PLOT_4_FILE)
     plt.close()
 
-# --- [新增] 行为多样性分析函数 ---
-
 def calculate_behaviour_diversity(unique_log_df, grid_size=(50, 50)):
     """
-    [新增] 计算基于 2D 网格 (Distance, Hull Angle) 的行为多样性 (覆盖率)。
+    计算基于 2D 网格 (Distance, Hull Angle) 的行为多样性 (覆盖率)。
     """
     print(f"\n{'='*40}\n       Behaviour Diversity Analysis (QD-Fuzz)\n{'='*40}")
     
@@ -209,13 +220,21 @@ def main():
     unique_log_df = deduplicate_log(original_log_data_df)
     if unique_log_df is None: return
 
+    # [新增] 统计并打印独特崩溃数量
+    unique_crash_count = unique_log_df['is_crash'].sum()
+    print(f"\n{'='*35}")
+    print(f"独特崩溃数量 (Unique Crashes): {unique_crash_count}")
+    if ROW_LIMIT:
+        print(f"(基于前 {ROW_LIMIT} 条原始日志数据统计)")
+    print(f"{'='*35}\n")
+
     # 调用绘图函数
     plot_crashes_over_time(unique_log_df)
     #plot_crash_generation_histogram(unique_log_df)
     plot_crashes_over_wallclock_time(unique_log_df)
     
-    # [新增] 调用行为多样性分析
-   # calculate_behaviour_diversity(unique_log_df)
+    # 如果有 BD 数据，可以取消下面的注释
+    # calculate_behaviour_diversity(unique_log_df)
 
     end_time = time.time()
     print(f"\n--- 脚本执行完毕，总耗时: {end_time - start_time:.2f} 秒 ---")

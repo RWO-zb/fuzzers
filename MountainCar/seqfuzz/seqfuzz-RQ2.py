@@ -2,11 +2,12 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from collections import Counter
 
 # --- 配置 ---
 OBS_FILE = 'all_episodes_obs.txt'
 LOG_FILE = 'all_run_seeds_0.pkl'
-PLOT_FILE = 'SeqFuzz_RQ2_Diversity.png'
+PLOT_FILE = 'SeqFuzz_RQ2_Diversity_With_Seeds.png'
 
 # --- 绘图样式 ---
 plt.style.use('seaborn-v0_8-whitegrid')
@@ -68,16 +69,13 @@ class DiversityAnalyzer:
 
         # 确保 obs 和 logs 长度对齐
         min_len = min(len(self.obs_seqs), len(self.logs))
-        print(f"Processing {min_len} episodes...")
+        print(f"Processing {min_len} episodes for trends...")
         
         valid_ep_count = 0
 
         for i in range(min_len):
             sequence = self.obs_seqs[i]
             log_entry = self.logs[i]
-            
-            # enjoy.py 只记录 Fuzz 阶段数据，因此这里的每条数据都是 Fuzz 数据
-            # 无需像之前那样检查 parent_depth
             
             valid_ep_count += 1
             # 字段修正: did_crash -> crashed
@@ -149,33 +147,102 @@ def load_data():
     
     return obs_seqs, logs
 
-def plot_metrics(history, save_path):
+def plot_metrics(history, logs, save_path):
     if not history['episodes']: 
         print("No valid data to plot.")
         return
 
     episodes = history['episodes']
     
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    # --- 修改布局为 2x2 ---
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    axes = axes.flatten() # 展平为 [0, 1, 2, 3] 以便索引
     
-    metrics_config = [
-        {'key': 'state_coverage', 'title': 'State Coverage', 'ylabel': '# Unique State Bins', 'color': '#1f77b4', 'desc': 'Grid: Position × Velocity'},
-        {'key': 'behavior_diversity', 'title': 'Behavior Diversity', 'ylabel': '# Unique Behavior Bins', 'color': '#2ca02c', 'desc': 'Grid: MaxPos × AvgSpeed'},
-        {'key': 'fault_diversity', 'title': 'Fault Diversity', 'ylabel': '# Unique Fault Bins', 'color': '#d62728', 'desc': 'Grid: MaxPos × AvgSpeed (Crashes)'}
-    ]
+    # 1. State Coverage (Top-Left)
+    ax = axes[0]
+    data = history['state_coverage']
+    ax.plot(episodes, data, color='#1f77b4', linewidth=2.5)
+    ax.fill_between(episodes, data, color='#1f77b4', alpha=0.1)
+    ax.set_title('State Coverage', fontweight='bold', pad=10)
+    ax.set_xlabel('Fuzz Episodes')
+    ax.set_ylabel('# Unique State Bins')
+    ax.grid(True, linestyle='--', alpha=0.7)
 
-    for ax, config in zip(axes, metrics_config):
-        data = history[config['key']]
-        ax.plot(episodes, data, color=config['color'], linewidth=2.5, label='SeqFuzz')
-        ax.fill_between(episodes, data, color=config['color'], alpha=0.1)
-        ax.set_title(config['title'], fontweight='bold', pad=15)
-        ax.set_xlabel('Fuzz Episodes')
-        ax.set_ylabel(config['ylabel'])
-        ax.text(0.05, 0.95, config['desc'], transform=ax.transAxes, 
-                fontsize=10, verticalalignment='top', 
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        ax.set_ylim(bottom=0)
-        ax.grid(True, linestyle='--', alpha=0.7)
+    # 2. Behavior Diversity (Top-Right)
+    ax = axes[1]
+    data = history['behavior_diversity']
+    ax.plot(episodes, data, color='#2ca02c', linewidth=2.5)
+    ax.fill_between(episodes, data, color='#2ca02c', alpha=0.1)
+    ax.set_title('Behavior Diversity', fontweight='bold', pad=10)
+    ax.set_xlabel('Fuzz Episodes')
+    ax.set_ylabel('# Unique Behavior Bins')
+    ax.grid(True, linestyle='--', alpha=0.7)
+
+    # 3. Fault Diversity (Bottom-Left)
+    ax = axes[2]
+    data = history['fault_diversity']
+    ax.plot(episodes, data, color='#d62728', linewidth=2.5)
+    ax.fill_between(episodes, data, color='#d62728', alpha=0.1)
+    ax.set_title('Fault Diversity', fontweight='bold', pad=10)
+    ax.set_xlabel('Fuzz Episodes')
+    ax.set_ylabel('# Unique Fault Bins')
+    ax.grid(True, linestyle='--', alpha=0.7)
+
+    # 4. [新增] Crash Root Seed Distribution (Bottom-Right)
+    ax = axes[3]
+    
+    # 提取并处理种子数据
+    crash_seeds = []
+    for entry in logs:
+        if entry.get('crashed', False):
+            seed = entry.get('root_seed', None)
+            if seed is not None:
+                # 转换 numpy array/list 为 tuple 以便作为字典键
+                if isinstance(seed, (np.ndarray, list)):
+                    # 保留4位小数防止浮点误差
+                    seed_tuple = tuple(np.round(np.array(seed), 4))
+                    crash_seeds.append(seed_tuple)
+                else:
+                    crash_seeds.append(seed)
+    
+    if crash_seeds:
+        # 统计每个种子导致的 Crash 次数
+        seed_counts = Counter(crash_seeds)
+        # 按次数从高到低排序
+        sorted_seeds = sorted(seed_counts.items(), key=lambda x: x[1], reverse=True)
+        
+        # 准备绘图数据
+        labels = [f"Seed {i+1}" for i in range(len(sorted_seeds))]
+        counts = [count for _, count in sorted_seeds]
+        
+        # 绘制柱状图
+        bars = ax.bar(labels, counts, color='#9467bd', alpha=0.8, edgecolor='black')
+        
+        # 标题和标签
+        ax.set_title(f'Crashes per Root Seed (Total Unique: {len(sorted_seeds)})', fontweight='bold', pad=10)
+        ax.set_ylabel('# Crashes Generated')
+        ax.set_xlabel('Root Seeds (Sorted by Impact)')
+        
+        # 优化 X 轴标签显示
+        if len(labels) > 15:
+            # 如果柱子太多，隐藏具体的 x 轴标签，防止重叠
+            ax.set_xticks([])
+        else:
+            ax.set_xticklabels(labels, rotation=45, ha='right')
+            
+        # 在柱子上方显示数值（如果柱子不太密）
+        if len(labels) < 20:
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{int(height)}',
+                        ha='center', va='bottom', fontsize=9)
+    else:
+        ax.text(0.5, 0.5, 'No Crashes Found', 
+                ha='center', va='center', fontsize=12, color='gray')
+        ax.set_title('Root Seed Distribution')
+
+    ax.grid(True, axis='y', linestyle='--', alpha=0.7)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
@@ -187,7 +254,8 @@ def main():
     if logs:
         analyzer = DiversityAnalyzer(obs, logs, state_grid_size=(50, 50), behavior_grid_size=(50, 50))
         history = analyzer.calculate_trends()
-        plot_metrics(history, PLOT_FILE)
+        # 将 logs 传递给 plot_metrics 以便绘制柱状图
+        plot_metrics(history, logs, PLOT_FILE)
 
 if __name__ == "__main__":
     main()
