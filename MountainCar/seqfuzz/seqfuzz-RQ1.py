@@ -83,7 +83,7 @@ markers_x_h = np.arange(2, MAX_H + 0.1, 2)
 
 for label, config in data_sources.items():
     times = load_and_process_data(config["file"])
-    
+    print(f"[{label}] 发现的 Unique Crashes 数量: {len(times)}")
     if len(times) == 0:
         print(f"No valid crash data found for {label}")
         # 如果没有数据，画一条空线

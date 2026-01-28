@@ -13,14 +13,24 @@ from sklearn.metrics import f1_score
 from tapnet import Hyperparameter
 
 def load_tapnet_mode():
-    parser = argparse.ArgumentParser()
-    args = parser.parse_args()
+    # [修改] 移除 argparse，避免与 enjoy.py 的参数解析冲突
+    # parser = argparse.ArgumentParser()
+    # args = parser.parse_args()
 
-    args.seed = 42
-    np.random.seed(42)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
+    # [修改] 使用一个简单的类来模拟 args 对象，存储原有的默认配置参数
+    class Args:
+        pass
+    args = Args()
+
+    # [关键修改] 移除以下强制重置种子的代码
+    # 这些代码会覆盖 enjoy.py 中通过 --seed 设置的种子，导致结果无法随种子变化
+    # args.seed = 42
+    # np.random.seed(42)
+    # torch.manual_seed(args.seed)
+    # if torch.cuda.is_available():
+    #     torch.cuda.manual_seed(args.seed)
+    
+    # 保留原有的参数配置
     args.sparse = True
     args.layers = "500,300"
     args.layers = [int(l) for l in args.layers.split(",")]
