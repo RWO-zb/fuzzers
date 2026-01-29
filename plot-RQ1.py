@@ -14,29 +14,29 @@ try:
 except:
     plt.style.use('seaborn-whitegrid')
 
-# [修改重点] 重新增大字号，并配合紧凑画布
+# 保持大字体配置
 plt.rcParams.update({
     'font.family': 'serif',
-    'font.size': 22,             # [回调] 16 -> 22 (对抗 LaTeX 缩放)
-    'axes.labelsize': 24,        # [回调] 轴标签更大
+    'font.size': 22,             
+    'axes.labelsize': 24,        
     'axes.titlesize': 26,        
     'xtick.labelsize': 22,       
     'ytick.labelsize': 22,       
     'legend.fontsize': 20,       
-    'lines.linewidth': 3.0       # 线条加粗以匹配大字体
+    'lines.linewidth': 3.0       
 })
 
 COLORS = {
     'Random':      '#95a5a6',  
     'MDPFuzz':     '#e74c3c',  
-    'SeqDivFuzz':  '#2ecc71',  
+    'SeqDivFuzz':  '#2ecc71',  # Green
     'CureFuzz':    '#9b59b6', 
     'QDFuzz':      '#f39c12',  
     'G-Model':     '#3498db',  
 }
 
 MAX_H = 12.0
-VIEW_LIMIT_H = 13.5 # [修改]稍微加宽 X 轴视野，给右侧大字体标签留空间
+VIEW_LIMIT_H = 13.5 
 MARKERS_X_H = np.arange(2, MAX_H + 0.1, 2)
 
 # ==========================================
@@ -49,7 +49,7 @@ def load_pickle(filepath):
     except: return None
 
 # ==========================================
-# 3. 数据加载函数 (保持逻辑不变)
+# 3. 数据加载函数
 # ==========================================
 def get_mc_data(base_dir='mc'):
     data_map = {}
@@ -80,7 +80,6 @@ def get_mc_data(base_dir='mc'):
                         if 'Input' in crashes.columns: crashes = crashes.drop_duplicates(subset=['Input'])
                         times = np.sort(crashes['CrashTime'].dropna().values)
             except: pass
-        
         elif cfg['type'] == 'seqfuzz':
             data = load_pickle(path)
             if data:
@@ -97,7 +96,6 @@ def get_mc_data(base_dir='mc'):
                             t = e.get('crash_time')
                             if t: temp_t.append(t)
                 times = np.sort(temp_t)
-        
         elif cfg['type'] == 'curefuzz':
             data = load_pickle(path)
             if data:
@@ -113,7 +111,6 @@ def get_mc_data(base_dir='mc'):
                             t = e.get('crash_time') or e.get('elapsed_time')
                             if t: temp_t.append(t)
                 times = np.sort(temp_t)
-        
         elif cfg['type'] == 'qdfuzz' and os.path.exists(path):
             try:
                 df = pd.read_csv(path)
@@ -130,7 +127,6 @@ def get_mc_data(base_dir='mc'):
                     except: pass
                 times = np.sort(temp_t)
             except: pass
-        
         elif cfg['type'] == 'gmodel':
             data = load_pickle(path)
             if data:
@@ -144,7 +140,6 @@ def get_mc_data(base_dir='mc'):
                                 temp_t.append(e.get('timestamp', 0))
                         except: pass
                 times = np.sort(temp_t)
-        
         data_map[label] = times
     return data_map
 
@@ -226,6 +221,7 @@ def get_bw_data(base_dir='bw'):
                 seen, temp_t = set(), []
                 for e in data:
                     s = e.get('state')
+                    if s is None: s = e.get('mutate_state')
                     if s is None: continue
                     try: sb = s.tobytes()
                     except: continue
@@ -281,7 +277,7 @@ def get_bw_data(base_dir='bw'):
 # ==========================================
 # 6. 绘图核心函数
 # ==========================================
-def plot_subplot(ax, data_map):
+def plot_subplot(ax, data_map, extend_config=None):
     final_labels = []
     max_data_y = 0
     for label, times in data_map.items():
@@ -293,12 +289,28 @@ def plot_subplot(ax, data_map):
         else: times_h = np.array([])
         
         if len(times_h) > 0:
+            # 1. 绘制实线
             x_plot = np.concatenate(([0], times_h))
             y_plot = np.concatenate(([0], np.arange(1, len(times_h) + 1)))
             ax.step(x_plot, y_plot, where='post', label=label, color=color, alpha=0.9)
-            last_y_val = y_plot[-1]
-            max_data_y = max(max_data_y, last_y_val)
-            final_labels.append({'label': label, 'x': x_plot[-1], 'y': last_y_val, 'color': color})
+            
+            last_x = x_plot[-1]
+            last_y = y_plot[-1]
+            label_x = last_x
+
+            # 2. 虚线延长逻辑
+            if extend_config and label in extend_config:
+                ext_delta = extend_config[label]
+                new_x = min(last_x + ext_delta, VIEW_LIMIT_H) 
+                
+                # 绘制同色虚线
+                ax.plot([last_x, new_x], [last_y, last_y], 
+                        color=color, linestyle=':', linewidth=2.5, alpha=0.8)
+                label_x = new_x
+            
+            max_data_y = max(max_data_y, last_y)
+            final_labels.append({'label': label, 'x': label_x, 'y': last_y, 'color': color})
+            
             last_crash_time = times_h[-1]
         else: last_crash_time = 0
         
@@ -313,12 +325,11 @@ def plot_subplot(ax, data_map):
             ax.plot(valid_markers_x, valid_markers_y, linestyle='none', marker='^', 
                      color=color, markersize=10, markeredgecolor='white', markeredgewidth=1.5)
 
-    # --- 强化的防重叠逻辑 ---
+    # --- 标签排版 ---
     max_label_y = max_data_y
     if final_labels:
         final_labels.sort(key=lambda k: k['y'])
         
-        # [修改] 显著增加最小间距 (12% of range)，确保大字体不重叠
         range_y = max_data_y if max_data_y > 0 else 1.0
         min_dist = max(range_y * 0.12, 1.5) 
         
@@ -331,14 +342,11 @@ def plot_subplot(ax, data_map):
         
         for item in final_labels:
             ax.text(item['x'] + 0.2, item['y'], item['label'], 
-                    color=item['color'], fontsize=22, # [回调] 大字体
+                    color=item['color'], fontsize=22, 
                     verticalalignment='center', fontweight='bold')
 
-    # [修改] 顶部预留更多空间 (1.25倍)，防止最大号字体的标签被切
     top_limit = max(max_data_y, max_label_y) * 1.25
     ax.set_ylim(0, top_limit)
-    
-    # [修改] 稍微放宽 X 轴右侧视野，给最右侧的 "SeqDivFuzz" 等长标签留出位置
     ax.set_xlim(0, VIEW_LIMIT_H)
     ax.set_xticks(np.arange(0, 13, 2))
     ax.set_xlabel("Time (h)", fontsize=24)
@@ -348,26 +356,29 @@ def plot_subplot(ax, data_map):
 def main():
     print("Initializing plots...")
     
-    # [修改] 使用紧凑但不过小的画布 (7, 5.5)
-    # 结合 fontsize=22，这会让图片在 Overleaf 缩小后依然显得字很大
     single_figsize = (7, 5.5) 
 
+    # --- 1. Mountain Car ---
     print("--- Processing Mountain Car ---")
     mc_data = get_mc_data('mc')
     fig1, ax1 = plt.subplots(figsize=single_figsize)
-    plot_subplot(ax1, mc_data) 
+    # [修改的关键点] 这里将 SeqDivFuzz 的延长量增加到 5.5，CureFuzz 保持 3.5
+    plot_subplot(ax1, mc_data, extend_config={'CureFuzz': 3.5, 'SeqDivFuzz': 9.5}) 
     plt.tight_layout()
     fig1.savefig('RQ1_MountainCar.pdf', dpi=300, bbox_inches='tight')
     plt.close(fig1)
     
+    # --- 2. Bipedal Walker ---
     print("--- Processing BipedalWalker ---")
     bw_data = get_bw_data('bw')
     fig2, ax2 = plt.subplots(figsize=single_figsize)
-    plot_subplot(ax2, bw_data)
+    # [保持不变] BW 的 SeqDivFuzz 延长 3.5
+    plot_subplot(ax2, bw_data, extend_config={'SeqDivFuzz': 3.5})
     plt.tight_layout()
     fig2.savefig('RQ1_BipedalWalker.pdf', dpi=300, bbox_inches='tight')
     plt.close(fig2)
     
+    # --- 3. CARLA ---
     print("--- Processing CARLA ---")
     carla_data = get_carla_data('carla')
     fig3, ax3 = plt.subplots(figsize=single_figsize)
