@@ -51,7 +51,7 @@ Run the following commands to start training.Detailed procedures for data collec
 ```bash
 git clone https://github.com/CAgent05/DRLFailureMonitor.git
 cd DRLFailureMonitor
-python Todynet/src/train.py --dataset BipedalWalkerHCAC --nsteps 20 --epochs 100
+python Todynet/src/train.py --dataset BipedalWalkerHCAC --nsteps 25 --epochs 100
 ```
 
 ---
