@@ -3,13 +3,13 @@
 ---
 
 ## 📌 Project Overview
-This project provides a comprehensive evaluation of various reinforcement learning (RL) fuzzing methodologies across the following benchmark environments:
-* **MountainCar-v0**: A foundational classic control task for evaluating exploration efficiency.
-* **BipedalWalker-v3**: A complex robotic locomotion task characterized by continuous state and action spaces.
+This project provides a comprehensive evaluation of various reinforcement learning (RL) fuzzing approaches across the following benchmark environments:
+* **MountainCar**: A foundational classic control task for evaluating exploration efficiency.
+* **BipedalWalker**: A complex robotic locomotion task characterized by continuous state and action spaces.
 * **CARLA**: A high-fidelity, photorealistic autonomous driving simulator for safety-critical scenario testing.
 
 Detailed implementation and experimental configurations for each **Benchmark** across various environments can be found in the following sections:
-[ **MountainCar-v0** ](./MountainCar/) | [ **BipedalWalker-v3** ](./BipedalWalker/) | [ **CARLA** ](./Carla/)
+[ **MountainCar** ](./MountainCar/) | [ **BipedalWalker** ](./BipedalWalker/) | [ **CARLA** ](./Carla/)
 
 ---
 
@@ -22,9 +22,9 @@ The repository is organized as follows to facilitate ease of use for reviewers a
 ├── BipedalWalker/      # Data and scripts for BipedalWalker experiments
 ├── Carla/              # Data and scripts for CARLA experiments
 ├── MountainCar/        # Data and scripts for MountainCar experiments
-├── plot-RQ1.py         # Script for generating Crash Detection/Efficiency plots (RQ1)
-├── plot-RQ3.py         # Script for generating State Coverage/Diversity plots (RQ3)
-└──  plot-ven.py        # Venn diagram script for fault overlap analysis           
+├── plot-RQ1.py         # Script for generating Effectiveness plots (RQ1)
+├── plot-RQ3.py         # Script for generating Efficiency (RQ3)
+└──  plot-ven.py        # Venn diagram script for crash overlap analysis           
 ```
 
 ---
@@ -34,24 +34,26 @@ The repository is organized as follows to facilitate ease of use for reviewers a
 Follow these steps to reproduce the Research Question (RQ) analysis presented in our study:
 
 ### RQ1: Effectiveness
-To evaluate the crash detection Effectiveness of different approach:
-
 ```bash
 python plot-RQ1.py
 ```
-This script processes the collected test data and generates comparison plots for crash discovery rates.
-
 ### RQ2: Diversity
-To analyze the overlap of unique crashes found by each methodology:
 ```bash
 python plot-ven.py
 ```
-
 ### RQ3: Efficiency
-To evaluate the exploration ability in the state space:
 ```bash
 python plot-RQ3.py
 ```
+### RQ4: Usefulness
+The Safety monitoring task is borrowed from this awesome repository:**DRLFailureMonitor**: [https://github.com/CAgent05/DRLFailureMonitor](https://github.com/CAgent05/DRLFailureMonitor)
+Run the following commands to start training.Detailed procedures for data collection are documented in the BipedalWalker section.
+```bash
+git clone https://github.com/CAgent05/DRLFailureMonitor.git
+cd DRLFailureMonitor
+python Todynet/src/train.py --dataset BipedalWalkerHCAC --nsteps 20 --epochs 100
+```
+
 ---
 
 ## 📚 Reference
