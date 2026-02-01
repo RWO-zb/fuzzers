@@ -5,9 +5,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# ==========================================
-# 1. 样式配置
-# ==========================================
 try:
     plt.style.use('seaborn-v0_8-whitegrid')
 except:
@@ -24,20 +21,16 @@ plt.rcParams.update({
     'lines.linewidth': 2
 })
 
-# ==========================================
-# 2. 文件与颜色配置
-# ==========================================
 
 COLORS = {
-    'Random':   '#7f8c8d',  # 灰色
-    'MDPFuzz':  '#e74c3c',  # 红色
-    'SeqFuzz':  '#2ecc71',  # 绿色
-    'CureFuzz': '#9b59b6',  # 紫色
-    'QDFuzz':   '#f39c12',  # 橙色
-    'G-Model':  '#3498db',  # 蓝色
+    'Random':   '#7f8c8d',  
+    'MDPFuzz':  '#e74c3c',  
+    'SeqFuzz':  '#2ecc71',  
+    'CureFuzz': '#9b59b6',  
+    'QDFuzz':   '#f39c12',  
+    'G-Model':  '#3498db',  
 }
 
-# 方法配置
 CONFIG = [
     {
         'label': 'Random',
@@ -77,13 +70,11 @@ CONFIG = [
     }
 ]
 
-# 全局时间控制
-max_h = 12.0        # 数据截断时间
-view_limit_h = 12.5 # 视图显示时间
 
-# ==========================================
-# 3. 数据解析器
-# ==========================================
+max_h = 12.0        
+view_limit_h = 12.5 
+
+
 
 def parse_mdpfuzz_format(file_path):
     if not os.path.exists(file_path):
@@ -244,13 +235,10 @@ def parse_gmodel_format(file_path):
         print(f"Error parsing G-Model {file_path}: {e}")
         return np.array([])
 
-# ==========================================
-# 4. 绘图主逻辑 (已修改：移除人工延长曲线)
-# ==========================================
 
 plt.figure(figsize=(10, 6))
 
-markers_x_h = np.arange(2, max_h + 0.1, 2) # [2, 4, 6, 8, 10, 12]
+markers_x_h = np.arange(2, max_h + 0.1, 2)
 
 for cfg in CONFIG:
     label = cfg['label']
@@ -260,7 +248,6 @@ for cfg in CONFIG:
     
     print(f"Processing {label}...")
     
-    # 1. 获取原始时间数据 (秒)
     times = np.array([])
     if parser == 'mdpfuzz':
         times = parse_mdpfuzz_format(fpath)
@@ -276,12 +263,11 @@ for cfg in CONFIG:
     if len(times) == 0:
         times_h = np.array([])
     else:
-        # 2. 截断超过 12 小时的数据 (如果需要)
+
         limit_sec = max_h * 3600
         times = times[times <= limit_sec]
         times_h = times / 3600.0
 
-    # 3. 构建阶梯图数据
     if len(times_h) > 0:
         x_plot = np.concatenate(([0], times_h))
         y_plot = np.concatenate(([0], np.arange(1, len(times_h) + 1)))
@@ -289,15 +275,10 @@ for cfg in CONFIG:
         x_plot = np.array([0])
         y_plot = np.array([0])
     
-    # 【修改】：删除了 "4. 强制曲线在 12h 处结束" 的代码块
-    # 曲线现在会在最后一个数据点停止
-    
-    # 5. 绘制曲线
+   
     line, = plt.step(x_plot, y_plot, where='post', label=label, color=color)
     
-    # 6. 绘制三角形标记 (RQ1 逻辑)
-    # 【修改】：增加了判断，只有当标记时间 <= 曲线最大时间时才绘制标记
-    # 避免出现曲线在 7h 结束，但 8h, 10h, 12h 处悬浮着三角形的情况
+  
     
     actual_max_time = x_plot[-1] if len(x_plot) > 0 else 0
     
@@ -305,11 +286,9 @@ for cfg in CONFIG:
     marker_y_to_plot = []
     
     for mx in markers_x_h:
-        # 如果标记时间点超过了当前方法的实际运行结束时间，则不绘制该标记
         if mx > actual_max_time:
             continue
             
-        # 统计在 mx 小时之前的 crash 数量
         if len(times_h) > 0:
             count = np.searchsorted(times_h, mx, side='right')
         else:
@@ -322,7 +301,6 @@ for cfg in CONFIG:
         plt.plot(marker_x_to_plot, marker_y_to_plot, linestyle='none', marker='^', 
                  color=color, markersize=8, markeredgecolor='white', markeredgewidth=1)
 
-# 设置图表细节
 plt.xlim(0, view_limit_h)
 plt.xticks(np.arange(0, 13, 2))
 plt.xlabel("Time (h)")
@@ -333,5 +311,4 @@ plt.grid(True, linestyle='--', alpha=0.6)
 
 plt.tight_layout()
 plt.savefig('RQ1-Comparison_Fixed.png', dpi=300)
-# plt.show()
 print("Done. Saved to RQ1-Comparison_Fixed.png")

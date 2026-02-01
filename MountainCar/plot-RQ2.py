@@ -4,12 +4,9 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 
-# ================= 配置区域 =================
-# 输出文件名
+
 PLOT_FILE = 'Combined_RQ2_Diversity.png'
 
-# 各方法的数据文件路径 (根据提供的各个脚本中的路径整理)
-# 请确保这些文件存在于对应的目录中
 FILE_PATHS = {
     "CureFuzz": {
         "obs": "obs_sequences.pkl",
@@ -34,7 +31,6 @@ FILE_PATHS = {
     }
 }
 
-# 绘图样式配置
 plt.style.use('seaborn-v0_8-whitegrid')
 plt.rcParams.update({
     'font.family': 'serif',
@@ -47,8 +43,7 @@ plt.rcParams.update({
     'lines.linewidth': 2
 })
 
-# 颜色映射 (与 plot-RQ2.py 的顺序对应的默认颜色循环)
-# Order: CureFuzz, G-Model, MDPFuzz, QDFuzz, Random, SeqFuzz
+
 METHOD_COLORS = {
     "CureFuzz": "#1f77b4",  # Blue
     "G-Model":  "#ff7f0e",  # Orange
@@ -58,7 +53,6 @@ METHOD_COLORS = {
     "SeqFuzz":  "#8c564b"   # Brown
 }
 
-# MountainCar 物理参数范围
 RANGES = {
     'state_pos': (-1.2, 0.6),
     'state_vel': (-0.07, 0.07),
@@ -66,9 +60,8 @@ RANGES = {
     'bd_speed': (0.0, 0.05)
 }
 
-GRID_SIZE = (50, 50)  # 统一使用 50x50 网格
+GRID_SIZE = (50, 50)  
 
-# ================= 数据解析类 =================
 
 class DataParser:
     @staticmethod
@@ -81,7 +74,6 @@ class DataParser:
 
     @staticmethod
     def parse_seqfuzz(obs_path, log_path):
-        # SeqFuzz 逻辑: TXT obs + PKL logs
         obs_seqs = []
         if os.path.exists(obs_path):
             current_seq = []
@@ -112,7 +104,6 @@ class DataParser:
 
     @staticmethod
     def parse_gmodel(traj_path, log_path):
-        # G-Model 逻辑: PKL trajectories + PKL logs
         traj_seqs = DataParser.load_pickle(traj_path)
         logs = DataParser.load_pickle(log_path)
         
@@ -125,7 +116,6 @@ class DataParser:
 
     @staticmethod
     def parse_curefuzz(obs_path, log_path):
-        # CureFuzz 逻辑: PKL obs + PKL logs
         obs_seqs = DataParser.load_pickle(obs_path)
         logs = DataParser.load_pickle(log_path)
         
@@ -138,7 +128,6 @@ class DataParser:
 
     @staticmethod
     def parse_mdpfuzz_style(obs_path, skip_gen0=True):
-        # MDPFuzz & Random 逻辑: TXT with JSON info
         if not os.path.exists(obs_path):
             print(f"[Warn] File not found: {obs_path}")
             return []
@@ -184,10 +173,8 @@ class DataParser:
 
     @staticmethod
     def parse_qdfuzz(obs_path):
-        # QDFuzz 逻辑: 类似于 MDPFuzz，跳过 Gen 0
         return DataParser.parse_mdpfuzz_style(obs_path, skip_gen0=True)
 
-# ================= 核心分析类 =================
 
 class DiversityAnalyzer:
     def __init__(self):
@@ -206,7 +193,6 @@ class DiversityAnalyzer:
     def _calc_bd(self, sequence):
         seq_arr = np.array(sequence)
         if len(seq_arr) == 0: return -1.2, 0.0
-        # 处理可能的形状问题
         if seq_arr.ndim == 1: seq_arr = seq_arr.reshape(-1, 2)
         
         positions = seq_arr[:, 0]
@@ -259,23 +245,17 @@ class DiversityAnalyzer:
             
         return history
 
-# ================= [新增] 打印统计函数 =================
 def print_final_stats(all_histories):
-    """
-    打印每种方法的最终多样性统计计数 (取 history 列表的最后一个值)
-    """
+   
     print("\n" + "="*65)
     print(f"{'Method':<15} | {'State Cov':<12} | {'Behav Div':<12} | {'Fault Div':<12}")
     print("-" * 65)
     
-    # 对方法名进行排序，保证输出顺序稳定
     sorted_names = sorted(all_histories.keys())
     
     for name in sorted_names:
         history = all_histories[name]
         
-        # 你的 analyzer 返回的字典键名是: 'state_coverage', 'behavior_diversity', 'fault_diversity'
-        # 获取列表最后一个元素作为最终计数，如果列表为空则为0
         
         sc = history['state_coverage'][-1] if history['state_coverage'] else 0
         bd = history['behavior_diversity'][-1] if history['behavior_diversity'] else 0
@@ -285,7 +265,6 @@ def print_final_stats(all_histories):
     
     print("="*65 + "\n")
 
-# ================= 主程序 =================
 
 def main():
     analyzer = DiversityAnalyzer()
@@ -323,11 +302,8 @@ def main():
     data_seq = DataParser.parse_seqfuzz(FILE_PATHS['SeqFuzz']['obs'], FILE_PATHS['SeqFuzz']['log'])
     all_histories['SeqFuzz'] = analyzer.calculate_metrics(data_seq)
 
-    # ================= [新增] 打印统计表格 =================
+   
     print_final_stats(all_histories)
-    # ======================================================
-
-    # ================= 绘图 =================
     print("=== Plotting ===")
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
@@ -337,7 +313,6 @@ def main():
         {'key': 'fault_diversity', 'title': 'Fault Diversity', 'ylabel': '# Unique Faults'}
     ]
 
-    # 按照字母顺序或 plot-RQ2 的配置顺序遍历方法
     method_order = ['CureFuzz', 'G-Model', 'MDPFuzz', 'QDFuzz', 'Random', 'SeqFuzz']
 
     for i, m_config in enumerate(metrics):
@@ -359,7 +334,6 @@ def main():
         ax.set_ylabel(m_config['ylabel'])
         ax.grid(True, linestyle='--', alpha=0.6)
         
-        # 只在第一张图显示图例
         if i == 0:
             ax.legend(loc='upper left', frameon=True, framealpha=0.9)
 

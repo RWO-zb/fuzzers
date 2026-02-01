@@ -11,9 +11,6 @@ import queue
 import traceback
 from pathlib import Path
 
-# ==============================================================================
-# 路径配置
-# ==============================================================================
 current_script_path = os.path.dirname(os.path.abspath(__file__))
 workspace_root = os.path.dirname(current_script_path)
 
@@ -22,24 +19,16 @@ if current_script_path not in sys.path:
 if workspace_root not in sys.path:
     sys.path.insert(0, workspace_root)
 
-# ==============================================================================
-# [严格同步配置] 针对 run_fuzz_carl.py 的限制
-# ==============================================================================
 os.environ["SDL_VIDEODRIVER"] = "dummy" 
 
-# 1. 距离限制调整
 ROUTE_MIN_DIST = 40.0
 ROUTE_MAX_DIST = 70.0
 
-# 2. 步数限制同步
 VERIFY_MAX_STEPS = 200 
 
 SEARCH_MAX_ATTEMPTS = 50000
 AGENT_NAME = "carl_roach_0" 
 
-# ==============================================================================
-# 导入依赖
-# ==============================================================================
 try:
     from bird_view.utils import map_utils
     from PCLA.PCLA import PCLA, route_maker, location_to_waypoint
@@ -57,9 +46,6 @@ except ImportError as e:
     print(f"[ERROR] Missing dependency: {e}")
     sys.exit(1)
 
-# ==============================================================================
-# Headless Patch
-# ==============================================================================
 def patch_map_utils():
     @classmethod
     def patched_init(cls, client, world, carla_map, player):
@@ -80,9 +66,6 @@ def patch_map_utils():
     map_utils.Wrapper.init = patched_init
 patch_map_utils()
 
-# ==============================================================================
-# 几何逻辑
-# ==============================================================================
 def get_route_length(route):
     length = 0.0
     for i in range(len(route) - 1):
@@ -103,9 +86,6 @@ def check_geometry(route, length, task_type):
     elif task_type == 'navigation': return True 
     return False
 
-# ==============================================================================
-# 验证逻辑 (Strict Mode)
-# ==============================================================================
 def verify_route_execution(client, world, start_pose, end_pose, route_id):
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('vehicle.*')])
     client.apply_batch([carla.command.DestroyActor(x) for x in world.get_actors().filter('sensor.*')])
@@ -193,21 +173,16 @@ def cleanup(vehicle, sensor):
     try: map_utils.Wrapper.clear()
     except: pass
 
-# ==============================================================================
-# 主入口
-# ==============================================================================
 def main():
     argparser = argparse.ArgumentParser(description='Town01 Route Generator (Strict Mode)')
     argparser.add_argument('--host', default='127.0.0.1')
     argparser.add_argument('--port', type=int, default=2000)
     argparser.add_argument('--num_pairs', default=500, type=int)
     argparser.add_argument('--output_dir', default='town01_strict_routes')
-    # [修改点 1] 添加种子参数
     argparser.add_argument('--seed', default=2024, type=int, help='Random seed for reproducibility')
     
     args = argparser.parse_args()
     
-    # [修改点 1] 设置随机种子
     random.seed(args.seed)
     np.random.seed(args.seed)
 
@@ -220,10 +195,6 @@ def main():
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(60.0)
-
-    print(f"[{time.ctime()}] 启动 Town01 严格生成任务")
-    print(f"随机种子: {args.seed}")
-    print(f"限制条件: 步数<={VERIFY_MAX_STEPS}, 距离 {ROUTE_MIN_DIST}-{ROUTE_MAX_DIST}m")
 
     try:
         print(f"\nLoading {town}...")
@@ -243,13 +214,10 @@ def main():
             valid_pairs = []
             attempts = 0
             
-            # [修改点 2] 每次开始新任务类型前，先清理旧文件
             save_path = os.path.join(output_path, f"{task}_{town}.txt")
             if os.path.exists(save_path):
-                print(f"[INFO] 移除旧文件: {save_path}")
                 os.remove(save_path)
             
-            print(f"\n>>> 正在生成 [ {task} ] 任务...")
             
             while len(valid_pairs) < args.num_pairs and attempts < SEARCH_MAX_ATTEMPTS:
                 attempts += 1
@@ -273,7 +241,6 @@ def main():
                 length = get_route_length(route)
                 
                 if check_geometry(route, length, task):
-                    # 验证
                     print(f"   候选 ({length:.1f}m) -> 验证...", end="")
                     is_verified = verify_route_execution(
                         client, world, sp_start, sp_end, 
@@ -283,8 +250,6 @@ def main():
                     if is_verified:
                         print(" [PASS]")
                         valid_pairs.append((idx1, idx2))
-                        # 保持 append 模式，防止程序意外中断丢失所有数据
-                        # 因为前面已经 remove 过了，所以这里 append 是安全的
                         with open(save_path, 'a') as f:
                             f.write(f"{idx1} {idx2}\n")
                     else:

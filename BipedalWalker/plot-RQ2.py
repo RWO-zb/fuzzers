@@ -117,12 +117,10 @@ def load_data_standardized(method_name, config):
         if 'Oracle' in df.columns:
             df['Oracle'] = df['Oracle'].astype(str).map({'True': True, 'False': False, 'None': False}).fillna(False)
             
-            # 数值转换
         for col in ['BD_Distance', 'BD_MeanAngle']:
             if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
         df.dropna(subset=['BD_Distance', 'BD_MeanAngle'], inplace=True)
             
-            # 过滤 MDPFuzz 的 Generation 0 (保留 Random 的)
         if 'rt_' not in os.path.basename(path).lower():
             gen_col = next((c for c in df.columns if c.lower() == 'generation'), None)
             if gen_col: df = df[(df[gen_col] != 0) & (df[gen_col].notna())]
@@ -204,19 +202,16 @@ def compute_metrics(data, ranges):
     return results
 
 def print_final_stats(all_trends):
-    """
-    打印每种方法的最终多样性统计计数 (取trend列表的最后一个值)
-    """
+    
     print("\n" + "="*65)
     print(f"{'Method':<15} | {'State Cov':<12} | {'Behav Div':<12} | {'Fault Div':<12}")
     print("-" * 65)
     
-    # 对方法名进行排序，保证输出顺序稳定
+    
     sorted_names = sorted(all_trends.keys())
     
     for name in sorted_names:
         metrics = all_trends[name]
-        # 获取列表最后一个元素作为最终计数，如果列表为空则为0
         sc = metrics['sc'][-1] if metrics['sc'] else 0
         bd = metrics['bd'][-1] if metrics['bd'] else 0
         fd = metrics['fd'][-1] if metrics['fd'] else 0
@@ -237,7 +232,6 @@ def main():
         if data:
             all_trends[name] = compute_metrics(data, ranges)
     
-    # [NEW] 打印统计表格
     print_final_stats(all_trends)
             
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))

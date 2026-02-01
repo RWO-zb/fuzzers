@@ -1,5 +1,4 @@
 import matplotlib
-# 强制使用非交互式后端，防止 IDE/Server 环境下绘图冲突导致保存空白
 matplotlib.use('Agg') 
 
 import matplotlib.pyplot as plt
@@ -13,19 +12,15 @@ import ast
 import os
 import csv
 
-# ================= 配置区域 =================
-# 建议保持 PDF 格式，我们会通过代码修复渲染问题
 SAVE_BAR_NAME = 'RQ3_Combined_Comparison_Seconds.pdf'
 SAVE_BOX_NAME = 'RQ3_Generation_Boxplot.pdf'
-SAVE_BOX_NAME_PNG = 'RQ3_Generation_Boxplot_Preview.png' # 同时保存PNG方便快速查看
+SAVE_BOX_NAME_PNG = 'RQ3_Generation_Boxplot_Preview.png' 
+MAX_H = 12.0  
 
-MAX_H = 12.0  # 实验时长 12小时
 
-# G-Model 周期配置
 G_MODEL_ROUND_LEN = 100 
 G_MODEL_RANDOM_LEN = 50 
 
-# 请确保以下文件路径正确
 FILE_PATHS = {
     "CureFuzz": "selection_log.pkl",
     "G-Model":  "all_test_cases_log.pkl",
@@ -35,7 +30,6 @@ FILE_PATHS = {
     "SeqFuzz":  "all_run_seeds_0.pkl"
 }
 
-# ================= 绘图样式设置 =================
 plt.style.use('seaborn-v0_8-whitegrid')
 plt.rcParams.update({
     'font.family': 'serif',
@@ -46,12 +40,10 @@ plt.rcParams.update({
     'ytick.labelsize': 12,
     'legend.fontsize': 12,
     'lines.linewidth': 2,
-    # 保证 PDF 字体嵌入，方便后期编辑
     'pdf.fonttype': 42, 
     'ps.fonttype': 42
 })
 
-# ================= 数据处理函数 (逻辑保持不变) =================
 
 def load_curefuzz(filepath):
     if not os.path.exists(filepath): 
@@ -224,16 +216,13 @@ def load_seqfuzz(filepath):
         print(f"Error loading SeqFuzz: {e}")
         return 0, np.nan, []
 
-# ================= [核心美化] 绘图函数 =================
 
 def plot_generation_distribution(gen_data_map, color_map, save_path):
-    # 1. 验证数据
     valid_data = {k: v for k, v in gen_data_map.items() if v and len(v) > 0}
     if not valid_data:
         print("[Error] No valid data found for boxplot!")
         return
 
-    # 打印数据摘要
     print("\n--- Boxplot Data Summary ---")
     min_val, max_val = float('inf'), float('-inf')
     for k, v in valid_data.items():
@@ -247,31 +236,17 @@ def plot_generation_distribution(gen_data_map, color_map, save_path):
     data_values = list(valid_data.values())
     colors = [mcolors.to_hex(color_map.get(lbl, '#333333')) for lbl in labels]
 
-    # 创建 Figure
-    fig, ax = plt.subplots(figsize=(12, 7)) # 稍微加大画布
+    fig, ax = plt.subplots(figsize=(12, 7)) 
 
-    # 2. 绘制散点层 (底坑) -- Raincloud 风格
-    # 关键修改：先画散点，且 zorder=1，让它位于最底层
     for i, (method, values) in enumerate(valid_data.items()):
         y_pos = i + 1
-        # 添加垂直抖动
         y_jitter = np.random.normal(y_pos, 0.08, size=len(values))
         
-        # [美化] 
-        # alpha=0.3: 提高透明度，密集时变深，稀疏时可见
-        # edgecolor='none': 去掉白边，避免点太密时全是一片白
-        # zorder=1: 放在箱线图下面
-        # rasterized=True: 确保 PDF 不会过大且不空白
         ax.scatter(values, y_jitter, alpha=0.3, 
                    color=colors[i], 
                    s=12, marker='o', edgecolor='none', 
                    zorder=1, rasterized=True)
 
-    # 3. 绘制箱线图层 (顶层)
-    # [美化] 
-    # zorder=10: 放在散点上面
-    # showfliers=False: 不显示离群点（因为散点已经画了所有点，没必要重复）
-    # widths=0.5: 稍微调窄一点，让散点露出来更多
     box = ax.boxplot(data_values, vert=False, patch_artist=True,
                      labels=labels, showmeans=True,
                      widths=0.5, showfliers=False, zorder=10,
@@ -281,37 +256,29 @@ def plot_generation_distribution(gen_data_map, color_map, save_path):
                      whiskerprops={"linewidth": 1.2, "zorder":10},
                      capprops={"linewidth": 1.2, "zorder":10})
 
-    # 给箱体上色
     for patch, color in zip(box['boxes'], colors):
         patch.set_facecolor(color)
-        patch.set_alpha(0.8) # 提高不透明度，遮住后面的散点，突出箱体
-        # 强制箱体本身栅格化，防止部分 PDF 阅读器渲染透明度 bug
+        patch.set_alpha(0.8) 
         patch.set_rasterized(True) 
 
-    # 4. 坐标轴与装饰
     ax.set_title('Distribution of Unique Crashes by Generation (Generative Phase Only)', fontsize=16, fontweight='bold', pad=15)
     ax.set_xlabel('Generation / Round Index (Log Scale)', fontsize=14)
     
-    # 使用 Log 坐标轴
     ax.set_xscale('log')
     
-    # 设置 X 轴显示范围 (留出余量)
     if min_val > 0:
         ax.set_xlim(left=max(0.8, min_val * 0.7), right=max_val * 2.0)
     
-    # 格式化刻度
     ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
-    ax.grid(True, which="both", ls="--", alpha=0.3, zorder=0) # 网格放在最底层
+    ax.grid(True, which="both", ls="--", alpha=0.3, zorder=0) 
 
     plt.tight_layout()
     
-    # 保存文件
+   
     try:
-        # 保存 PDF (论文用)
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"[Success] Boxplot PDF saved to {save_path}")
         
-        # 保存 PNG (预览用)
         if SAVE_BOX_NAME_PNG:
             fig.savefig(SAVE_BOX_NAME_PNG, dpi=300, bbox_inches='tight')
             print(f"[Success] Boxplot PNG saved to {SAVE_BOX_NAME_PNG}")
@@ -320,8 +287,6 @@ def plot_generation_distribution(gen_data_map, color_map, save_path):
         print(f"[Error] Failed to save boxplot: {e}")
     finally:
         plt.close(fig)
-
-# ================= 主程序 =================
 
 def main():
     methods_order = ["CureFuzz", "G-Model", "MDPFuzz", "QDFuzz", "Random", "SeqFuzz"]
@@ -361,15 +326,12 @@ def main():
         if len(g_list) > 0 and label != "Random":
             boxplot_data[label] = g_list
 
-    # --- 颜色准备 ---
     tab10 = plt.cm.tab10(np.arange(len(methods_order)))
     color_map = {label: color for label, color in zip(methods_order, tab10)}
 
-    # --- 绘图 1: 柱状图 ---
     print("\nGenerating Bar Charts...")
     fig1, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-    # Bar 1
     ax1 = axes[0]
     bars1 = ax1.bar(metrics["labels"], metrics["time_per_crash"], 
                     color=tab10, alpha=0.8, edgecolor='black', width=0.6)
@@ -382,8 +344,7 @@ def main():
         label_text = f'{height:.1f} s' if height > 0 else 'N/A'
         ax1.text(bar.get_x() + bar.get_width()/2., height, label_text,
                  ha='center', va='bottom', fontsize=10, fontweight='bold')
-
-    # Bar 2
+        
     ax2 = axes[1]
     valid_indices = [i for i, x in enumerate(metrics["gen_avg_depth"]) if not np.isnan(x)]
     valid_labels = [metrics["labels"][i] for i in valid_indices]
@@ -411,7 +372,6 @@ def main():
     plt.close(fig1) 
     print(f"Bar charts saved to {SAVE_BAR_NAME}")
 
-    # --- 绘图 2: 箱线图 (美化版) ---
     print("\nGenerating Beautified Boxplot...")
     plot_generation_distribution(boxplot_data, color_map, SAVE_BOX_NAME)
     
