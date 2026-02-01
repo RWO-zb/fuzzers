@@ -22,7 +22,7 @@ The repository is organized as follows to facilitate ease of use for reviewers a
 ├── BipedalWalker/      # Data and scripts for BipedalWalker experiments
 ├── Carla/              # Data and scripts for CARLA experiments
 ├── MountainCar/        # Data and scripts for MountainCar experiments
-├── plot-RQ1.py         # Script for generating Fault Detection/Efficiency plots (RQ1)
+├── plot-RQ1.py         # Script for generating Crash Detection/Efficiency plots (RQ1)
 ├── plot-RQ3.py         # Script for generating State Coverage/Diversity plots (RQ3)
 └──  plot-ven.py        # Venn diagram script for fault overlap analysis           
 ```
@@ -33,21 +33,21 @@ The repository is organized as follows to facilitate ease of use for reviewers a
 
 Follow these steps to reproduce the Research Question (RQ) analysis presented in our study:
 
-### RQ1: Effectiveness and Efficiency
-To evaluate the fault detection capability of different fuzzers (CureFuzz, G-Model, MDPFuzz, QDFuzz, SeqFuzz, and Random):
+### RQ1: Effectiveness
+To evaluate the crash detection Effectiveness of different approach:
 
 ```bash
 python plot-RQ1.py
 ```
-This script processes the collected test data and generates comparison plots for cumulative rewards and fault discovery rates.
+This script processes the collected test data and generates comparison plots for crash discovery rates.
 
-### RQ2: Fault Diversity
-To analyze the overlap of unique faults found by each methodology:
+### RQ2: Diversity
+To analyze the overlap of unique crashes found by each methodology:
 ```bash
 python plot-ven.py
 ```
 
-### RQ3: State Coverage
+### RQ3: Efficiency
 To evaluate the exploration ability in the state space:
 ```bash
 python plot-RQ3.py

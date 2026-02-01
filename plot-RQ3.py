@@ -268,7 +268,6 @@ def plot_save_single(data_map, filename):
     print(f"[Success] Saved {filename}")
 
 def main():
-    # 保持大字号配置
     plt.rcParams.update({
         'font.family': 'serif', 
         'font.serif': ['Times New Roman', 'DejaVu Serif', 'serif'], 
