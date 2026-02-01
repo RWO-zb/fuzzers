@@ -19,10 +19,7 @@ pip install -e .
 ```
 
 ----
-### Data collection
-add `--save-transitions` to collect fine-tuning data 
-add `--save-data` ro collect safety monitoring data 
-----
+
 ### Fuzz testing:
 
 Run `python enjoy_cure.py  --guide --no-render --seed 0 ` to start fuzz testing.
