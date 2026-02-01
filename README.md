@@ -29,7 +29,7 @@ The repository is organized as follows to facilitate ease of use for reviewers a
 
 ---
 
-## 📊 Replication Guide (Experimental Workflow)
+## 📊 Replication Guide 
 
 Follow these steps to reproduce the Research Question (RQ) analysis presented in our study:
 
