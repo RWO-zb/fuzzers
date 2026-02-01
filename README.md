@@ -16,10 +16,14 @@ Detailed implementation and experimental configurations for each **Benchmark** a
 Our repository is built upon or integrates the following open-source projects and research:
 
 * **MDPFuzz-old**: [https://github.com/Qi-Pang/MDPFuzz](https://github.com/Qi-Pang/MDPFuzz)
+* **MDPFuzz-new**: [https://github.com/QuentinMaz/MDPFuzz_Replicability_Study_Artifact](https://github.com/QuentinMaz/MDPFuzz_Replicability_Study_Artifact)
+* **QDfuzz**: [https://github.com/QuentinMaz/QD_Based_Testing_RL](https://github.com/QuentinMaz/QD_Based_Testing_RL)
 * **CureFuzz**: [https://github.com/soarsmu/CureFuzz](https://github.com/soarsmu/CureFuzz)
 * **G-model**: [https://github.com/lizhuo-1994/mdp_testing](https://github.com/lizhuo-1994/mdp_testing)
+* **SeqDivFuzz**: [https://github.com/AIRKEYL/SeqDivFuzz](https://github.com/AIRKEYL/SeqDivFuzz)
+* **DRLFailureMonitor**: [https://github.com/CAgent05/DRLFailureMonitor](https://github.com/CAgent05/DRLFailureMonitor)
 * **CARLA Simulator**: [https://github.com/carla-simulator/carla](https://github.com/carla-simulator/carla)
 * **RL Baselines3 Zoo**: [https://github.com/DLR-RM/rl-baselines3-zoo](https://github.com/DLR-RM/rl-baselines3-zoo)
-* **PCLA**: [https://github.com/valeoai/LearningByCheating](https://github.com/valeoai/LearningByCheating)
+* **PCLA**: [https://github.com/MasoudJTehrani/PCLA](https://github.com/MasoudJTehrani/PCLA)
 * **Stable Baselines3 Agents**: [https://github.com/DLR-RM/rl-trained-agents](https://github.com/DLR-RM/rl-trained-agents)
-* **OpenAI MADDG**: [https://github.com/openai/maddpg](https://github.com/openai/maddpg)
+* 
