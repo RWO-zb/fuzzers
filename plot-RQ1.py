@@ -6,15 +6,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# ==========================================
-# 1. 全局样式与颜色配置
-# ==========================================
 try:
     plt.style.use('seaborn-v0_8-whitegrid')
 except:
     plt.style.use('seaborn-whitegrid')
 
-# 保持大字体配置
 plt.rcParams.update({
     'font.family': 'serif',
     'font.size': 22,             
@@ -29,7 +25,7 @@ plt.rcParams.update({
 COLORS = {
     'Random':      '#95a5a6',  
     'MDPFuzz':     '#e74c3c',  
-    'SeqDivFuzz':  '#2ecc71',  # Green
+    'SeqDivFuzz':  '#2ecc71',  
     'CureFuzz':    '#9b59b6', 
     'QDFuzz':      '#f39c12',  
     'G-Model':     '#3498db',  
@@ -39,18 +35,12 @@ MAX_H = 12.0
 VIEW_LIMIT_H = 13.5 
 MARKERS_X_H = np.arange(2, MAX_H + 0.1, 2)
 
-# ==========================================
-# 2. 通用解析工具函数
-# ==========================================
 def load_pickle(filepath):
     if not os.path.exists(filepath): return None
     try:
         with open(filepath, 'rb') as f: return pickle.load(f)
     except: return None
 
-# ==========================================
-# 3. 数据加载函数
-# ==========================================
 def get_mc_data(base_dir='mc'):
     data_map = {}
     configs = [
@@ -274,9 +264,6 @@ def get_bw_data(base_dir='bw'):
         data_map[label] = times
     return data_map
 
-# ==========================================
-# 6. 绘图核心函数
-# ==========================================
 def plot_subplot(ax, data_map, extend_config=None):
     final_labels = []
     max_data_y = 0
@@ -289,7 +276,6 @@ def plot_subplot(ax, data_map, extend_config=None):
         else: times_h = np.array([])
         
         if len(times_h) > 0:
-            # 1. 绘制实线
             x_plot = np.concatenate(([0], times_h))
             y_plot = np.concatenate(([0], np.arange(1, len(times_h) + 1)))
             ax.step(x_plot, y_plot, where='post', label=label, color=color, alpha=0.9)
@@ -298,12 +284,10 @@ def plot_subplot(ax, data_map, extend_config=None):
             last_y = y_plot[-1]
             label_x = last_x
 
-            # 2. 虚线延长逻辑
             if extend_config and label in extend_config:
                 ext_delta = extend_config[label]
                 new_x = min(last_x + ext_delta, VIEW_LIMIT_H) 
                 
-                # 绘制同色虚线
                 ax.plot([last_x, new_x], [last_y, last_y], 
                         color=color, linestyle=':', linewidth=2.5, alpha=0.8)
                 label_x = new_x
@@ -325,7 +309,6 @@ def plot_subplot(ax, data_map, extend_config=None):
             ax.plot(valid_markers_x, valid_markers_y, linestyle='none', marker='^', 
                      color=color, markersize=10, markeredgecolor='white', markeredgewidth=1.5)
 
-    # --- 标签排版 ---
     max_label_y = max_data_y
     if final_labels:
         final_labels.sort(key=lambda k: k['y'])
@@ -358,27 +341,22 @@ def main():
     
     single_figsize = (7, 5.5) 
 
-    # --- 1. Mountain Car ---
     print("--- Processing Mountain Car ---")
     mc_data = get_mc_data('mc')
     fig1, ax1 = plt.subplots(figsize=single_figsize)
-    # [修改的关键点] 这里将 SeqDivFuzz 的延长量增加到 5.5，CureFuzz 保持 3.5
     plot_subplot(ax1, mc_data, extend_config={'CureFuzz': 3.5, 'SeqDivFuzz': 9.5}) 
     plt.tight_layout()
     fig1.savefig('RQ1_MountainCar.pdf', dpi=300, bbox_inches='tight')
     plt.close(fig1)
     
-    # --- 2. Bipedal Walker ---
     print("--- Processing BipedalWalker ---")
     bw_data = get_bw_data('bw')
     fig2, ax2 = plt.subplots(figsize=single_figsize)
-    # [保持不变] BW 的 SeqDivFuzz 延长 3.5
     plot_subplot(ax2, bw_data, extend_config={'SeqDivFuzz': 3.5})
     plt.tight_layout()
     fig2.savefig('RQ1_BipedalWalker.pdf', dpi=300, bbox_inches='tight')
     plt.close(fig2)
     
-    # --- 3. CARLA ---
     print("--- Processing CARLA ---")
     carla_data = get_carla_data('carla')
     fig3, ax3 = plt.subplots(figsize=single_figsize)

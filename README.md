@@ -26,6 +26,34 @@ The repository is organized as follows to facilitate ease of use for reviewers a
 ├── plot-RQ3.py         # Script for generating State Coverage/Diversity plots (RQ3)
 └──  plot-ven.py        # Venn diagram script for fault overlap analysis           
 ```
+
+---
+
+## 📊 Replication Guide (Experimental Workflow)
+
+Follow these steps to reproduce the Research Question (RQ) analysis presented in our study:
+
+### RQ1: Effectiveness and Efficiency
+To evaluate the fault detection capability of different fuzzers (CureFuzz, G-Model, MDPFuzz, QDFuzz, SeqFuzz, and Random):
+
+```bash
+python plot-RQ1.py
+```
+This script processes the collected test data and generates comparison plots for cumulative rewards and fault discovery rates.
+
+### RQ2: Fault Diversity
+To analyze the overlap of unique faults found by each methodology:
+```bash
+python plot-ven.py
+```
+
+### RQ3: State Coverage
+To evaluate the exploration ability in the state space:
+```bash
+python plot-RQ3.py
+```
+---
+
 ## 📚 Reference
 
 Our repository is built upon or integrates the following open-source projects and research:

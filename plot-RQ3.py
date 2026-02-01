@@ -9,7 +9,7 @@ import os
 import csv
 import math
 
-# ================= 配置区域 =================
+
 MAX_H = 12.0  
 COLOR_MAP = {
     "CureFuzz":   "#1f77b4", "G-Model":    "#ff7f0e", "MDPFuzz":    "#2ca02c",
@@ -17,7 +17,6 @@ COLOR_MAP = {
 }
 METHODS_ORDER = ["MDPFuzz", "CureFuzz", "G-Model", "SeqDivFuzz", "QDFuzz"]
 
-# ================= 通用加载工具函数 =================
 def safe_load_pickle(filepath):
     if not os.path.exists(filepath): return []
     try:
@@ -29,7 +28,6 @@ def safe_load_csv(filepath, delimiter=','):
     try: return pd.read_csv(filepath, delimiter=delimiter, on_bad_lines='skip', skipinitialspace=True)
     except: return pd.DataFrame()
 
-# ================= 数据处理函数 (保持原逻辑) =================
 def get_mc_data(base_dir='mc'):
     print(f"--- Loading MC Data from {base_dir} ---")
     data_map = {}
@@ -218,12 +216,9 @@ def get_carla_data(base_dir='carla'):
                 if g_list: data_map[label] = g_list
     return data_map
 
-# ================= 核心绘图函数 =================
 def plot_save_single(data_map, filename):
     valid_keys = [m for m in METHODS_ORDER if m in data_map and len(data_map[m]) > 0 and m != "Random"]
     valid_keys.reverse() 
-    
-    # [修改的关键点] 画布变小：从 (10, 6) -> (6.5, 4.0)
     fig, ax = plt.subplots(figsize=(6.5, 4.0))
     
     if not valid_keys:
@@ -257,7 +252,6 @@ def plot_save_single(data_map, filename):
     ax.set_xscale('symlog', linthresh=1) 
     ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
     
-    # 保持20pt大字号
     ax.tick_params(axis='x', labelsize=20) 
     ax.tick_params(axis='y', labelsize=20) 
 
