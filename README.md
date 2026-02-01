@@ -25,7 +25,7 @@ The repository is organized as follows to facilitate ease of use for reviewers a
 ├── plot-RQ1.py         # Script for generating Fault Detection/Efficiency plots (RQ1)
 ├── plot-RQ3.py         # Script for generating State Coverage/Diversity plots (RQ3)
 └──  plot-ven.py        # Venn diagram script for fault overlap analysis           
-
+```
 ## 📚 Reference
 
 Our repository is built upon or integrates the following open-source projects and research:
