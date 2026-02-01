@@ -9,7 +9,7 @@ This project provides a comprehensive evaluation of various reinforcement learni
 * **CARLA**: A high-fidelity, photorealistic autonomous driving simulator for safety-critical scenario testing.
 
 Detailed implementation and experimental configurations for each **Benchmark** across various environments can be found in the following sections:
-[ **MountainCar-v0** ](#MountainCar) | [ **BipedalWalker-v3** ](#BipedalWalker) | [ **CARLA** ](#Carla)
+[ **MountainCar-v0** ](./MountainCar/) | [ **BipedalWalker-v3** ](./BipedalWalker/) | [ **CARLA** ](./Carla/)
 
 ---
 
