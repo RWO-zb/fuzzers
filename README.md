@@ -47,7 +47,7 @@ python plot-RQ3.py
 ```
 ### RQ4: Usefulness
 The Safety monitoring task is borrowed from this awesome repository:**DRLFailureMonitor**: [https://github.com/CAgent05/DRLFailureMonitor](https://github.com/CAgent05/DRLFailureMonitor)
-Run the following commands to start training.Detailed procedures for data collection are documented in the BipedalWalker section.
+Run the following commands to start training.Detailed procedures for data collection are documented in the [ **BipedalWalker** ](./BipedalWalker/) section.
 ```bash
 git clone https://github.com/CAgent05/DRLFailureMonitor.git
 cd DRLFailureMonitor
