@@ -19,7 +19,6 @@ from utils.exp_manager import ExperimentManager
 from utils.utils import StoreDict
 from fuzz.cure_fuzz import CureFuzz
 
-# [Helper] 提取物理状态 (用于 Box2D 物理重放)
 def extract_physics_state(real_env):
     if not hasattr(real_env, 'hull') or not hasattr(real_env, 'legs'):
         return None
@@ -42,7 +41,6 @@ def extract_physics_state(real_env):
         state_dict["legs"].append(leg_data)
     return state_dict
 
-# [Helper] TodyNet 处理
 def process_episode_data(sequence, label, window_size):
     seq_len = len(sequence)
     if seq_len < window_size:
@@ -64,7 +62,6 @@ def process_episode_data(sequence, label, window_size):
         labels.append(1)
     return np.array(windows), np.array(labels)
 
-# [Helper] TodyNet 平衡与保存
 def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size, target_total=3000, target_crash_ratio=0.30):
     if not X_list: return
     print(f"\n[TodyNet Data] Balancing to {target_total} samples...")
@@ -98,7 +95,6 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     torch.save(y_tensor[indices[split:]], os.path.join(save_path, 'y_valid.pt'))
     print(f"[TodyNet Data] Saved {total} samples to {save_path}")
 
-# [Helper] 获取底层环境 (用于物理属性)
 def get_real_unwrapped_env(env):
     current_env = env
     while hasattr(current_env, 'venv'):
@@ -107,29 +103,19 @@ def get_real_unwrapped_env(env):
         return current_env.envs[0].unwrapped
     return current_env.unwrapped
 
-# [CRITICAL HELPER] 获取反归一化的原始 Observation
 def get_raw_obs_from_env(env, obs):
-    """
-    如果环境使用了 VecNormalize，将 obs 反归一化为原始物理数值。
-    """
-    # 1. 找到 VecNormalize 对象
     norm_env = env
-    # 处理嵌套情况 (DummyVecEnv -> VecNormalize)
     if hasattr(norm_env, 'venv') and isinstance(norm_env.venv, VecNormalize):
         norm_env = norm_env.venv
-    # 处理直接是 VecNormalize 的情况
     elif isinstance(norm_env, VecNormalize):
         pass
     else:
-        # 没有归一化，直接返回
         return obs
 
-    # 2. 调用 unnormalize_obs
     return norm_env.unnormalize_obs(obs)
 
 def main():
     parser = argparse.ArgumentParser()
-    # ... (保持原有的参数定义不变)
     parser.add_argument("--env", help="environment ID", type=str, default="BipedalWalkerHardcore-v3")
     parser.add_argument("-f", "--folder", help="Log folder", type=str, default="../rl-trained-agents")
     parser.add_argument("--algo", help="RL Algorithm", default="tqc", type=str, required=False, choices=list(ALGOS.keys()))
@@ -159,7 +145,6 @@ def main():
     parser.add_argument("--dataset-name", type=str, default="BipedalWalkerHC", help="Dataset name prefix")
     args = parser.parse_args()
     
-    # ... (日志和路径设置代码保持不变) ...
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
     result_path = './results/' + result_folder + '/'
@@ -217,7 +202,6 @@ def main():
     stats_path = os.path.join(log_path, env_id)
     hyperparams, stats_path = get_saved_hyperparams(stats_path, norm_reward=args.norm_reward, test_mode=True)
 
-    # ... (环境加载代码保持不变) ...
     env_kwargs = {}
     args_path = os.path.join(log_path, env_id, "args.yml")
     if os.path.isfile(args_path):
@@ -272,11 +256,8 @@ def main():
     pbar = tqdm.tqdm(total=seeds_num)
     start_corpus_time = time.time()
     i = 0
-    
-    # --- Corpus Generation ---
-    # (这部分通常作为热身，不需要保存 transition，略过修改)
+      
     while i < seeds_num and (time.time() - start_corpus_time) <= (3600*2):
-        # ... (保持原有的 Corpus 生成代码不变) ...
         states = np.random.randint(low=1, high=4, size=15)
         state = None
         episode_reward = 0.0
@@ -313,7 +294,6 @@ def main():
     
     print(f"\n[Goal] Collecting RAW Transitions. Save Physics: {args.save_physics}")
     
-    # --- Fuzzing Loop ---
     while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
         seedcount += 1
         selected_info = fuzzer.get_pose()
@@ -342,24 +322,16 @@ def main():
                 if init_phys: current_episode_physics.append(init_phys)
 
         for _ in range(args.n_timesteps):
-            # [Fix 1] 获取当前步的 RAW Observation
-            # obs 已经是 Normalized 的了，我们需要反推或者直接用 get_raw (如果 unnormalize 可用)
-            # 注意：SB3 VecNormalize 通常在 step 返回时就归一化了。我们需要用 get_raw_obs_from_env 还原。
             raw_current_obs = get_raw_obs_from_env(env, obs[0].copy())
             
-            # 预测动作 (使用 Normalized obs)
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             current_action = action[0]
             
-            # TodyNet 序列使用 Normalized 数据 (这没问题，TodyNet通常基于模型视角)
             vec_28d = np.concatenate((obs[0], current_action))
             todynet_sequences.append(vec_28d)
 
-            # 执行环境交互
-            # next_obs 是 Normalized 的
             next_obs, reward, done, _ = env.step(action)
             
-            # [Fix 2] 获取下一步的 RAW Observation
             raw_next_obs = get_raw_obs_from_env(env, next_obs[0].copy())
             
             if args.save_physics:
@@ -369,8 +341,6 @@ def main():
                     if phys_snapshot: current_episode_physics.append(phys_snapshot)
             
             if args.save_transitions:
-                # [Fix 3] 保存 RAW data!
-                # 格式: (Raw Obs, Action, Reward, Raw Next Obs, Done)
                 current_ep_transitions.append((raw_current_obs, current_action, reward[0], raw_next_obs, done[0]))
             
             real_env_stats = get_real_unwrapped_env(env)
@@ -380,10 +350,9 @@ def main():
             total_abs_angle_sum += abs(raw_angle)
             episode_steps += 1
             
-            rnd_sequences.append(next_obs[0]) # RND 使用 Normalized obs
+            rnd_sequences.append(next_obs[0]) 
             episode_reward += reward[0]
             
-            # 更新 obs
             obs = next_obs
             
             if done:
@@ -428,7 +397,6 @@ def main():
                 s_len = len(success_transitions)
                 print(f"Seeds: {seedcount} | Crash Samples: {c_len} | Physics Trajs: {len(all_crash_physics_trajectories)}")
 
-        # TodyNet 保存逻辑 (保持不变)
         if args.save_data:
             label = 1 if did_crash else 0
             collect_this = False
@@ -457,12 +425,11 @@ def main():
         })
         current_time = time.time()
 
-    # --- 保存结果 ---
     if args.save_transitions:
         save_data = {
             "crash": crash_transitions,
             "success": success_transitions,
-            "is_raw": True # 标记这是 Raw Data
+            "is_raw": True 
         }
         trans_file = os.path.join(result_path, 'transitions.pkl')
         print(f"Saving labeled RAW transitions to {trans_file}...")

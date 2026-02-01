@@ -4,7 +4,7 @@ The RL model we evaluate is borrowed from these awesome repositories: https://gi
 
 ----
 
-#### Setting up environment:
+### Setting up environment:
 
 Run the following:
 ```bash
@@ -19,6 +19,12 @@ pip install -e .
 ```
 
 ----
+### Data collection
+add `--save-transitions` to collect fine-tuning data 
+add `--save-data` ro collect safety monitoring data 
+----
+### Fuzz testing:
 
-#### Fuzz testing:
+Run `python enjoy_cure.py  --guide --no-render --seed 0 ` to start fuzz testing.
+
 

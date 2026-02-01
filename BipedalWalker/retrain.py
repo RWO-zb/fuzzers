@@ -13,7 +13,6 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.callbacks import CheckpointCallback
 
-# 引入项目现有的工具
 from utils import ALGOS, create_test_env, get_saved_hyperparams
 from utils.utils import StoreDict
 
@@ -24,7 +23,6 @@ def main():
     parser.add_argument("--model-path", help="Path to the .zip model file", type=str, required=True)
     parser.add_argument("--transitions-path", help="Path to transitions.pkl", type=str, required=True)
     
-    # 训练参数
     parser.add_argument("-n", "--n-timesteps", help="Online training steps", default=0, type=int)
     parser.add_argument("--offline-steps", help="Offline gradient steps", default=50000, type=int)
     parser.add_argument("--lr", help="Learning rate", default=1e-7, type=float)
@@ -38,7 +36,6 @@ def main():
     
     args = parser.parse_args()
 
-    # 1. 算法检查
     if args.algo not in ["qrdqn", "dqn", "ddpg", "sac", "her", "td3", "tqc"]:
         print(f"Error: Algorithm {args.algo} is not Off-Policy.")
         sys.exit(1)
@@ -47,14 +44,11 @@ def main():
         importlib.import_module(env_module)
     set_random_seed(args.seed)
 
-    # 2. 准备环境 (严格匹配 config.yml)
     model_dir = os.path.dirname(args.model_path)
     stats_path = os.path.join(model_dir, args.env)
     
-    # 获取原有超参数
     hyperparams, stats_path = get_saved_hyperparams(stats_path, norm_reward=False, test_mode=False)
     
-    # [CRITICAL] 你的 config.yml 没有 normalize，这里确保它被设为 False
     if hyperparams.get('normalize') is True:
         print("[Warning] config.yml says Normalize=True but file missing? Forcing False based on user input.")
     
@@ -75,7 +69,7 @@ def main():
     env = create_test_env(
         args.env,
         n_envs=1, 
-        stats_path=None, # 故意设为 None，防止它去读不存在的 pkl
+        stats_path=None, 
         seed=args.seed,
         log_dir=None,
         should_render=not args.no_render,
@@ -83,14 +77,13 @@ def main():
         env_kwargs=env_kwargs,
     )
     
-    # 双重检查：剥离任何意外添加的 VecNormalize
+   
     if isinstance(env, VecNormalize):
         print("[Warning] Removing unexpected VecNormalize wrapper...")
         env = env.venv
 
-    # 3. 加载模型
+    
     print(f"Loading model from {args.model_path}...")
-    # 使用线性衰减的学习率
     lr_schedule = get_linear_fn(args.lr, args.lr * 0.1, 1.0)
     custom_objects = {
         "learning_rate": lr_schedule,
@@ -100,7 +93,6 @@ def main():
 
     model = ALGOS[args.algo].load(args.model_path, env=env, custom_objects=custom_objects)
     
-    # 允许所有层更新 (全量微调，因为是 Raw 模式)
     for param in model.actor.parameters():
         param.requires_grad = True
     for param in model.critic.parameters():
@@ -109,7 +101,6 @@ def main():
     if hasattr(model, 'learning_starts'):
         model.learning_starts = 0
 
-    # 4. 数据注入
     print(f"Loading transitions from {args.transitions_path}...")
     with open(args.transitions_path, 'rb') as f:
         data = pickle.load(f)
@@ -132,10 +123,9 @@ def main():
 
     print("Injecting RAW transitions into Replay Buffer...")
     for transition, weight in weighted_stream:
-        # 数据直接注入，不需 normalize_obs
+      
         obs, action, reward, next_obs, done = transition
         
-        # 维度调整
         obs_ = obs.reshape(1, *obs.shape) if isinstance(obs, np.ndarray) else np.array([obs])
         next_obs_ = next_obs.reshape(1, *next_obs.shape) if isinstance(next_obs, np.ndarray) else np.array([next_obs])
         action_ = action.reshape(1, *action.shape) if isinstance(action, np.ndarray) else np.array([action])
@@ -148,13 +138,13 @@ def main():
 
     print(f"Buffer Size: {model.replay_buffer.size()}")
 
-    # 5. 设置日志
+   
     new_log_path = os.path.join(args.folder, f"{args.algo}_raw_{args.seed}")
     os.makedirs(new_log_path, exist_ok=True)
     new_logger = configure(new_log_path, ["stdout", "csv", "tensorboard"])
     model.set_logger(new_logger)
 
-    # 6. 训练流程
+   
     if model.replay_buffer.size() < model.batch_size:
         print("Filling buffer...")
         model.learn(total_timesteps=(model.batch_size - model.replay_buffer.size()))
@@ -167,7 +157,6 @@ def main():
     checkpoint_callback = CheckpointCallback(save_freq=10000, save_path=new_log_path, name_prefix="raw_finetune")
     model.learn(total_timesteps=args.n_timesteps, callback=checkpoint_callback)
 
-    # 7. 保存结果
     save_name = f"{args.env}_retrained_final"
     save_path = os.path.join(new_log_path, save_name)
     model.save(save_path)
