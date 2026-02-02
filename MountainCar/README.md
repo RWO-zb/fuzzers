@@ -8,6 +8,8 @@ pip install -r requirements.txt
 ```
 
 ----
+### Fuzz testing:
+
 #### curefuzz
 Run the following:
 ```bash
