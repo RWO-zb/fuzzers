@@ -1,6 +1,6 @@
 ## Carla  
 
-The framework is borrowed from this awesome repositories: https://github.com/MasoudJTehrani/PCLA
+The framework is borrowed from this awesome repository: https://github.com/MasoudJTehrani/PCLA
 
 ----
 
