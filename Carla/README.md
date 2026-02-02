@@ -14,7 +14,7 @@ conda env create -f environment.yml
 conda activate PCLA
 
 ```
-### 2. Pre-Trained Weights
+### Pre-Trained Weights
 
 You have two options to download the required pre-trained model weights:
 
@@ -45,7 +45,7 @@ Ensure that the downloaded pre-trained weight folders are placed directly next t
 ```
 
 ### Fuzz testing:
-#### Step 1: Run CARLA
+#### Run CARLA
 
 Start the CARLA simulator. You **only** need the `-vulkan` flag for LBC, WoR, and LAV agents.
 
