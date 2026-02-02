@@ -19,7 +19,6 @@ pip install -e .
 ```
 
 ----
-
 ### Fuzz testing:
 
 #### curefuzz
@@ -79,3 +78,11 @@ to start fuzz testing.
 Add `--save-transitions` to collect fine-tuning data      
 Add `--save-data` to collect Safety monitoring data   
 
+----
+### Fine-tuning
+Run the following:
+```bash
+cd curefuzz
+ python retrain.py --env BipedalWalkerHardcore-v3 --algo tqc --model-path ../rl-trained-agents/tqc/BipedalWalkerHardcore-v3_1/BipedalWalkerHardcore-v3.zip --transitions-path transitions.pkl  --folder logs/retrained_models
+```
+to start fine-tuning. 
