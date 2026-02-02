@@ -23,9 +23,59 @@ pip install -e .
 ### Fuzz testing:
 
 #### curefuzz
-Run `python enjoy_cure.py  --guide --no-render --seed 0 ` to start fuzz testing.
-Add `--save-transitions` to collect fine-tuning data
-Add `--save-data` to collect Safety monitoring data
+Run the following:
+```bash
+cd curefuzz
+python enjoy_cure.py  --guide --no-render --seed 0
+```
+to start fuzz testing.   
+Add `--save-transitions` to collect fine-tuning data    
+Add `--save-data` to collect Safety monitoring data    
 
+#### g-model
+Run the following:
+```bash
+cd g-model
+python test_gen.py --method generative+novelty --hour 12 --step 50 --save-data --save-transitions
+```
+to start fuzz testing.  
+Add `--save-transitions` to collect fine-tuning data    
+Add `--save-data` to collect Safety monitoring data    
 
+#### mdpfuzz
+Run the following:
+```bash
+cd mdpfuzz
+python test_rl.py data_rq2/ 0 bw 
+```
+to start fuzz testing. 
+Add `--save-transitions` to collect fine-tuning data      
+Add `--save-data` to collect Safety monitoring data   
+
+#### qdfuzz
+Run the following:
+```bash
+cd qdfuzz
+python bw_framework.py
+```
+to start fuzz testing.   
+Add `--save-data` to collect both data  
+
+#### seqfuzz
+Run the following:
+```bash
+cd seqfuzz
+python enjoy.py 
+```
+to start fuzz testing.   
+
+#### random
+Run the following:
+```bash
+cd mdpfuzz
+python test_rl.py data_rq2/ 10 bw 
+```
+to start fuzz testing. 
+Add `--save-transitions` to collect fine-tuning data      
+Add `--save-data` to collect Safety monitoring data   
 
