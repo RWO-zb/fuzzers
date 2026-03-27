@@ -1,4 +1,4 @@
-# Replication Package for Fuzz Testing for Reinforcement Learning Models: How Far Are We?
+# Replication Package for Evaluating Fuzz Testing for Reinforcement Learning Models
 
 ---
 
