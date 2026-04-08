@@ -34,6 +34,7 @@ FEATURES = [
     'meanLeg1KneeSpeed'
 ]
 # Input space according to MDPFuzz
+main_seed = 723
 MIN_INPUT = np.array([1 for _ in range(15)])
 MAX_INPUT = np.array([3 for _ in range(15)])
 MAX_DIST_INPUT: np.ndarray = np.linalg.norm(MAX_INPUT - MIN_INPUT)
@@ -88,7 +89,7 @@ def get_inputs_from_keys(keys: Iterable[str]) -> np.ndarray:
 def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descriptors: List = None, sim_steps: int = 300) -> Tuple[float, bool, np.ndarray, np.ndarray, float, List[np.ndarray], List[Tuple]]:
     '''Executes the model on the environment and only computes the 12 features used by Leo Cazenille. It also returns the final state.'''
 
-    env = gym.make('BipedalWalkerHardcore-v4',rand_seed=env_seed)
+    env = gym.make('BipedalWalkerHardcore-v4',rand_seed=main_seed)
 
     acc_reward = 0.0
     features = np.zeros(12)

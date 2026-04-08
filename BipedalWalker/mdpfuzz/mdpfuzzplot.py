@@ -9,12 +9,12 @@ import time
 import ast 
 
 # --- 1. 配置 ---
-LOG_FILE = 'rt_10_0.01_0.01_1_logs.txt' 
+LOG_FILE = 'rt_10_0.01_0.01_0_logs.txt' 
 
 # [修改] 数据行数限制
 # 如果是 Random Fuzzer 或需要对齐评估预算，设为 330000；
 # 如果需要分析所有数据，请设为 None
-ROW_LIMIT = 330000 
+ROW_LIMIT = None
 
 PLOT_1_FILE = 'rt_crashes_over_unique_inputs.png'
 PLOT_2_FILE = 'rt_full_input_space_tsne.png'
@@ -136,63 +136,37 @@ def plot_crashes_over_wallclock_time(unique_log_df):
     plt.close()
 
 def calculate_behaviour_diversity(unique_log_df, grid_size=(50, 50)):
-    """
-    计算基于 2D 网格 (Distance, Hull Angle) 的行为多样性 (覆盖率)。
-    """
-    print(f"\n{'='*40}\n       Behaviour Diversity Analysis (QD-Fuzz)\n{'='*40}")
+    """ 计算基于 2D 网格 (Distance, Hull Angle) 的行为多样性 (覆盖率)。 """
+    print(f"\n{'='*40}\n Behaviour Diversity Analysis (QD-Fuzz)\n{'='*40}")
     
-    # Check for columns
     if 'BD_Distance' not in unique_log_df.columns or 'BD_MeanAngle' not in unique_log_df.columns:
-         print("Warning: 'BD_Distance' or 'BD_MeanAngle' columns not found. Skipping BD analysis.")
-         return
+        print("Warning: 'BD_Distance' or 'BD_MeanAngle' columns not found. Skipping BD analysis.")
+        return
 
-    # Extract valid data
     valid_df = unique_log_df.dropna(subset=['BD_Distance', 'BD_MeanAngle'])
     dists = valid_df['BD_Distance'].values
     angles = valid_df['BD_MeanAngle'].values
-    is_crash_list = valid_df['is_crash'].values
     
     if len(dists) == 0:
         print("No valid BD data found.")
         return
 
-    min_dist, max_dist = np.min(dists), np.max(dists)
-    min_angle, max_angle = np.min(angles), np.max(angles)
+    min_dist, max_dist = dists.min(), dists.max()
+    min_angle, max_angle = angles.min(), angles.max()
     
-    max_dist += 1e-5
-    max_angle += 1e-5
+    dist_bins = np.linspace(min_dist, max_dist, grid_size[0] + 1)
+    angle_bins = np.linspace(min_angle, max_angle, grid_size[1] + 1)
     
-    print(f"  Distance Range: [{min_dist:.2f}, {max_dist:.2f}]")
-    print(f"  Angle Range:    [{min_angle:.2f}, {max_angle:.2f}]")
+    dist_indices = np.clip(np.digitize(dists, dist_bins) - 1, 0, grid_size[0] - 1)
+    angle_indices = np.clip(np.digitize(angles, angle_bins) - 1, 0, grid_size[1] - 1)
     
-    if max_dist > min_dist:
-        dist_indices = ((dists - min_dist) / (max_dist - min_dist) * grid_size[0]).astype(int)
-    else:
-        dist_indices = np.zeros_like(dists, dtype=int)
-        
-    if max_angle > min_angle:
-        angle_indices = ((angles - min_angle) / (max_angle - min_angle) * grid_size[1]).astype(int)
-    else:
-        angle_indices = np.zeros_like(angles, dtype=int)
+    filled_bins = set(zip(dist_indices, angle_indices))
     
-    dist_indices = np.clip(dist_indices, 0, grid_size[0] - 1)
-    angle_indices = np.clip(angle_indices, 0, grid_size[1] - 1)
+    print(f"Total Unique Inputs Analyzed: {len(valid_df)}")
+    print(f"Occupied Bins: {len(filled_bins)} / {grid_size[0] * grid_size[1]}")
+    print(f"Coverage Ratio: {len(filled_bins) / (grid_size[0] * grid_size[1]):.4%}")
     
-    filled_bins = set()
-    filled_crash_bins = set()
-    
-    for i in range(len(dists)):
-        bin_id = (dist_indices[i], angle_indices[i])
-        filled_bins.add(bin_id)
-        if is_crash_list[i]:
-            filled_crash_bins.add(bin_id)
-            
-    total_bins = grid_size[0] * grid_size[1]
-    print(f"  Behaviour Coverage (Total Filled Bins): {len(filled_bins)} / {total_bins} ({len(filled_bins)/total_bins:.2%})")
-    print(f"  Fault Diversity (Total Crash Bins):     {len(filled_crash_bins)} (Unique crash types in behavior space)")
-    print(f"{'='*40}\n")
-    
-    # Heatmap
+    # 绘图
     heatmap = np.zeros(grid_size)
     for i in range(len(dists)):
         heatmap[dist_indices[i], angle_indices[i]] += 1
@@ -217,27 +191,29 @@ def main():
     original_log_data_df = load_and_prepare_data(LOG_FILE)
     if original_log_data_df is None: return
 
+    # [新增] 统计并打印不去重的 crash 数
+    total_raw_crashes = original_log_data_df['is_crash'].sum()
+    print(f"\n{'='*35}")
+    print(f"总崩溃数量 (Total Raw Crashes, 不去重): {total_raw_crashes}")
+    print(f"{'='*35}")
+
     unique_log_df = deduplicate_log(original_log_data_df)
     if unique_log_df is None: return
 
-    # [新增] 统计并打印独特崩溃数量
+    # 统计并打印独特崩溃数量
     unique_crash_count = unique_log_df['is_crash'].sum()
     print(f"\n{'='*35}")
     print(f"独特崩溃数量 (Unique Crashes): {unique_crash_count}")
-    if ROW_LIMIT:
-        print(f"(基于前 {ROW_LIMIT} 条原始日志数据统计)")
-    print(f"{'='*35}\n")
+    print(f"{'='*35}")
 
-    # 调用绘图函数
-    plot_crashes_over_time(unique_log_df)
+    # 执行绘图
+    #plot_crashes_over_time(unique_log_df)
     #plot_crash_generation_histogram(unique_log_df)
-    plot_crashes_over_wallclock_time(unique_log_df)
-    
-    # 如果有 BD 数据，可以取消下面的注释
-    # calculate_behaviour_diversity(unique_log_df)
+    #plot_crashes_over_wallclock_time(unique_log_df)
+    #calculate_behaviour_diversity(unique_log_df)
 
     end_time = time.time()
-    print(f"\n--- 脚本执行完毕，总耗时: {end_time - start_time:.2f} 秒 ---")
+    print(f"\n分析完成！总耗时: {end_time - start_time:.2f} 秒")
 
 if __name__ == "__main__":
     main()

@@ -23,7 +23,7 @@ if __name__ == '__main__':
     k = 1 
     tau = 0.01
     gamma = 0.1
-    seed = 0
+    seed = 1022
     sim_steps = 200
 
     # === [关键配置] 预算模式选择 ===

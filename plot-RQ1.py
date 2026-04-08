@@ -13,11 +13,13 @@ except:
 
 plt.rcParams.update({
     'font.family': 'serif',
+    'pdf.fonttype': 42,
+    'ps.fonttype': 42,
     'font.size': 22,             
     'axes.labelsize': 24,        
     'axes.titlesize': 26,        
-    'xtick.labelsize': 22,       
-    'ytick.labelsize': 22,       
+    'xtick.labelsize': 28,       
+    'ytick.labelsize': 28,       
     'legend.fontsize': 20,       
     'lines.linewidth': 3.0       
 })
@@ -325,15 +327,15 @@ def plot_subplot(ax, data_map, extend_config=None):
         
         for item in final_labels:
             ax.text(item['x'] + 0.2, item['y'], item['label'], 
-                    color=item['color'], fontsize=22, 
+                    color=item['color'], fontsize=28, 
                     verticalalignment='center', fontweight='bold')
 
     top_limit = max(max_data_y, max_label_y) * 1.25
     ax.set_ylim(0, top_limit)
     ax.set_xlim(0, VIEW_LIMIT_H)
     ax.set_xticks(np.arange(0, 13, 2))
-    ax.set_xlabel("Time (h)", fontsize=24)
-    ax.set_ylabel("Unique Crashes", fontsize=24)
+    ax.set_xlabel("Time (h)", fontsize=30)
+    ax.set_ylabel("Unique Crashes", fontsize=30)
     ax.grid(True, linestyle='--', alpha=0.5, color='#95a5a6')
 
 def main():

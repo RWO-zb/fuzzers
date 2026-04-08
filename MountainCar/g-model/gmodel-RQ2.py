@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # ================= 配置区域 =================
-RESULT_DIR = "results/MC_generative+novelty_50_seed_0"
+RESULT_DIR = "results/MC_generative+novelty_50_seed_1022"
 TRAJ_FILE = os.path.join(RESULT_DIR, "all_trajectories.pkl")
 LOG_FILE = os.path.join(RESULT_DIR, "all_test_cases_log.pkl")
 SAVE_NAME = 'GModel_RQ2_Diversity.png'

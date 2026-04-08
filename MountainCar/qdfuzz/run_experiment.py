@@ -43,22 +43,22 @@ if __name__ == '__main__':
 
     # 模式 C: 混合模式 (哪个先到就停哪个)
     TIME_BUDGET_HOURS = None       # 例如：最长跑 12 小时
-    SAMPLE_BUDGET = 6000       # 例如：最多跑 50万 个样本
+    SAMPLE_BUDGET = 7000       # 例如：最多跑 50万 个样本
     
-    INIT_BUDGET = 1000          # 初始化阶段尝试的样本数 (包含在总 Sample Budget 内)
+    INIT_BUDGET = 2000          # 初始化阶段尝试的样本数 (包含在总 Sample Budget 内)
 
     print(f"--- Running MAP-Elites for MountainCar ---")
     print(f"Configuration: Time Limit={TIME_BUDGET_HOURS}h, Sample Limit={SAMPLE_BUDGET}")
     
     f = MAPElitesFramework(
-        rand_seed=0, 
+        rand_seed=42, 
         cell_granularity=50, 
         descriptors=[0, 1] 
     )
     
     f.test_policy(
         model=model, 
-        env_seed=0, 
+        env_seed=42, 
         results_fp=os.path.join(results_dir, 'mc_test'),
         init_budget=INIT_BUDGET,
         time_budget_hours=TIME_BUDGET_HOURS,  # 传入时间预算

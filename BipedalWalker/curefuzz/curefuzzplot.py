@@ -334,10 +334,10 @@ def main():
     
     print_data_statistics(original_log_data, deduplicated_log)
 
-    plot_crash_trend(deduplicated_log)
+    #plot_crash_trend(deduplicated_log)
     #plot_full_space(deduplicated_log, dtype, expected_size)
     #plot_generation_histogram(deduplicated_log)
-    plot_crashes_over_time(deduplicated_log)
+    #plot_crashes_over_time(deduplicated_log)
     #analyze_crash_statistics(deduplicated_log)
     
     #calculate_behaviour_diversity(deduplicated_log)

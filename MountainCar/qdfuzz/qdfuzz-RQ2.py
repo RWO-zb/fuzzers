@@ -4,8 +4,8 @@ import json
 import os
 import pandas as pd  # 新增: 用于读取CSV统计种子数据
 
-OBS_FILE = 'results/mc_test_obs.txt'
-CSV_FILE = 'results/mc_test_data.csv'  # 新增: CSV文件路径
+OBS_FILE = 'seed42/mc_test_obs.txt'
+CSV_FILE = 'seed42/mc_test_data.csv'  # 新增: CSV文件路径
 PLOT_NAME = 'QDFuzz_RQ2.png'
 STATE_GRID_SIZE = (50, 50)
 BEHAVIOR_GRID_SIZE = (50, 50)

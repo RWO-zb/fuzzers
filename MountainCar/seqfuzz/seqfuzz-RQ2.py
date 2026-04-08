@@ -5,8 +5,8 @@ import os
 from collections import Counter
 
 # --- 配置 ---
-OBS_FILE = 'all_episodes_obs.txt'
-LOG_FILE = 'all_run_seeds_0.pkl'
+OBS_FILE = 'results/seed1022/all_episodes_obs.txt'
+LOG_FILE = 'results/seed1022/all_run_seeds_0.pkl'
 PLOT_FILE = 'SeqFuzz_RQ2_Diversity_With_Seeds.png'
 
 # --- 绘图样式 ---
@@ -24,8 +24,8 @@ plt.rcParams.update({
 
 class DiversityAnalyzer:
     def __init__(self, obs_seqs, logs, 
-                 state_grid_size=(100, 100), 
-                 behavior_grid_size=(100, 100)):
+                 state_grid_size=(50, 50), 
+                 behavior_grid_size=(50, 50)):
         
         self.obs_seqs = obs_seqs
         self.logs = logs

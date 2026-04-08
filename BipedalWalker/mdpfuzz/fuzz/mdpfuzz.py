@@ -124,6 +124,10 @@ class Fuzzer():
         
         self.todynet_success_count = 0
 
+        # [新增] 对齐评估指标 - 初始化统计变量
+        self.evaluation_results = []
+        self.total_env_sim_time = 0.0
+        self.fuzzing_start_time = 0.0
 
     def _set_config(self):
         self.config = {
@@ -138,6 +142,63 @@ class Fuzzer():
             'use_case': type(self.executor).__name__
         }
 
+    # [新增] 对齐评估指标 - 统一记录单次执行结果的辅助函数
+    def _record_evaluation(self, state, acc_reward, done, obs_seq, generation, exec_time):
+        """
+        参照 enjoy_cure.py 逻辑：
+        - 物理碰撞直接对应 done。
+        - 奖励故障对应 (not done) 且 acc_reward < 10。
+        - 轨迹数据强制转为 2D (steps, 1) 适配 test1.py。
+        """
+        elapsed = time.time() - self.fuzzing_start_time
+        
+        # 参照 enjoy_cure.py: did_crash = done
+        did_crash = bool(done)
+        # 参照 enjoy_cure.py: elif episode_reward < 10: is_reward_fault = True
+        is_reward_fault = bool((not did_crash) and (acc_reward < 10))
+        
+        # 轨迹数据处理：取 obs[0] 序列并重塑为 2D 矩阵 (steps, 1)
+        # 这样 test1.py 的 np.pad(t, ((0, pad_len), (0, 0))) 就能正常运行
+        traj_data = None
+        if did_crash or is_reward_fault:
+            traj_data = np.array([o[0] for o in obs_seq], dtype=np.float32).reshape(-1, 1)
+
+        self.evaluation_results.append({
+            'mutate_state': state.copy(),
+            'did_crash': did_crash,
+            'is_reward_fault': is_reward_fault,
+            'elapsed_time': float(elapsed),
+            'survival_steps': int(len(obs_seq)),
+            'parent_depth': int(generation),
+            'output_trajectory': traj_data
+        })
+        # 累加仿真时间
+        self.total_env_sim_time += exec_time
+
+    # [新增] 对齐评估指标 - 统一保存方法
+    def _finalize_evaluation_logs(self, saving_path):
+        if not saving_path:
+            return
+        
+        log_dir = os.path.dirname(saving_path)
+        total_wall_time = time.time() - self.fuzzing_start_time
+        
+        # 1. 保存 selection_log.pkl
+        sel_path = os.path.join(log_dir, 'selection_log.pkl')
+        with open(sel_path, 'wb') as f:
+            pickle.dump(self.evaluation_results, f)
+            
+        # 2. 保存 perf_meta.pkl
+        meta_path = os.path.join(log_dir, 'perf_meta.pkl')
+        perf_meta = {
+            'total_wall_time': float(total_wall_time),
+            'env_sim_time': float(self.total_env_sim_time),
+            'algo_logic_time': float(total_wall_time - self.total_env_sim_time)
+        }
+        with open(meta_path, 'wb') as f:
+            pickle.dump(perf_meta, f)
+        
+        print(f"[Evaluation] Hardcoded logs saved to {log_dir}: selection_log.pkl, perf_meta.pkl")
 
     def _concatenate_state_sequence(self, state_sequence: np.ndarray) -> np.ndarray:
         data_concat = []
@@ -195,7 +256,9 @@ class Fuzzer():
 
         acc_reward_perturbed, crash_perturbed, state_sequence_perturbed, exec_time_perturbed, bd_dist_p, bd_angle_p, transitions_p = self.mdp(perturbed_state, policy)
         
-        # 敏感度测试不计入主血缘统计，root_id 传 None 或保持默认
+        # [新增] 对齐评估指标 - 累加环境仿真时间
+        self.total_env_sim_time += exec_time_perturbed
+
         if self.logger is not None:
             episode_length = len(state_sequence_perturbed)
             self.logger.log(
@@ -229,6 +292,10 @@ class Fuzzer():
             random_input = kwargs.get('input', self.sampling())
             reward, crash, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(random_input, policy)
             exec_counter += 1
+            
+            # [新增] 对齐评估指标 - 记录初始化模型阶段
+            self._record_evaluation(random_input, reward, crash, state_sequence, 0, exec_time)
+
             if self.logger is not None:
                 episode_length = len(state_sequence)
                 self.logger.log(
@@ -241,7 +308,7 @@ class Fuzzer():
                     run_time=time.time(),
                     bd_distance=bd_dist,
                     bd_mean_angle=bd_angle,
-                    root_id=-1 # 初始化模型阶段的随机种子，标记为 -1 或特定的 ID
+                    root_id=-1 
                     )
 
         if len(state_sequence) < self.k + 1:
@@ -294,9 +361,12 @@ class Fuzzer():
                         self.todynet_success_count += 1
 
     # =========================================================================
-    # 1. 主 MDPFuzz 循环 (已修复)
+    # 1. 主 MDPFuzz 循环
     # =========================================================================
     def fuzzing(self, n: int, policy: Any = None, **kwargs):
+        # [新增] 对齐评估指标 - 开启计时
+        self.fuzzing_start_time = time.time()
+
         save_data = kwargs.get('save_data', False)
         save_transitions = kwargs.get('save_transitions', False)
         window_size = kwargs.get('window_size', 20)
@@ -310,9 +380,7 @@ class Fuzzer():
         else:
             self.logger = None
 
-        # [初始化] 血缘追踪字典
         self.root_lineage = {}
-
         local_sensitivity = kwargs.get('local_sensitivity', False)
 
         initial_inputs = self.sampling(n)
@@ -327,12 +395,14 @@ class Fuzzer():
         pbar = tqdm.tqdm(total=n)
         
         for i, state in enumerate(initial_inputs):
-            # [注册] 初始种子 ID = 它的索引
             current_root_id = i
             self.root_lineage[state.tobytes()] = current_root_id
 
             sensitivity, acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.sentivity(state, policy=policy, generation=0, **kwargs)
             
+            # [新增] 对齐评估指标 - 记录初始阶段执行结果
+            self._record_evaluation(state, acc_reward, oracle, state_sequence, 0, exec_time)
+
             self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
             
             state_sequence_conc = self._concatenate_state_sequence(state_sequence)
@@ -356,12 +426,10 @@ class Fuzzer():
                     run_time=time.time(),
                     bd_distance=bd_dist,
                     bd_mean_angle=bd_angle,
-                    root_id=current_root_id # [记录]
+                    root_id=current_root_id 
                 )
-
             if oracle:
                 pool.add_crash(state)
-
             pbar.update(1)
         pbar.close()
 
@@ -387,23 +455,19 @@ class Fuzzer():
                 else:
                     if (current_time - start_time) > test_budget_in_seconds: break
 
-                input, acc_reward_input, generation = pool.select(self.rng)
-                
-                # [继承] 查找父节点 RootID
-                parent_root_id = self.root_lineage.get(input.tobytes(), -1)
+                input_selected, acc_reward_input, generation = pool.select(self.rng)
+                parent_root_id = self.root_lineage.get(input_selected.tobytes(), -1)
 
                 new_generation = generation + 1
-                mutant = self.mutate_validate(input, **kwargs)
-                
-                # [传递] 子节点继承 RootID
+                mutant = self.mutate_validate(input_selected, **kwargs)
                 self.root_lineage[mutant.tobytes()] = parent_root_id
                 
                 acc_reward_mutant, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(mutant, policy)
                 
-                self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
+                # [新增] 对齐评估指标 - 记录变异阶段执行结果
+                self._record_evaluation(mutant, acc_reward_mutant, oracle, state_sequence, new_generation, exec_time)
 
-                record = np.concatenate([input, mutant, np.array([int(oracle)])])
-                self.mutation_history.append(record)
+                self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
 
                 state_sequence_conc = self._concatenate_state_sequence(state_sequence)
                 t0 = time.time()
@@ -415,7 +479,7 @@ class Fuzzer():
                     pool.add_crash(mutant)
                 elif (acc_reward_mutant < acc_reward_input) or (coverage < self.tau):
                     if local_sensitivity:
-                        sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
+                        sensitivity = self.local_sensitivity(input_selected, mutant, acc_reward_input, acc_reward_mutant)
                     else:
                         sensitivity, _, _, _, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
                     pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle, generation=new_generation)
@@ -435,7 +499,7 @@ class Fuzzer():
                         run_time=time.time(),
                         bd_distance=bd_dist,
                         bd_mean_angle=bd_angle,
-                        root_id=parent_root_id # [记录]
+                        root_id=parent_root_id 
                     )
 
                 if test_budget_in_seconds is None:
@@ -461,21 +525,18 @@ class Fuzzer():
         pbar.close()
         
         if path is not None:
+            # [新增] 对齐评估指标 - 保存最终评估日志
+            self._finalize_evaluation_logs(path)
+
             save_dir = os.path.dirname(path)
-            
             if save_transitions:
-                save_payload = {
-                    "crash": self.crash_transitions,
-                    "success": self.success_transitions,
-                    "is_raw": True
-                }
+                save_payload = {"crash": self.crash_transitions, "success": self.success_transitions, "is_raw": True}
                 t_path = os.path.join(save_dir, 'transitions.pkl')
-                print(f"Saving labeled RAW transitions (Dict) to {t_path}")
                 with open(t_path, 'wb') as f:
                     pickle.dump(save_payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
             if save_data:
-                balance_and_save_data(self.all_window_data, self.all_label_data, save_dir, "BipedalWalkerHC", window_size, target_total=3000, target_crash_ratio=0.30)
+                balance_and_save_data(self.all_window_data, self.all_label_data, save_dir, "BipedalWalkerHC", window_size)
 
         if path is not None:
             self.save_configuration(path)
@@ -488,9 +549,12 @@ class Fuzzer():
                     pool.save(path)
 
     # =========================================================================
-    # 2. Fuzzing 无覆盖率引导 (已修复)
+    # 2. Fuzzing 无覆盖率引导
     # =========================================================================
     def fuzzing_no_coverage(self, n: int, policy: Any = None, **kwargs):
+        # [新增] 对齐评估指标 - 开启计时
+        self.fuzzing_start_time = time.time()
+
         save_data = kwargs.get('save_data', False)
         save_transitions = kwargs.get('save_transitions', False)
         window_size = kwargs.get('window_size', 20)
@@ -505,9 +569,7 @@ class Fuzzer():
         else:
             self.logger = None
 
-        # [初始化]
         self.root_lineage = {}
-
         local_sensitivity = kwargs.get('local_sensitivity', False)
 
         initial_inputs = self.sampling(n)
@@ -519,14 +581,15 @@ class Fuzzer():
 
         pbar = tqdm.tqdm(total=n)
         for i, state in enumerate(initial_inputs):
-            # [注册]
             current_root_id = i
             self.root_lineage[state.tobytes()] = current_root_id
 
             sensitivity, acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.sentivity(state, policy=policy, generation=0, **kwargs)
             
+            # [新增] 对齐评估指标 - 记录初始阶段执行结果
+            self._record_evaluation(state, acc_reward, oracle, state_sequence, 0, exec_time)
+
             self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
-            
             pool.add(state, acc_reward, 0, sensitivity, oracle, generation=0)
 
             if self.logger is not None:
@@ -542,12 +605,10 @@ class Fuzzer():
                     run_time=time.time(),
                     bd_distance=bd_dist,
                     bd_mean_angle=bd_angle,
-                    root_id=current_root_id # [记录]
+                    root_id=current_root_id 
                 )
-
             if oracle:
                 pool.add_crash(state)
-
             pbar.update(1)
         pbar.close()
 
@@ -572,30 +633,26 @@ class Fuzzer():
             else:
                 if (current_time - start_time) > test_budget_in_seconds: break
 
-            input, acc_reward_input, generation = pool.select(self.rng)
-            
-            # [继承]
-            parent_root_id = self.root_lineage.get(input.tobytes(), -1)
+            input_selected, acc_reward_input, generation = pool.select(self.rng)
+            parent_root_id = self.root_lineage.get(input_selected.tobytes(), -1)
 
             new_generation = generation + 1
-            mutant = self.mutate_validate(input, **kwargs)
-            
-            # [传递]
+            mutant = self.mutate_validate(input_selected, **kwargs)
             self.root_lineage[mutant.tobytes()] = parent_root_id
             
             acc_reward_mutant, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(mutant, policy)
             
+            # [新增] 对齐评估指标 - 记录变异阶段执行结果
+            self._record_evaluation(mutant, acc_reward_mutant, oracle, state_sequence, new_generation, exec_time)
+
             self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
 
-            record = np.concatenate([input, mutant, np.array([int(oracle)])])
-            self.mutation_history.append(record)
-            
             sensitivity = None
             if oracle:
                 pool.add_crash(mutant)
             elif acc_reward_mutant < acc_reward_input:
                 if local_sensitivity:
-                    sensitivity = self.local_sensitivity(input, mutant, acc_reward_input, acc_reward_mutant)
+                    sensitivity = self.local_sensitivity(input_selected, mutant, acc_reward_input, acc_reward_mutant)
                 else:
                     sensitivity, _, _, _, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
                 pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle, generation=new_generation)
@@ -613,7 +670,7 @@ class Fuzzer():
                     run_time=time.time(),
                     bd_distance=bd_dist,
                     bd_mean_angle=bd_angle,
-                    root_id=parent_root_id # [记录]
+                    root_id=parent_root_id 
                 )
 
             if test_budget_in_seconds is None:
@@ -634,21 +691,18 @@ class Fuzzer():
         pbar.close()
         
         if path is not None:
+            # [新增] 对齐评估指标 - 保存最终评估日志
+            self._finalize_evaluation_logs(path)
+
             save_dir = os.path.dirname(path)
-            
             if save_transitions:
-                save_payload = {
-                    "crash": self.crash_transitions,
-                    "success": self.success_transitions,
-                    "is_raw": True
-                }
+                save_payload = {"crash": self.crash_transitions, "success": self.success_transitions, "is_raw": True}
                 t_path = os.path.join(save_dir, 'transitions.pkl')
-                print(f"Saving labeled RAW transitions (Dict) to {t_path}")
                 with open(t_path, 'wb') as f:
                     pickle.dump(save_payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
             if save_data:
-                 balance_and_save_data(self.all_window_data, self.all_label_data, save_dir, "BipedalWalkerHC", window_size, target_total=3000, target_crash_ratio=0.30)
+                 balance_and_save_data(self.all_window_data, self.all_label_data, save_dir, "BipedalWalkerHC", window_size)
 
         if path is not None:
             self.save_configuration(path)
@@ -677,19 +731,13 @@ class Fuzzer():
 
     def save_mutation_history(self, path: str):
          if len(self.mutation_history) > 0:
-            print(f"Saving mutation history ({len(self.mutation_history)} entries) to {path}_mutations.txt")
             with open(path + '_mutations.txt', 'w') as f:
                 f.write("ParentState; MutantState; Oracle\n")
                 for record in self.mutation_history:
                     state_dim = (len(record) - 1) // 2
-                    parent = record[:state_dim]
-                    mutant = record[state_dim : 2*state_dim]
-                    oracle = int(record[-1])
-                    parent_str = np.array2string(parent, separator=',').replace('\n', '')
-                    mutant_str = np.array2string(mutant, separator=',').replace('\n', '')
-                    f.write(f"{parent_str}; {mutant_str}; {oracle}\n")
-         else:
-            print("No mutation history to save.")
+                    parent_str = np.array2string(record[:state_dim], separator=',').replace('\n', '')
+                    mutant_str = np.array2string(record[state_dim : 2*state_dim], separator=',').replace('\n', '')
+                    f.write(f"{parent_str}; {mutant_str}; {int(record[-1])}\n")
 
 
     def load(self, path: str):
@@ -702,7 +750,6 @@ class Fuzzer():
         self.config = copy.deepcopy(config)
         if os.path.isfile(path + '_evaluations.txt'):
             self.load_evaluated_solutions(path + '_evaluations.txt')
-            print('found {} evaluated solutions.'.format(len(self.evaluated_solutions)))
 
 
     def _load_dict(self, configuration: Dict):
@@ -718,9 +765,12 @@ class Fuzzer():
         self.evaluated_solutions = np.loadtxt(filepath, delimiter=',').tolist()
 
     # =========================================================================
-    # 3. Random Testing (已修复)
+    # 3. Random Testing
     # =========================================================================
     def random_testing(self, n: int, policy: Any = None, path: str = 'logs', **kwargs):
+        # [新增] 对齐评估指标 - 开启计时
+        self.fuzzing_start_time = time.time()
+
         if kwargs.get('exp_name', None) is not None:
             self.config['use_case'] = kwargs['exp_name']
         
@@ -751,6 +801,9 @@ class Fuzzer():
             if execute:
                 acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(random_input, policy)
                 
+                # [新增] 对齐评估指标 - 记录随机测试执行结果
+                self._record_evaluation(random_input, acc_reward, oracle, state_sequence, 0, exec_time)
+
                 self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
                 
                 episode_length = len(state_sequence)
@@ -764,36 +817,25 @@ class Fuzzer():
                     run_time=time.time(),
                     bd_distance=bd_dist,
                     bd_mean_angle=bd_angle,
-                    root_id=i # [修复] 在 Random Testing 中，每个种子都是 Root，ID 就是它的序号
+                    root_id=i 
                 )
                 pbar.update(1)
                 i += 1
         pbar.close()
 
         if path is not None:
-            save_dir = os.path.dirname(path)
+            # [新增] 对齐评估指标 - 保存最终评估日志
+            self._finalize_evaluation_logs(path)
 
+            save_dir = os.path.dirname(path)
             if save_transitions:
-                save_payload = {
-                    "crash": self.crash_transitions,
-                    "success": self.success_transitions,
-                    "is_raw": True
-                }
+                save_payload = {"crash": self.crash_transitions, "success": self.success_transitions, "is_raw": True}
                 t_path = os.path.join(save_dir, 'transitions.pkl')
-                print(f"Saving labeled RAW transitions (Dict) to {t_path}")
                 with open(t_path, 'wb') as f:
                     pickle.dump(save_payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
             if save_data:
-                balance_and_save_data(
-                    self.all_window_data, 
-                    self.all_label_data, 
-                    save_dir, 
-                    "BipedalWalkerHC", 
-                    window_size, 
-                    target_total=3000, 
-                    target_crash_ratio=0.30
-                )
+                balance_and_save_data(self.all_window_data, self.all_label_data, save_dir, "BipedalWalkerHC", window_size)
 
         self.save_configuration(path)
         self.save_evaluated_solutions(path)

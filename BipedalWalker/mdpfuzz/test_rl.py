@@ -23,9 +23,9 @@ if __name__ == '__main__':
     print(f"--- 脚本开始运行时间: {start_time_str} ---")
     torch.set_num_threads(1)
     
-    test_budget = 7000
-    test_budget_in_seconds = 100
-    init_budget = 1000
+    test_budget = 700
+    test_budget_in_seconds = 43200
+    init_budget = 100
     k = 10
     tau = 0.01
     gamma = 0.01

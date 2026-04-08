@@ -5,7 +5,7 @@ import os
 from collections import Counter  # <--- 新增引用
 
 #input file 
-LOG_FILE = 'all_run_seeds_0.pkl'
+LOG_FILE = 'all_run_seeds_723.pkl'
 
 #output file 
 PLOT_BD_CURVE = 'seqfuzz_behaviour_diversity_curve.png'

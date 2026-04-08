@@ -138,12 +138,8 @@ class Diffusion:
                 if method == 'generative':
                     loss = loss_mse
                 else:
-                    # Retrieve guidance metric for this sample
                     guidance_val = metrics[index] 
-                    # guidance_val should be a scalar or single-element array here
                     guidance_tensor = torch.tensor(guidance_val, dtype=torch.float32, device=self.device)
-                    
-                    # Weight = 1 + lambda * metric (Promote high novelty/metric)
                     weight = 1.0 + lambda_guide * guidance_tensor
                     
                     loss = loss_mse * weight

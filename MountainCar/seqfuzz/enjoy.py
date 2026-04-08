@@ -40,7 +40,7 @@ def main():
     parser.add_argument(
         "--norm-reward", action="store_true", default=False, help="Normalize reward if applicable (trained with VecNormalize)"
     )
-    parser.add_argument("--seed", help="Random generator seed", type=int, default=0)
+    parser.add_argument("--seed", help="Random generator seed", type=int, default=1022)
     parser.add_argument("--reward-log", help="Where to log reward", default="", type=str)
     parser.add_argument(
         "--gym-packages",
@@ -318,7 +318,7 @@ def main():
     seedcount = 0
     
     # === 循环 2: Fuzzing Main Loop ===
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 :
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<5000:
         is_crash = False
         seedcount+=1
         output_obs = []

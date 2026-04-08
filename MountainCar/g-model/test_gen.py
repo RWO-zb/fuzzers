@@ -223,7 +223,7 @@ def main():
 
     # --- 阶段 1：严格遵循论文的初始化预热 (Strict Initialization) ---
     print("--- Stage 1: Initialization (Warm-up) ---")
-    initial_collection_count = 1000 # 论文要求：采样 1000 个正常用例
+    initial_collection_count = 2000 # 论文要求：采样 1000 个正常用例
     
     for pre_step in tqdm.tqdm(range(initial_collection_count), desc="Initial Random Sampling"):
         # 仅生成随机初始状态，不执行环境交互，不计算 metrics

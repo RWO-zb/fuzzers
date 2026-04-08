@@ -176,8 +176,8 @@ def cleanup(vehicle, sensor):
 def main():
     argparser = argparse.ArgumentParser(description='Town01 Route Generator (Strict Mode)')
     argparser.add_argument('--host', default='127.0.0.1')
-    argparser.add_argument('--port', type=int, default=2000)
-    argparser.add_argument('--num_pairs', default=500, type=int)
+    argparser.add_argument('--port', type=int, default=4000)
+    argparser.add_argument('--num_pairs', default=100, type=int)
     argparser.add_argument('--output_dir', default='town01_strict_routes')
     argparser.add_argument('--seed', default=2024, type=int, help='Random seed for reproducibility')
     

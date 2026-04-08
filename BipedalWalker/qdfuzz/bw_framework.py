@@ -901,7 +901,7 @@ class MAPElitesFramework(Framework):
 
 if __name__ == '__main__':
     torch.set_num_threads(1)
-    main_seed = 2021
+    main_seed = 1
     env_seed = 0
     model = load_model()
 

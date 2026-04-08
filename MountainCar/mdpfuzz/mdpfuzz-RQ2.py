@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from collections import Counter
 
 # --- 配置区域 ---
-OBS_FILE = 'logs/MC_DQN_NoCov_5_0.01_0.1_0_7000it_obs.txt' 
+OBS_FILE = 'logs/MC_DQN_NoCov_5_0.01_0.1_0_9000it_obs.txt' 
 # 自动推断 Log 文件路径 (假设文件名仅后缀不同)
 LOG_FILE = OBS_FILE.replace('_obs.txt', '_logs.txt')
 

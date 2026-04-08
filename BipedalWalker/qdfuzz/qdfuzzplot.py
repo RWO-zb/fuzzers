@@ -164,11 +164,11 @@ def main():
         # --- 新增代码结束 ---
         dedup_df = deduplicate_inputs(df)
         output_dir = os.path.dirname(target_file)
-        plot_crash_trend(df, output_dir)
-        plot_tsne_space(dedup_df, output_dir)
-        plot_generation_histogram(dedup_df, output_dir)
-        plot_crashes_over_time(df, output_dir)
-        plot_behaviour_heatmap(dedup_df, output_dir)
+        #plot_crash_trend(df, output_dir)
+        #plot_tsne_space(dedup_df, output_dir)
+        #plot_generation_histogram(dedup_df, output_dir)
+        #plot_crashes_over_time(df, output_dir)
+        #plot_behaviour_heatmap(dedup_df, output_dir)
         print(f"Plots saved to {output_dir}")
 
 if __name__ == "__main__":

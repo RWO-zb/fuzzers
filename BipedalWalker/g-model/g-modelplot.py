@@ -24,16 +24,12 @@ COLORS = {
 
 # 路径配置
 # 注意：请根据 test_gen.py 实际生成的文件夹名称修改此处
-RESULT_DIR = os.path.join("results", "generative+novelty_50_seed_0")
-LOG_FILENAME = os.path.join(RESULT_DIR, "all_test_cases_log.pkl")
-PLOT_5_FILE = os.path.join(RESULT_DIR, '5_behaviour_coverage_heatmap.png')
+
+LOG_FILENAME = "all_test_cases_log.pkl"
+PLOT_5_FILE = '5_behaviour_coverage_heatmap.png'
 
 def load_data():
     """加载日志数据"""
-    if not os.path.exists(LOG_FILENAME):
-        print(f"错误：未找到日志文件 {LOG_FILENAME}")
-        print(f"请检查 result 文件夹路径是否正确: {RESULT_DIR}")
-        return None
     
     print(f"正在加载日志: {LOG_FILENAME} ...")
     with open(LOG_FILENAME, 'rb') as f:
@@ -64,7 +60,7 @@ def plot_bar_chart(rand_count, gen_count, title_text, filename, total_samples):
     
     sns.despine()
     plt.tight_layout()
-    plt.savefig(os.path.join(RESULT_DIR, filename), dpi=300)
+    plt.savefig( filename, dpi=300)
     print(f"图表已保存: {filename}")
     plt.close()
 
@@ -171,7 +167,7 @@ def plot_total_crashes_over_time(log_data):
     plt.tight_layout()
     
     filename = '3_crash_time_series_total.png'
-    plt.savefig(os.path.join(RESULT_DIR, filename), dpi=300)
+    plt.savefig( filename, dpi=300)
     print(f"图表已保存: {filename}")
     plt.close()
 
@@ -285,7 +281,7 @@ def plot_tsne_distribution(log_data):
     plt.tight_layout()
     
     filename = '4_input_space_tsne.png'
-    save_path = os.path.join(RESULT_DIR, filename)
+    save_path =  filename
     plt.savefig(save_path, dpi=300)
     print(f"图表已保存: {filename}")
     plt.close()
@@ -382,18 +378,13 @@ def calculate_behaviour_diversity(log_data, grid_size=(50, 50)):
     plt.close()
 
 def main():
-    if not os.path.exists(RESULT_DIR):
-        print(f"错误：目录 {RESULT_DIR} 不存在。")
-        print("请运行 test_gen.py 生成数据，或修改本脚本中的 RESULT_DIR 变量。")
-        return
-
     log_data = load_data()
     
     if log_data:
         print("\n=== 开始绘制图表 ===")
         
         # 1. 绘制柱状图 (Raw & Unique) - [修复版]
-        process_and_plot_bars(log_data)
+        #process_and_plot_bars(log_data)
         
         # 2. 绘制时间曲线图 (Total Only)
         plot_total_crashes_over_time(log_data)
@@ -402,7 +393,7 @@ def main():
         #plot_tsne_distribution(log_data)
 
         # 4. 绘制行为多样性热力图与计算覆盖率
-        calculate_behaviour_diversity(log_data)
+        #calculate_behaviour_diversity(log_data)
         
     print("\n=== 所有绘图任务完成 ===")
 

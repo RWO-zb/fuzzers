@@ -34,25 +34,25 @@ FILES_CONFIG = {
         "label": "G-Model"
     },
     "MDPFuzz": {
-        "path": "fuzzer_10_0.01_0.01_0_logs.txt", 
+        "path": "fuzzer_10_0.01_0.01_1022_logs.txt", 
         "type": "csv_mdpfuzz",
         "color": "C2",                        
         "label": "MDPFuzz"
     },
     "QDFuzz": {
-        "path": "1768120702.3916006_data.csv",            
+        "path": "1774592517.034981_data.csv",            
         "type": "csv_qdfuzz",
         "color": "C3",                        
         "label": "QDFuzz"
     },
     "Random": {
-        "path": "rt_10_0.01_0.01_1_logs.txt", 
+        "path": "rt_10_0.01_0.01_1022_logs.txt", 
         "type": "csv_mdpfuzz",                
         "color": "C4",                        
         "label": "Random"
     },
     "SeqFuzz": {
-        "path": "all_run_seeds_0.pkl",        
+        "path": "all_run_seeds_1022.pkl",        
         "type": "pickle_seqfuzz",
         "color": "C5",                        
         "label": "SeqFuzz"

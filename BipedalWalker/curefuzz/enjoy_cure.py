@@ -1,6 +1,14 @@
+# =============================================================================
+# --- Imports & Dependencies ---
+# =============================================================================
+import os
+# [性能优化] 必须在导入 torch 之前设置，强制单线程以对齐 mdpfuzz 性能
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+
 import argparse
 import importlib
-import os
 import sys
 import time
 import copy
@@ -19,6 +27,35 @@ from utils.exp_manager import ExperimentManager
 from utils.utils import StoreDict
 from fuzz.cure_fuzz import CureFuzz
 
+# [性能优化] 限制 PyTorch 内部线程，减少上下文切换开销
+torch.set_num_threads(1)
+
+# =============================================================================
+# --- Global Timers for Overhead Analysis ---
+# =============================================================================
+global_env_time = 0.0  # Time spent in physics simulation (reset/step)
+
+# =============================================================================
+# --- 极速推理接口：绕过 distribution.py (重点优化点) ---
+# =============================================================================
+def fast_predict(model, obs):
+    """
+    直接提取网络均值输出，彻底规避 distribution.py:42(__init__) 产生的约 46.8s 开销。
+    """
+    obs_tensor = torch.as_tensor(obs).float().to("cpu")
+    with torch.no_grad():
+        # 针对 BipedalWalker 常用的 TQC / SAC 算法
+        if hasattr(model.policy, "actor") and hasattr(model.policy.actor, "get_action_dist_params"):
+            mean_actions, _, _ = model.policy.actor.get_action_dist_params(obs_tensor)
+            # TQC/SAC 动作必须经过 tanh 映射到 [-1, 1]
+            action = torch.tanh(mean_actions).cpu().numpy()
+            return action
+        # 兜底：如果算法不匹配，使用原版 predict
+        return model.predict(obs, deterministic=True)[0]
+
+# =============================================================================
+# --- Physics State Extraction Module ---
+# =============================================================================
 def extract_physics_state(real_env):
     if not hasattr(real_env, 'hull') or not hasattr(real_env, 'legs'):
         return None
@@ -41,6 +78,9 @@ def extract_physics_state(real_env):
         state_dict["legs"].append(leg_data)
     return state_dict
 
+# =============================================================================
+# --- Data Processing for Surrogate Model (TodyNet) ---
+# =============================================================================
 def process_episode_data(sequence, label, window_size):
     seq_len = len(sequence)
     if seq_len < window_size:
@@ -95,6 +135,9 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
     torch.save(y_tensor[indices[split:]], os.path.join(save_path, 'y_valid.pt'))
     print(f"[TodyNet Data] Saved {total} samples to {save_path}")
 
+# =============================================================================
+# --- Environment Utility Wrappers ---
+# =============================================================================
 def get_real_unwrapped_env(env):
     current_env = env
     while hasattr(current_env, 'venv'):
@@ -111,10 +154,13 @@ def get_raw_obs_from_env(env, obs):
         pass
     else:
         return obs
-
     return norm_env.unnormalize_obs(obs)
 
+# =============================================================================
+# --- Main Execution Function ---
+# =============================================================================
 def main():
+    # --- 1. Configuration & Argument Parsing ---
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", help="environment ID", type=str, default="BipedalWalkerHardcore-v3")
     parser.add_argument("-f", "--folder", help="Log folder", type=str, default="../rl-trained-agents")
@@ -130,14 +176,14 @@ def main():
     parser.add_argument("--load-checkpoint", type=int, help="Load specific checkpoint")
     parser.add_argument("--stochastic", action="store_true", default=False, help="Use stochastic actions")
     parser.add_argument("--norm-reward", action="store_true", default=False, help="Normalize reward")
-    parser.add_argument("--seed", help="Random generator seed", type=int, default=0)
+    parser.add_argument("--seed", help="Random generator seed", type=int, default=1)
     parser.add_argument("--reward-log", help="Where to log reward", default="", type=str)
     parser.add_argument("--gym-packages", type=str, nargs="+", default=[], help="External Gym packages")
     parser.add_argument("--env-kwargs", type=str, nargs="+", action=StoreDict, help="Env constructor kwargs")
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=1000, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=100, type=int)
     parser.add_argument("--save-data", action="store_true", default=False, help="Save TodyNet training data")
     parser.add_argument("--save-transitions", action="store_true", default=False, help="Save RL transitions")
     parser.add_argument("--save-physics", action="store_true", default=False, help="Save full physics state trajectories")
@@ -145,6 +191,7 @@ def main():
     parser.add_argument("--dataset-name", type=str, default="BipedalWalkerHC", help="Dataset name prefix")
     args = parser.parse_args()
     
+    # --- 2. Result Directory & Logging Setup ---
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
     result_path = './results/' + result_folder + '/'
@@ -172,6 +219,7 @@ def main():
     else:
         log_path = os.path.join(folder, algo)
 
+    # --- 3. RL Model Loading ---
     found = False
     model_path = ""
     for ext in ["zip"]:
@@ -235,8 +283,10 @@ def main():
             "clip_range": lambda _: 0.0,
         }
 
-    model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, **kwargs)
+    # [优化] 强制加载模型到 CPU
+    model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, device="cpu", **kwargs)
     
+    # --- 4. Fuzzer Initialization & Initial Corpus Generation ---
     stochastic = args.stochastic or is_atari and not args.deterministic
     deterministic = not stochastic
     fuzzer = CureFuzz()
@@ -247,6 +297,8 @@ def main():
     todynet_success_count = 0 
     crash_transitions = []
     success_transitions = []
+    reward_fault_transitions = [] 
+    reward_fault_results = []     
     all_crash_physics_trajectories = []
     
     TARGET_CRASH_COUNT = 10000
@@ -264,7 +316,9 @@ def main():
         obs = env.reset(states)
         sequences = [obs[0]] 
         for _ in range(args.n_timesteps):
-            action, state = model.predict(obs, state=state, deterministic=deterministic)
+            # [替换] 使用极速接口规避分布开销
+            action = fast_predict(model, obs)
+            state = None
             obs, reward, done, _ = env.step(action)
             sequences.append(obs[0])
             episode_reward += reward[0]
@@ -275,7 +329,9 @@ def main():
         mutate_states = np.clip(np.remainder(states + delta_states, 4), 1, 3)
         obs = env.reset(mutate_states)
         for _ in range(args.n_timesteps):
-            action, state = model.predict(obs, state=state, deterministic=deterministic)
+            # [替换] 使用极速接口
+            action = fast_predict(model, obs)
+            state = None
             obs, _, done, _ = env.step(action)
             if done: break
         entropy = np.linalg.norm(np.asarray(final_state) - np.asarray(obs[0]))
@@ -287,15 +343,20 @@ def main():
     fuzzer.count = [5] * len(fuzzer.corpus)
     fuzzer.original = copy.deepcopy(fuzzer.corpus)
 
+    # --- 5. Main Fuzzing Loop ---
     start_fuzz_time = time.time()
     current_time = time.time()
     seedcount = 0
     fuzz_selection_log = []
     
+    env_sim_time_total = 0.0 
+    
     print(f"\n[Goal] Collecting RAW Transitions. Save Physics: {args.save_physics}")
     
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 and seedcount < 500:
         seedcount += 1
+        
+        # --- 5a. Seed Selection & Mutation ---
         selected_info = fuzzer.get_pose()
         states = selected_info['seed_state']
         current_mutation_depth = selected_info['depth']
@@ -304,6 +365,9 @@ def main():
         state = None
         episode_reward = 0.0
         
+        # --- 5b. Physics Simulation (with Timer) ---
+        sim_start_time = time.time()
+        
         obs = env.reset(mutate_states)
         
         rnd_sequences = [obs[0]] 
@@ -311,8 +375,6 @@ def main():
         current_ep_transitions = []
         current_episode_physics = []
         
-        total_x_pos_sum = 0.0
-        total_abs_angle_sum = 0.0
         episode_steps = 0
         
         if args.save_physics:
@@ -324,7 +386,9 @@ def main():
         for _ in range(args.n_timesteps):
             raw_current_obs = get_raw_obs_from_env(env, obs[0].copy())
             
-            action, state = model.predict(obs, state=state, deterministic=deterministic)
+            # [替换] 使用极速接口规避分布开销
+            action = fast_predict(model, obs)
+            state = None
             current_action = action[0]
             
             vec_28d = np.concatenate((obs[0], current_action))
@@ -343,11 +407,6 @@ def main():
             if args.save_transitions:
                 current_ep_transitions.append((raw_current_obs, current_action, reward[0], raw_next_obs, done[0]))
             
-            real_env_stats = get_real_unwrapped_env(env)
-            raw_x_pos = real_env_stats.hull.position[0]
-            raw_angle = real_env_stats.hull.angle
-            total_x_pos_sum += raw_x_pos
-            total_abs_angle_sum += abs(raw_angle)
             episode_steps += 1
             
             rnd_sequences.append(next_obs[0]) 
@@ -357,17 +416,23 @@ def main():
             
             if done:
                 break
+                
+        env_sim_time_total += (time.time() - sim_start_time)
         
-        bd_dist = total_x_pos_sum / max(1, episode_steps)
-        bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
-        
+        # --- 5c. Descriptor & Intrinsic Calculation ---
         intrinsic_reward = fuzzer.train_rnd(rnd_sequences)
         entropy = np.linalg.norm(np.asarray(obs[0]) - np.asarray(fuzzer.final_state))
         
         did_crash = False
-        if done or episode_reward < 10:
+        is_reward_fault = False
+        
+        # --- 5d. Fault Classification (Crash vs Reward Fault) & Fuzzer Guidance ---
+        if done:
             fuzzer.add_crash(mutate_states)
             did_crash = True
+        elif episode_reward < 10:
+            is_reward_fault = True
+            reward_fault_results.append(mutate_states)
         else:
             condition = False
             if args.guide:
@@ -377,10 +442,12 @@ def main():
             if condition:
                 fuzzer.further_mutation(copy.deepcopy(mutate_states), episode_reward, entropy, intrinsic_reward, final_state, fuzzer.current_original)
         
-        if did_crash and args.save_physics:
+        # --- 5e. Data Collection & Logging ---
+        if (did_crash or is_reward_fault) and args.save_physics:
             if len(current_episode_physics) > 20:
                 all_crash_physics_trajectories.append({
-                    "seed": mutate_states,  
+                    "seed": mutate_states,
+                    "is_reward_fault": is_reward_fault,
                     "trajectory": current_episode_physics
                 })
         
@@ -388,21 +455,32 @@ def main():
             if did_crash:
                 if len(crash_transitions) < TARGET_CRASH_COUNT:
                     crash_transitions.extend(current_ep_transitions)
+            elif is_reward_fault:
+                if len(reward_fault_transitions) < TARGET_CRASH_COUNT:
+                    reward_fault_transitions.extend(current_ep_transitions)
             else:
                 if len(success_transitions) < TARGET_SUCCESS_COUNT:
                     success_transitions.extend(current_ep_transitions)
             
             if seedcount % 100 == 0:
                 c_len = len(crash_transitions)
+                rf_len = len(reward_fault_transitions)
                 s_len = len(success_transitions)
-                print(f"Seeds: {seedcount} | Crash Samples: {c_len} | Physics Trajs: {len(all_crash_physics_trajectories)}")
+                print(f"Seeds: {seedcount} | Crash Samples: {c_len} | Reward Faults: {rf_len} | Physics Trajs: {len(all_crash_physics_trajectories)}")
 
         if args.save_data:
-            label = 1 if did_crash else 0
-            collect_this = False
-            if label == 1: collect_this = True
+            if did_crash:
+                label = 1
+                collect_this = True
+            elif is_reward_fault:
+                label = -1
+                collect_this = False
             else:
-                if todynet_success_count < TODYNET_SUCCESS_SOFT_CAP: collect_this = True
+                label = 0
+                if todynet_success_count < TODYNET_SUCCESS_SOFT_CAP: 
+                    collect_this = True
+                else:
+                    collect_this = False
             
             if collect_this:
                 wins, labels = process_episode_data(todynet_sequences, label, args.window_size)
@@ -410,24 +488,31 @@ def main():
                     all_window_data.append(wins)
                     all_label_data.append(labels)
                     if label == 0: todynet_success_count += 1
-        
-
 
         fuzz_selection_log.append({
-            'seed_state': selected_info['seed_state'],
             'mutate_state': mutate_states,
-            'root_seed': fuzzer.current_original,
             'parent_depth': current_mutation_depth,
             'did_crash': did_crash,
+            'is_reward_fault': is_reward_fault, 
             'elapsed_time': time.time() - start_fuzz_time,
-            'bd_distance': bd_dist,      
-            'bd_mean_angle': bd_mean_angle 
+            'survival_steps': episode_steps, 
+            'output_trajectory': np.array(rnd_sequences, dtype=np.float32) if (did_crash or is_reward_fault) else None
         })
         current_time = time.time()
+
+    # --- 6. Save Final Results & Performance Metadata ---
+    perf_meta = {
+        'total_wall_time': time.time() - start_fuzz_time,
+        'env_sim_time': env_sim_time_total,
+        'algo_logic_time': (time.time() - start_fuzz_time) - env_sim_time_total
+    }
+    with open(os.path.join(result_path, 'perf_meta.pkl'), 'wb') as f_p:
+        pickle.dump(perf_meta, f_p, protocol=pickle.HIGHEST_PROTOCOL)
 
     if args.save_transitions:
         save_data = {
             "crash": crash_transitions,
+            "reward_fault": reward_fault_transitions, 
             "success": success_transitions,
             "is_raw": True 
         }
@@ -449,6 +534,10 @@ def main():
     crash_file = 'cure_crash.pkl' if args.guide else 'ablated_crash.pkl'
     with open(os.path.join(result_path, crash_file), 'wb') as handle:
         pickle.dump(fuzzer.result, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        
+    rf_file = 'cure_reward_fault.pkl' if args.guide else 'ablated_reward_fault.pkl'
+    with open(os.path.join(result_path, rf_file), 'wb') as handle:
+        pickle.dump(reward_fault_results, handle, protocol=pickle.HIGHEST_PROTOCOL)
         
     log_file_name = os.path.join(result_path, 'selection_log.pkl')
     with open(log_file_name, 'wb') as handle:

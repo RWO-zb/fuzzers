@@ -138,14 +138,14 @@ def main():
     parser.add_argument("--load-checkpoint", type=int, help="Load checkpoint")
     parser.add_argument("--stochastic", action="store_true", default=False, help="Use stochastic actions")
     parser.add_argument("--norm-reward", action="store_true", default=False, help="Normalize reward")
-    parser.add_argument("--seed", help="Random generator seed", type=int, default=0)
+    parser.add_argument("--seed", help="Random generator seed", type=int, default=1)
     parser.add_argument("--reward-log", help="Where to log reward", default="", type=str)
     parser.add_argument("--gym-packages", type=str, nargs="+", default=[], help="External Gym packages")
     parser.add_argument("--env-kwargs", type=str, nargs="+", action=StoreDict, help="Env constructor kwargs")
     parser.add_argument("--em", action="store_true", default=True)
     
     # [Data Collection Args]
-    parser.add_argument("--save-data", action="store_true", default=True, help="Save TodyNet & Transition data")
+    parser.add_argument("--save-data", action="store_true", default=False, help="Save TodyNet & Transition data")
     parser.add_argument("--window-size", type=int, default=25, help="Sliding window size")
 
     args = parser.parse_args()
@@ -357,7 +357,7 @@ def main():
     timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
     seedcount = 0
     
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<5000:
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount < 5000:
         is_crash = False
         seedcount+=1
         output_obs = []

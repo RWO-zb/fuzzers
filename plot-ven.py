@@ -70,8 +70,8 @@ class MountainCarLoader:
             "crash_file": "cure_crash.pkl",
         },
         "MDPFuzz": {
-            "obs_file": "MC_DQN_NoCov_5_0.01_0.1_0_7000it_obs.txt",
-            "log_file": "MC_DQN_NoCov_5_0.01_0.1_0_7000it_logs.txt"
+            "obs_file": "MC_DQN_NoCov_5_0.01_0.1_0_9000it_obs.txt",
+            "log_file": "MC_DQN_NoCov_5_0.01_0.1_0_9000it_logs.txt"
         },
         "QDFuzz": {
             "csv_file": "mc_test_data.csv"
@@ -385,9 +385,9 @@ def main():
     print("\n=== Processing CARLA ===")
     carla_data = CarlaLoader.get_data()
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 4.0))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6.0))
     
-    plt.subplots_adjust(top=0.92, wspace=0.3, bottom=0.15)
+    plt.subplots_adjust(top=0.92, wspace=0.005, bottom=0.15)
     
     all_keys = sorted(list(set(mc_data.keys()) | set(bw_data.keys()) | set(carla_data.keys())))
 
@@ -405,8 +405,8 @@ def main():
             ax.text(0.5, 0.5, "No Data", ha='center', va='center')
             ax.axis('off')
         else:
-            venn(venn_data, cmap=CMAP_NAME, alpha=ALPHA_VAL, legend_loc=None, ax=ax, fontsize=14)
-        ax.set_title(title, fontsize=20, y=-0.15)
+            venn(venn_data, cmap=CMAP_NAME, alpha=ALPHA_VAL, legend_loc=None, ax=ax, fontsize=24)
+        ax.set_title(title, fontsize=28, y=-0.15)
 
     plot_hybrid_venn(axes[0], mc_data, "(a) MountainCar")
     plot_hybrid_venn(axes[1], bw_data, "(b) BipedalWalker")
@@ -418,7 +418,7 @@ def main():
         colors = [cmap(x) for x in np.linspace(0, 1, n_groups)]
         handles = [mpatches.Patch(color=colors[i], label=all_keys[i], alpha=ALPHA_VAL) for i in range(n_groups)]
         fig.legend(handles=handles, loc='upper center', ncol=n_groups, 
-                   bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=16)
+                   bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=26)
 
     print(f"\nSaving to {OUTPUT_FILE}...")
     plt.savefig(OUTPUT_FILE, dpi=300, bbox_inches='tight') 

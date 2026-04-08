@@ -56,7 +56,7 @@ class CureFuzz:
         self.current_depth = None  
         
         self.rnd = RND(input_size, hidden_size, output_size)
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device( 'cpu')
         self.rnd = self.rnd.to(self.device)
         self.optimizer = optim.Adam(list(self.rnd.predictor_net.parameters()), lr=learning_rate)
 
