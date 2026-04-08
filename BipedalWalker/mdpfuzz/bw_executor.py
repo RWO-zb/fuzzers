@@ -1,6 +1,7 @@
 import time
 import gym
 import numpy as np
+import torch  # [新增] 用于张量计算
 
 import sys
 from fuzz.executor import Executor
@@ -33,7 +34,7 @@ class BipedalWalkerExecutor(Executor):
         return mutated_input
 
     def load_policy(self):
-        # 请根据你的实际路径调整 path
+        # 保持原有加载逻辑，device 已设为 'cpu'
         return TQC.load(
             "D:\\code\\fuzzers\\BipedalWalker\\rl-trained-agents\\tqc\\BipedalWalkerHardcore-v3_1\\BipedalWalkerHardcore-v3.zip",
             device='cpu',
@@ -69,7 +70,7 @@ class BipedalWalkerExecutor(Executor):
 
     def execute_policy(self, input: np.ndarray, policy: Any) -> Tuple[float, bool, np.ndarray, float, float, float, List]:
         '''
-        Executes the model and returns the trajectory data and behaviour metrics.
+        执行策略并返回轨迹数据。
         '''
         env = gym.make('BipedalWalkerHardcore-v3')
         
@@ -79,7 +80,7 @@ class BipedalWalkerExecutor(Executor):
             env.seed(0)
             
         obs_seq = []
-        transitions = [] # [Raw] Transitions
+        transitions = []
         
         current_episode_physics = []
         acc_reward = 0.0
@@ -90,7 +91,6 @@ class BipedalWalkerExecutor(Executor):
             obs = env.reset()
         
         state = None
-        
         total_x_pos_sum = 0.0
         total_abs_angle_sum = 0.0
         episode_steps = 0
@@ -102,8 +102,22 @@ class BipedalWalkerExecutor(Executor):
         
         t0 = time.time()
         
+        # =============================================================================
+        # --- 核心优化循环 ---
+        # =============================================================================
         for t in range(self.sim_steps):
-            action, state = policy.predict(obs, state=state, deterministic=True)
+            # [优化] Fast Predict：绕过 SB3 繁重的 distribution 对象实例化
+            # 由于此处是非向量化环境，obs 是 (24,)，需要 unsqueeze 增加 Batch 维度
+            obs_tensor = torch.as_tensor(obs).float().unsqueeze(0).to("cpu")
+            with torch.no_grad():
+                # 针对 TQC / SAC 算法
+                if hasattr(policy, "policy") and hasattr(policy.policy, "actor"):
+                    mean_actions, _, _ = policy.policy.actor.get_action_dist_params(obs_tensor)
+                    # 压缩 Batch 维度并转为 numpy
+                    action = torch.tanh(mean_actions).squeeze(0).cpu().numpy()
+                else:
+                    # 兜底方案
+                    action, _ = policy.predict(obs, state=state, deterministic=True)
             
             next_obs, reward, done, info = env.step(action)
             
@@ -112,19 +126,14 @@ class BipedalWalkerExecutor(Executor):
                 if phys:
                     current_episode_physics.append(phys)
 
-            # [Fix] 修复 Action 维度保存问题
-            # 原因: gym.make 创建的环境非向量化，predict 返回的 action 是 (4,)。
-            # 之前的 action[0] 错误地只取了第一个数值，导致维度变成了 1。
-            # 现在确保完整保存 4 维动作向量。
             if isinstance(action, np.ndarray):
-                if action.ndim == 2: # 如果是向量化环境返回的 (1, 4)
+                if action.ndim == 2: 
                     act_save = action[0].copy()
-                else: # 如果是原始环境返回的 (4,)
+                else: 
                     act_save = action.copy()
             else:
                 act_save = action
             
-            # 保存 Transition (Obs 和 Next_Obs 天然是 Raw 的，因为没有 VecNormalize)
             transitions.append((obs.copy(), act_save, reward, next_obs.copy(), done))
 
             real_env = env.unwrapped

@@ -271,6 +271,7 @@ def main():
         env_kwargs=env_kwargs,
     )
 
+
     kwargs = dict(seed=args.seed)
     if algo in off_policy_algos:
         kwargs.update(dict(buffer_size=1))
