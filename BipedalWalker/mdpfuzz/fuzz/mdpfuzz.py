@@ -127,6 +127,8 @@ class Fuzzer():
         # [新增] 对齐评估指标 - 初始化统计变量
         self.evaluation_results = []
         self.total_env_sim_time = 0.0
+        self.total_gen_time = 0.0      # 生成测试样例的时间 (Selection + Mutation + Validation)
+        self.total_eval_time = 0.0     # 评估测试样例的时间 (Simulation + Coverage Calculation)
         self.fuzzing_start_time = 0.0
 
     def _set_config(self):
@@ -143,22 +145,18 @@ class Fuzzer():
         }
 
     # [新增] 对齐评估指标 - 统一记录单次执行结果的辅助函数
-    def _record_evaluation(self, state, acc_reward, done, obs_seq, generation, exec_time):
+    def _record_evaluation(self, state, acc_reward, done, obs_seq, generation, exec_time, is_physical_crash):
         """
         参照 enjoy_cure.py 逻辑：
-        - 物理碰撞直接对应 done。
-        - 奖励故障对应 (not done) 且 acc_reward < 10。
+        - 物理碰撞直接对应 is_physical_crash。
+        - 奖励故障对应 crash且非物理跌倒。
         - 轨迹数据强制转为 2D (steps, 1) 适配 test1.py。
         """
         elapsed = time.time() - self.fuzzing_start_time
         
-        # 参照 enjoy_cure.py: did_crash = done
         did_crash = bool(done)
-        # 参照 enjoy_cure.py: elif episode_reward < 10: is_reward_fault = True
-        is_reward_fault = bool((not did_crash) and (acc_reward < 10))
+        is_reward_fault = bool(did_crash and not is_physical_crash)
         
-        # 轨迹数据处理：取 obs[0] 序列并重塑为 2D 矩阵 (steps, 1)
-        # 这样 test1.py 的 np.pad(t, ((0, pad_len), (0, 0))) 就能正常运行
         traj_data = None
         if did_crash or is_reward_fault:
             traj_data = np.array([o[0] for o in obs_seq], dtype=np.float32).reshape(-1, 1)
@@ -167,6 +165,7 @@ class Fuzzer():
             'mutate_state': state.copy(),
             'did_crash': did_crash,
             'is_reward_fault': is_reward_fault,
+            'is_physical_crash': is_physical_crash,
             'elapsed_time': float(elapsed),
             'survival_steps': int(len(obs_seq)),
             'parent_depth': int(generation),
@@ -189,16 +188,19 @@ class Fuzzer():
             pickle.dump(self.evaluation_results, f)
             
         # 2. 保存 perf_meta.pkl
+        # [修改] 按照论文建议输出详细时间分层
         meta_path = os.path.join(log_dir, 'perf_meta.pkl')
         perf_meta = {
             'total_wall_time': float(total_wall_time),
             'env_sim_time': float(self.total_env_sim_time),
-            'algo_logic_time': float(total_wall_time - self.total_env_sim_time)
+            'generation_time': float(self.total_gen_time),
+            'evaluation_time': float(self.total_eval_time),
+            'other_logic_time': float(total_wall_time - self.total_gen_time - self.total_eval_time)
         }
         with open(meta_path, 'wb') as f:
             pickle.dump(perf_meta, f)
         
-        print(f"[Evaluation] Hardcoded logs saved to {log_dir}: selection_log.pkl, perf_meta.pkl")
+        print(f"[Evaluation] Logs saved. Gen Time: {self.total_gen_time:.2f}s, Eval Time: {self.total_eval_time:.2f}s")
 
     def _concatenate_state_sequence(self, state_sequence: np.ndarray) -> np.ndarray:
         data_concat = []
@@ -208,10 +210,13 @@ class Fuzzer():
 
 
     def sampling(self, n: int = 1) -> List[np.ndarray]:
+        t_start = time.time()
         if n == 1:
-            return self.executor.generate_input(self.rng)
+            res = self.executor.generate_input(self.rng)
         else:
-            return self.executor.generate_inputs(self.rng, n=n)
+            res = self.executor.generate_inputs(self.rng, n=n)
+        self.total_gen_time += (time.time() - t_start)
+        return res
 
 
     def mutate(self, state: np.ndarray, **kwargs):
@@ -219,6 +224,7 @@ class Fuzzer():
 
 
     def mutate_validate(self, state: np.ndarray, **kwargs):
+        t_start = time.time()
         attempts = 1
         while attempts < 100:
             mutate_states = self.mutate(state, **kwargs)
@@ -228,37 +234,37 @@ class Fuzzer():
                 break
             else:
                 attempts += 1
+        self.total_gen_time += (time.time() - t_start)
         return mutate_states
 
 
-    def mdp(self, state: np.ndarray, policy: Any = None) -> Tuple[float, bool, np.ndarray, float, float, float, List]:
-        episode_reward, done, obs_seq, exec_time, bd_dist, bd_angle, transitions = self.executor.execute_policy(state, policy)
-        return episode_reward, done, obs_seq, exec_time, bd_dist, bd_angle, transitions
+    def mdp(self, state: np.ndarray, policy: Any = None) -> Tuple[float, bool, np.ndarray, float, List, bool]:
+        # [修改] 累加评估耗时 (仿真部分)
+        episode_reward, done, obs_seq, exec_time, transitions, is_physical_crash = self.executor.execute_policy(state, policy)
+        self.total_eval_time += exec_time
+        return episode_reward, done, obs_seq, exec_time, transitions, is_physical_crash
 
 
-    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, generation: int = None ,**kwargs) -> Tuple[float, float, bool, List[np.ndarray], float, float, float, List]:
+    def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, generation: int = None ,**kwargs) -> Tuple[float, float, bool, List[np.ndarray], float, List, bool]:
+        # 此处内部会调用带有计时的 mutate_validate
         perturbed_state = self.mutate_validate(state, **kwargs)
         perturbation = np.linalg.norm(state - perturbed_state)
 
-        bd_dist_ret = None
-        bd_angle_ret = None
         transitions_ret = []
 
         if acc_reward is None:
-            acc_reward, crash, state_sequence, exec_time, bd_dist_ret, bd_angle_ret, transitions_ret = self.mdp(state, policy)
+            # 此处内部会调用带有计时的 mdp
+            acc_reward, crash, state_sequence, exec_time, transitions_ret, is_phys_crash_ret = self.mdp(state, policy)
         else:
             state_sequence = []
             crash = None
             exec_time = None
-            bd_dist_ret = None
-            bd_angle_ret = None
             transitions_ret = []
+            is_phys_crash_ret = False
 
-        acc_reward_perturbed, crash_perturbed, state_sequence_perturbed, exec_time_perturbed, bd_dist_p, bd_angle_p, transitions_p = self.mdp(perturbed_state, policy)
+        # 此处内部会调用带有计时的 mdp
+        acc_reward_perturbed, crash_perturbed, state_sequence_perturbed, exec_time_perturbed, transitions_p, _ = self.mdp(perturbed_state, policy)
         
-        # [新增] 对齐评估指标 - 累加环境仿真时间
-        self.total_env_sim_time += exec_time_perturbed
-
         if self.logger is not None:
             episode_length = len(state_sequence_perturbed)
             self.logger.log(
@@ -269,14 +275,12 @@ class Fuzzer():
                 Generation=generation,
                 test_exec_time=exec_time_perturbed,
                 run_time=time.time(),
-                bd_distance=bd_dist_p,
-                bd_mean_angle=bd_angle_p,
                 root_id=None 
             )
 
         sensitivity = np.abs(acc_reward - acc_reward_perturbed) / perturbation
 
-        return sensitivity, acc_reward, crash, state_sequence, exec_time, bd_dist_ret, bd_angle_ret, transitions_ret
+        return sensitivity, acc_reward, crash, state_sequence, exec_time, transitions_ret, is_phys_crash_ret
 
 
     def local_sensitivity(self, state: np.ndarray, state_mutate: np.ndarray, state_reward: float, state_mutate_reward: float):
@@ -290,11 +294,12 @@ class Fuzzer():
         if state_sequence is None:
             policy = kwargs.get('policy', None)
             random_input = kwargs.get('input', self.sampling())
-            reward, crash, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(random_input, policy)
+            # 此处内部会调用带有计时的 mdp
+            reward, crash, state_sequence, exec_time, transitions, is_phys = self.mdp(random_input, policy)
             exec_counter += 1
             
             # [新增] 对齐评估指标 - 记录初始化模型阶段
-            self._record_evaluation(random_input, reward, crash, state_sequence, 0, exec_time)
+            self._record_evaluation(random_input, reward, crash, state_sequence, 0, exec_time, is_phys)
 
             if self.logger is not None:
                 episode_length = len(state_sequence)
@@ -306,8 +311,6 @@ class Fuzzer():
                     Generation=0,
                     test_exec_time=exec_time,
                     run_time=time.time(),
-                    bd_distance=bd_dist,
-                    bd_mean_angle=bd_angle,
                     root_id=-1 
                     )
 
@@ -315,6 +318,7 @@ class Fuzzer():
             kwargs['exec_counter'] = exec_counter
             return self.initialize_coverage_model(**kwargs)
         else:
+            # 初始化不属于测试过程，不计入 Fuzz 开销
             self.coverage_model.initialize(state_sequence)
         print('Coverage model initialized')
         return exec_counter
@@ -398,17 +402,20 @@ class Fuzzer():
             current_root_id = i
             self.root_lineage[state.tobytes()] = current_root_id
 
-            sensitivity, acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.sentivity(state, policy=policy, generation=0, **kwargs)
+            sensitivity, acc_reward, oracle, state_sequence, exec_time, transitions, is_phys = self.sentivity(state, policy=policy, generation=0, **kwargs)
             
             # [新增] 对齐评估指标 - 记录初始阶段执行结果
-            self._record_evaluation(state, acc_reward, oracle, state_sequence, 0, exec_time)
+            self._record_evaluation(state, acc_reward, oracle, state_sequence, 0, exec_time, is_phys)
 
             self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
             
             state_sequence_conc = self._concatenate_state_sequence(state_sequence)
-            t0 = time.time()
+            # [修改] 累加评估耗时 (覆盖率计算部分)
+            t_cov_start = time.time()
             coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
-            coverage_time = time.time() - t0
+            self.total_eval_time += (time.time() - t_cov_start)
+            
+            coverage_time = time.time() - t_cov_start
             pool.add(state, acc_reward, coverage, sensitivity, oracle, generation=0)
 
             if self.logger is not None:
@@ -424,8 +431,6 @@ class Fuzzer():
                     test_exec_time=exec_time,
                     coverage_time=coverage_time,
                     run_time=time.time(),
-                    bd_distance=bd_dist,
-                    bd_mean_angle=bd_angle,
                     root_id=current_root_id 
                 )
             if oracle:
@@ -455,34 +460,50 @@ class Fuzzer():
                 else:
                     if (current_time - start_time) > test_budget_in_seconds: break
 
+                # [修改] 累加生成耗时 (种子选择)
+                t_sel_start = time.time()
                 input_selected, acc_reward_input, generation = pool.select(self.rng)
-                parent_root_id = self.root_lineage.get(input_selected.tobytes(), -1)
+                self.total_gen_time += (time.time() - t_sel_start)
 
+                parent_root_id = self.root_lineage.get(input_selected.tobytes(), -1)
                 new_generation = generation + 1
+                
+                # 带有计时的变异函数
                 mutant = self.mutate_validate(input_selected, **kwargs)
                 self.root_lineage[mutant.tobytes()] = parent_root_id
                 
-                acc_reward_mutant, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(mutant, policy)
+                # 带有计时的执行函数
+                acc_reward_mutant, oracle, state_sequence, exec_time, transitions, is_phys = self.mdp(mutant, policy)
                 
                 # [新增] 对齐评估指标 - 记录变异阶段执行结果
-                self._record_evaluation(mutant, acc_reward_mutant, oracle, state_sequence, new_generation, exec_time)
+                self._record_evaluation(mutant, acc_reward_mutant, oracle, state_sequence, new_generation, exec_time, is_phys)
 
                 self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
 
                 state_sequence_conc = self._concatenate_state_sequence(state_sequence)
-                t0 = time.time()
+                
+                # [修改] 累加评估耗时 (覆盖率计算部分)
+                t_cov_start = time.time()
                 coverage = self.coverage_model.sequence_freshness(state_sequence, state_sequence_conc, tau=self.tau)
-                coverage_time = time.time() - t0
+                self.total_eval_time += (time.time() - t_cov_start)
+                
+                coverage_time = time.time() - t_cov_start
                 sensitivity = None
                 
                 if oracle:
                     pool.add_crash(mutant)
                 elif (acc_reward_mutant < acc_reward_input) or (coverage < self.tau):
                     if local_sensitivity:
+                        t_sens_start = time.time()
                         sensitivity = self.local_sensitivity(input_selected, mutant, acc_reward_input, acc_reward_mutant)
+                        self.total_gen_time += (time.time() - t_sens_start)
                     else:
-                        sensitivity, _, _, _, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
+                        # 内部包含 mutate_validate (Gen) 和 mdp (Eval) 的计时
+                        sensitivity, _, _, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
+                    
+                    t_pool_start = time.time()
                     pool.add(mutant, acc_reward_mutant, coverage, sensitivity, oracle, generation=new_generation)
+                    self.total_gen_time += (time.time() - t_pool_start)
 
                 if self.logger is not None:
                     episode_length = len(state_sequence)
@@ -497,8 +518,6 @@ class Fuzzer():
                         test_exec_time=exec_time,
                         coverage_time=coverage_time,
                         run_time=time.time(),
-                        bd_distance=bd_dist,
-                        bd_mean_angle=bd_angle,
                         root_id=parent_root_id 
                     )
 
@@ -584,10 +603,10 @@ class Fuzzer():
             current_root_id = i
             self.root_lineage[state.tobytes()] = current_root_id
 
-            sensitivity, acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.sentivity(state, policy=policy, generation=0, **kwargs)
+            sensitivity, acc_reward, oracle, state_sequence, exec_time, transitions, is_phys = self.sentivity(state, policy=policy, generation=0, **kwargs)
             
             # [新增] 对齐评估指标 - 记录初始阶段执行结果
-            self._record_evaluation(state, acc_reward, oracle, state_sequence, 0, exec_time)
+            self._record_evaluation(state, acc_reward, oracle, state_sequence, 0, exec_time, is_phys)
 
             self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
             pool.add(state, acc_reward, 0, sensitivity, oracle, generation=0)
@@ -603,8 +622,6 @@ class Fuzzer():
                     Generation=0,
                     test_exec_time=exec_time,
                     run_time=time.time(),
-                    bd_distance=bd_dist,
-                    bd_mean_angle=bd_angle,
                     root_id=current_root_id 
                 )
             if oracle:
@@ -633,17 +650,20 @@ class Fuzzer():
             else:
                 if (current_time - start_time) > test_budget_in_seconds: break
 
+            t_sel_start = time.time()
             input_selected, acc_reward_input, generation = pool.select(self.rng)
-            parent_root_id = self.root_lineage.get(input_selected.tobytes(), -1)
+            self.total_gen_time += (time.time() - t_sel_start)
 
+            parent_root_id = self.root_lineage.get(input_selected.tobytes(), -1)
             new_generation = generation + 1
+            
             mutant = self.mutate_validate(input_selected, **kwargs)
             self.root_lineage[mutant.tobytes()] = parent_root_id
             
-            acc_reward_mutant, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(mutant, policy)
+            acc_reward_mutant, oracle, state_sequence, exec_time, transitions, is_phys = self.mdp(mutant, policy)
             
             # [新增] 对齐评估指标 - 记录变异阶段执行结果
-            self._record_evaluation(mutant, acc_reward_mutant, oracle, state_sequence, new_generation, exec_time)
+            self._record_evaluation(mutant, acc_reward_mutant, oracle, state_sequence, new_generation, exec_time, is_phys)
 
             self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
 
@@ -652,10 +672,15 @@ class Fuzzer():
                 pool.add_crash(mutant)
             elif acc_reward_mutant < acc_reward_input:
                 if local_sensitivity:
+                    t_sens_start = time.time()
                     sensitivity = self.local_sensitivity(input_selected, mutant, acc_reward_input, acc_reward_mutant)
+                    self.total_gen_time += (time.time() - t_sens_start)
                 else:
-                    sensitivity, _, _, _, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
+                    sensitivity, _, _, _, _, _, _ = self.sentivity(mutant, acc_reward=acc_reward_mutant, policy=policy, generation=new_generation, **kwargs)
+                
+                t_pool_start = time.time()
                 pool.add(mutant, acc_reward_mutant, 0, sensitivity, oracle, generation=new_generation)
+                self.total_gen_time += (time.time() - t_pool_start)
 
             if self.logger is not None:
                 episode_length = len(state_sequence)
@@ -668,8 +693,6 @@ class Fuzzer():
                     Generation=new_generation,
                     test_exec_time=exec_time,
                     run_time=time.time(),
-                    bd_distance=bd_dist,
-                    bd_mean_angle=bd_angle,
                     root_id=parent_root_id 
                 )
 
@@ -792,17 +815,19 @@ class Fuzzer():
             random_input = self.sampling(1)
             
             if check_redundant_input:
+                t_check_start = time.time()
                 tmp = random_input.tolist()
                 if not (tmp in self.evaluated_solutions):
                     self.evaluated_solutions.append(tmp)
                 else:
                     execute = False
+                self.total_gen_time += (time.time() - t_check_start)
             
             if execute:
-                acc_reward, oracle, state_sequence, exec_time, bd_dist, bd_angle, transitions = self.mdp(random_input, policy)
+                acc_reward, oracle, state_sequence, exec_time, transitions, is_phys = self.mdp(random_input, policy)
                 
                 # [新增] 对齐评估指标 - 记录随机测试执行结果
-                self._record_evaluation(random_input, acc_reward, oracle, state_sequence, 0, exec_time)
+                self._record_evaluation(random_input, acc_reward, oracle, state_sequence, 0, exec_time, is_phys)
 
                 self._collect_data(transitions, oracle, window_size, save_data=save_data, save_transitions=save_transitions)
                 
@@ -815,8 +840,6 @@ class Fuzzer():
                     Generation=0,
                     test_exec_time=exec_time,
                     run_time=time.time(),
-                    bd_distance=bd_dist,
-                    bd_mean_angle=bd_angle,
                     root_id=i 
                 )
                 pbar.update(1)

@@ -183,7 +183,7 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=100, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=1000, type=int)
     parser.add_argument("--save-data", action="store_true", default=False, help="Save TodyNet training data")
     parser.add_argument("--save-transitions", action="store_true", default=False, help="Save RL transitions")
     parser.add_argument("--save-physics", action="store_true", default=False, help="Save full physics state trajectories")
@@ -354,7 +354,7 @@ def main():
     
     print(f"\n[Goal] Collecting RAW Transitions. Save Physics: {args.save_physics}")
     
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 and seedcount < 500:
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
         seedcount += 1
         
         # --- 5a. Seed Selection & Mutation ---

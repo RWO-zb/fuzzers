@@ -308,8 +308,17 @@ def plot_generation_histogram(deduplicated_log):
             
     if not crash_generations: return
 
+    # === 新增：打印平均演化深度 ===
+    avg_gen = np.mean(crash_generations)
+    median_gen = np.median(crash_generations)
+    max_gen = np.max(crash_generations)
+    print(f"\n[Evolutionary Depth Analysis]")
+    print(f"  Average Crash Generation (Mean):   {avg_gen:.2f}")
+    print(f"  Median Crash Generation (Median):  {median_gen:.2f}")
+    print(f"  Deepest Crash Found at Generation: {max_gen}")
+    # ==============================
+
     generation_counts = Counter(crash_generations)
-    max_gen = max(generation_counts.keys()) if generation_counts else 0
     generations = range(0, max_gen + 2)
     counts = [generation_counts.get(gen, 0) for gen in generations]
 

@@ -68,10 +68,13 @@ class BipedalWalkerExecutor(Executor):
             
         return state_dict
 
-    def execute_policy(self, input: np.ndarray, policy: Any) -> Tuple[float, bool, np.ndarray, float, float, float, List]:
+    def execute_policy(self, input: np.ndarray, policy: Any) -> Tuple[float, bool, np.ndarray, float, List, bool]:
         '''
         执行策略并返回轨迹数据。
         '''
+        # [修改] 根据论文定义，仿真/评估时间应包含环境初始化与重置开销
+        t0 = time.time()
+        
         env = gym.make('BipedalWalkerHardcore-v3')
         
         try:
@@ -91,8 +94,6 @@ class BipedalWalkerExecutor(Executor):
             obs = env.reset()
         
         state = None
-        total_x_pos_sum = 0.0
-        total_abs_angle_sum = 0.0
         episode_steps = 0
         
         if self.save_physics:
@@ -100,23 +101,18 @@ class BipedalWalkerExecutor(Executor):
             if phys:
                 current_episode_physics.append(phys)
         
-        t0 = time.time()
-        
         # =============================================================================
         # --- 核心优化循环 ---
         # =============================================================================
         for t in range(self.sim_steps):
             # [优化] Fast Predict：绕过 SB3 繁重的 distribution 对象实例化
-            # 由于此处是非向量化环境，obs 是 (24,)，需要 unsqueeze 增加 Batch 维度
             obs_tensor = torch.as_tensor(obs).float().unsqueeze(0).to("cpu")
             with torch.no_grad():
                 # 针对 TQC / SAC 算法
                 if hasattr(policy, "policy") and hasattr(policy.policy, "actor"):
                     mean_actions, _, _ = policy.policy.actor.get_action_dist_params(obs_tensor)
-                    # 压缩 Batch 维度并转为 numpy
                     action = torch.tanh(mean_actions).squeeze(0).cpu().numpy()
                 else:
-                    # 兜底方案
                     action, _ = policy.predict(obs, state=state, deterministic=True)
             
             next_obs, reward, done, info = env.step(action)
@@ -135,11 +131,6 @@ class BipedalWalkerExecutor(Executor):
                 act_save = action
             
             transitions.append((obs.copy(), act_save, reward, next_obs.copy(), done))
-
-            real_env = env.unwrapped
-            if hasattr(real_env, 'hull'):
-                total_x_pos_sum += real_env.hull.position[0]
-                total_abs_angle_sum += abs(real_env.hull.angle)
             
             episode_steps += 1
             acc_reward += reward
@@ -152,16 +143,21 @@ class BipedalWalkerExecutor(Executor):
 
         env.close()
         
-        bd_dist = total_x_pos_sum / max(1, episode_steps)
-        bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
+        # 1. 判定物理崩溃 (躯干触地)：读取底层 Box2D 物理引擎状态
+        is_physical_crash = bool(getattr(env.unwrapped, 'game_over', False))
         
-        is_crash = (reward == -100) or (acc_reward < 10)
+        # 2. 判定性能/奖励故障：没有发生物理跌倒，但是总得分过低
+        is_reward_fault = bool((not is_physical_crash) and (acc_reward < 10))
+        
+        # 总的 Crash 标志
+        is_crash = is_physical_crash or is_reward_fault
 
         if is_crash and self.save_physics:
             if len(current_episode_physics) > 20:
                 self.crash_physics_trajectories.append({
                     "seed": input,
-                    "trajectory": current_episode_physics
+                    "trajectory": current_episode_physics,
+                    "fault_type": "physical_crash" if is_physical_crash else "reward_fault"
                 })
 
-        return acc_reward, is_crash, np.array(obs_seq), time.time() - t0, bd_dist, bd_mean_angle, transitions
+        return acc_reward, is_crash, np.array(obs_seq), time.time() - t0, transitions, is_physical_crash
