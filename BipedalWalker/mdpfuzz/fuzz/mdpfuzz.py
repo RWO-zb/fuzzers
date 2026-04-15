@@ -802,15 +802,38 @@ class Fuzzer():
         window_size = kwargs.get('window_size', 20)
         
         check_redundant_input = kwargs.get('check_redundant_input', True)
+        
+        # [新增] 获取时间预算配置
+        test_budget_in_seconds = kwargs.get('test_budget_in_seconds', None)
+        
         self.config['name'] = 'RT'
-        self.config['test_budget'] = n
         
         self.logger = FuzzerLogger(path + '_logs.txt')
         self.logger.write_columns()
         
-        pbar = tqdm.tqdm(total=n)
+        # [修改] 进度条和终止配置
+        if test_budget_in_seconds is None:
+            pbar = tqdm.tqdm(total=n)
+            self.config['test_budget'] = n
+        else:
+            start_time = time.time()
+            current_time = time.time()
+            seconds = 0
+            pbar = tqdm.tqdm(total=test_budget_in_seconds)
+            self.config['test_budget_in_seconds'] = test_budget_in_seconds
+        
         i = 0
-        while i < n:
+        # [修改] 结合时间控制的主循环
+        while True:
+            # --- 退出判断 ---
+            if test_budget_in_seconds is None:
+                if i >= n:
+                    break
+            else:
+                current_time = time.time()
+                if (current_time - start_time) > test_budget_in_seconds:
+                    break
+
             execute = True
             random_input = self.sampling(1)
             
@@ -842,8 +865,20 @@ class Fuzzer():
                     run_time=time.time(),
                     root_id=i 
                 )
-                pbar.update(1)
+                
                 i += 1
+                
+                # [修改] 如果没有时间预算，使用次数更新进度条
+                if test_budget_in_seconds is None:
+                    pbar.update(1)
+
+            # [修改] 如果有时间预算，按实际经过的秒数更新进度条 (保证进度条均匀滚动)
+            if test_budget_in_seconds is not None:
+                current_time = time.time()
+                if int(current_time - start_time) > seconds:
+                    seconds += 1
+                    pbar.update(1)
+                    
         pbar.close()
 
         if path is not None:

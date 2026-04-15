@@ -367,14 +367,23 @@ def main():
         return
         
     # -------------------------------------------------------------------
-    # [修改/新增] 仅保留 Fuzz 变异阶段的数据 (过滤掉 parent_depth == 0)
+    # [修改/新增] 智能识别测试类型 (MDPFuzz vs RT) 并处理数据
     # -------------------------------------------------------------------
-    original_log_data = [entry for entry in original_log_data if entry.get('parent_depth', 0) > 0]
+    # 扫描整个日志寻找最大的 parent_depth
+    max_depth = max([entry.get('parent_depth', 0) for entry in original_log_data] + [0])
+    
+    if max_depth > 0:
+        # 如果有大于0的深度，说明是 MDPFuzz，过滤掉深度为0的初始种子阶段
+        print(f"Detected MDPFuzz data (Max Depth: {max_depth}). Filtering out initial seeds (depth=0)...")
+        original_log_data = [entry for entry in original_log_data if entry.get('parent_depth', 0) > 0]
+        print(f"Filtered data to Fuzz Stage Only: {len(original_log_data)} mutations remaining.")
+    else:
+        # 如果最大深度只有0，说明是纯随机测试 (RT)，保留所有数据
+        print("Detected Random Testing (RT) data (Max Depth == 0). Keeping all data.")
     
     if not original_log_data:
-        print("No fuzz stage data (parent_depth > 0) found in the log.")
+        print("Log data is empty after applying filters.")
         return
-    print(f"Filtered data to Fuzz Stage Only: {len(original_log_data)} mutations remaining.")
     # -------------------------------------------------------------------
         
     deduplicated_log, dtype, expected_size = deduplicate_log(original_log_data)

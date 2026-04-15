@@ -24,7 +24,7 @@ if __name__ == '__main__':
     torch.set_num_threads(1)
     
     test_budget = 330000
-    test_budget_in_seconds = 43200
+    test_budget_in_seconds = 100
     init_budget = 1000
     k = 10
     tau = 0.01
@@ -90,6 +90,7 @@ if __name__ == '__main__':
         # [修改] 将数据保存参数传递给 random_testing
         fuzzer.random_testing(
             n=test_budget,
+            test_budget_in_seconds=test_budget_in_seconds, # [新增] 将时间预算传入
             policy=policy,
             path=path,
             exp_name=RL_NAMES[rl_index],
