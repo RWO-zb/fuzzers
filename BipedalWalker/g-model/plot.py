@@ -44,12 +44,7 @@ def load_data(file_path):
 # strictly unique crashes and unique explored states.
 # =============================================================================
 def deduplicate_log(original_log_data):
-    """
-    使用优先级覆盖逻辑进行去重：
-    1. 相同 mutate_state 仅保留一个。
-    2. 如果同一状态既有 Safe 又有 Crash 记录，优先保留 Crash 记录。
-    """
-    # 将原本的 set 替换为 dict，以便存储“状态 -> 完整条目”的映射
+    # [修改] 使用字典来存储 state_bytes -> entry 的映射，以便进行优先级覆盖
     state_to_entry = {}
     dtype_to_use = None
     expected_size = 0
@@ -65,7 +60,6 @@ def deduplicate_log(original_log_data):
         except AttributeError:
             continue
             
-        # 自动识别数据位宽 (int32/int64)
         if dtype_to_use is None:
             if len(state_bytes) == int32_size:
                 dtype_to_use = np.int32
@@ -82,22 +76,22 @@ def deduplicate_log(original_log_data):
         entry_copy = entry.copy() 
         entry_copy['mutate_state'] = state_bytes
 
-        # --- 核心逻辑替换：优先级覆盖 ---
+        # --- [核心修复：解决盲目去重导致真实 Crash 被丢弃的问题] ---
         if state_bytes not in state_to_entry:
-            # 如果是第一次见到该状态，直接存入
+            # 第一次见到这个状态，直接存入字典
             state_to_entry[state_bytes] = entry_copy
         else:
-            # 如果状态已存在，检查是否需要覆盖
+            # 如果已经存在，判断优先级：
+            # 如果当前这条记录是 Crash，但字典里存的那条是 Safe (False)，则进行覆盖！
             old_entry = state_to_entry[state_bytes]
-            # 只有当：新记录是 Crash (True)，且原存记录是 Safe (False) 时才覆盖
             if entry_copy.get('did_crash', False) and not old_entry.get('did_crash', False):
                 state_to_entry[state_bytes] = entry_copy
-        # -------------------------------------------
+        # -----------------------------------------------------------
 
     if dtype_to_use is None:
         return None, None, 0
 
-    # 返回字典中的所有值（即去重后的 entry 列表）
+    # 将字典的值转换为列表返回，保持与原代码接口一致
     return list(state_to_entry.values()), dtype_to_use, expected_size
 
 # =============================================================================
@@ -117,22 +111,9 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     explored_unique_states = len(deduplicated_log)
     state_space_coverage = (explored_unique_states / THEORETICAL_STATE_SPACE) * 100
     
-    # [修改逻辑] 修复 KeyError 并适配新旧版本的时间统计字段
     if perf_data:
         total_t = perf_data['total_wall_time']
-        sim_t = perf_data['env_sim_time']
-        
-        # 优先读取拆分后的新指标，如果不存在则回退到旧键名
-        if 'generation_time' in perf_data:
-            gen_t = perf_data['generation_time']
-            eval_t = perf_data['evaluation_time']
-            other_t = perf_data['other_logic_time']
-            # 总算法开销 = 总时间 - 环境仿真时间
-            algo_t = total_t - sim_t
-        else:
-            algo_t = perf_data.get('algo_logic_time', total_t - sim_t)
-            gen_t, eval_t, other_t = None, None, None
-            
+        algo_t = perf_data['algo_logic_time']
         overhead_ratio = (algo_t / total_t) * 100 if total_t > 0 else 0
     else:
         overhead_ratio = 0.0
@@ -144,14 +125,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     print(f"  Explored Unique States:     {explored_unique_states} / {THEORETICAL_STATE_SPACE}")
     print(f"  State Space Coverage:       {state_space_coverage:.6f}%")
     if perf_data:
-        print(f"  Fuzzer Overhead Ratio:      {overhead_ratio:.2f}% <-- % time spent in logic vs physics")
-        # [新增] 如果存在细分时间，则打印出来
-        if gen_t is not None:
-            print(f"    - Generation Logic:       {gen_t:.2f}s (Selection & Mutation)")
-            print(f"    - Evaluation Overhead:    {eval_t - sim_t:.2f}s (GMM Coverage Logic)")
-            print(f"    - Other System Logic:     {other_t:.2f}s\n")
-        else:
-            print(f"    - Total Logic Time:       {algo_t:.2f}s\n")
+        print(f"  Fuzzer Overhead Ratio:      {overhead_ratio:.2f}% <-- % time spent in logic vs physics\n")
     else:
         print(f"  Fuzzer Overhead Ratio:      N/A (perf_meta.pkl not found)\n")
 
@@ -194,7 +168,6 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     raw_survival_steps = np.array(raw_survival_steps)
     
     times_hrs = np.sort(times / 3600.0)
-    # 获取整个 original_log 的最大时间
     max_time_hrs = max([e.get('elapsed_time', 0.0) for e in original_log] + [0.0]) / 3600.0
     
     # --- 3. Basic Efficiency & Survival Depth Analysis ---
@@ -302,7 +275,6 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
             y_steps.append(best_k)
             
         try:
-            # 兼容新旧版本的 numpy trapezoid 函数
             auc_val = np.trapezoid(y_steps, x_steps)
         except AttributeError:
             auc_val = np.trapz(y_steps, x_steps)
@@ -346,7 +318,6 @@ def plot_generation_histogram(deduplicated_log):
             
     if not crash_generations: return
 
-
     # === 新增：打印平均演化深度 ===
     avg_gen = np.mean(crash_generations)
     median_gen = np.median(crash_generations)
@@ -356,6 +327,7 @@ def plot_generation_histogram(deduplicated_log):
     print(f"  Median Crash Generation (Median):  {median_gen:.2f}")
     print(f"  Deepest Crash Found at Generation: {max_gen}")
     # ==============================
+
     generation_counts = Counter(crash_generations)
     generations = range(0, max_gen + 2)
     counts = [generation_counts.get(gen, 0) for gen in generations]
@@ -381,26 +353,6 @@ def main():
     if not original_log_data: 
         print("Failed to load log data.")
         return
-        
-    # -------------------------------------------------------------------
-    # [修改/新增] 智能识别测试类型 (MDPFuzz vs RT) 并处理数据
-    # -------------------------------------------------------------------
-    # 扫描整个日志寻找最大的 parent_depth
-    max_depth = max([entry.get('parent_depth', 0) for entry in original_log_data] + [0])
-    
-    if max_depth > 0:
-        # 如果有大于0的深度，说明是 MDPFuzz，过滤掉深度为0的初始种子阶段
-        print(f"Detected MDPFuzz data (Max Depth: {max_depth}). Filtering out initial seeds (depth=0)...")
-        original_log_data = [entry for entry in original_log_data if entry.get('parent_depth', 0) > 0]
-        print(f"Filtered data to Fuzz Stage Only: {len(original_log_data)} mutations remaining.")
-    else:
-        # 如果最大深度只有0，说明是纯随机测试 (RT)，保留所有数据
-        print("Detected Random Testing (RT) data (Max Depth == 0). Keeping all data.")
-    
-    if not original_log_data:
-        print("Log data is empty after applying filters.")
-        return
-    # -------------------------------------------------------------------
         
     deduplicated_log, dtype, expected_size = deduplicate_log(original_log_data)
     if not deduplicated_log: 

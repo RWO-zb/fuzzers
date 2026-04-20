@@ -35,7 +35,7 @@ Add `--save-data` to collect Safety monitoring data
 Run the following:
 ```bash
 cd g-model
-python test_gen.py --method generative+novelty --hour 12 --step 50 --save-data --save-transitions
+python test_gen.py --method generative+novelty --hour 12 --step 50
 ```
 to start fuzz testing.  
 Add `--save-transitions` to collect fine-tuning data    

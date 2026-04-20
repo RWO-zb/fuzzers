@@ -44,8 +44,8 @@ def load_data(file_path):
 # strictly unique crashes and unique explored states.
 # =============================================================================
 def deduplicate_log(original_log_data):
-    seen_mutate_states = set()
-    deduplicated_log = []
+    # [精确修改：将原本的 set 替换为 dict，并引入优先级覆盖]
+    state_to_entry = {}
     dtype_to_use = None
     expected_size = 0
     int32_size = 15 * np.dtype(np.int32).itemsize
@@ -73,16 +73,26 @@ def deduplicate_log(original_log_data):
         if len(state_bytes) != expected_size:
             continue
             
-        if state_bytes not in seen_mutate_states:
-            seen_mutate_states.add(state_bytes)
-            entry_copy = entry.copy() 
-            entry_copy['mutate_state'] = state_bytes
-            deduplicated_log.append(entry_copy)
+        entry_copy = entry.copy() 
+        entry_copy['mutate_state'] = state_bytes
+
+        # --- [核心修复：解决盲目去重导致真实 Crash 被丢弃的问题] ---
+        if state_bytes not in state_to_entry:
+            # 第一次见到这个状态，直接存入字典
+            state_to_entry[state_bytes] = entry_copy
+        else:
+            # 如果已经存在，判断优先级：
+            # 只有当当前记录是 Crash (True)，且字典里存的是 Safe (False) 时才进行覆盖
+            old_entry = state_to_entry[state_bytes]
+            if entry_copy.get('did_crash', False) and not old_entry.get('did_crash', False):
+                state_to_entry[state_bytes] = entry_copy
+        # -----------------------------------------------------------
 
     if dtype_to_use is None:
         return None, None, 0
 
-    return deduplicated_log, dtype_to_use, expected_size
+    # 将字典的值转换为列表返回，保持与原代码下游接口绝对兼容
+    return list(state_to_entry.values()), dtype_to_use, expected_size
 
 # =============================================================================
 # --- Core Analysis Module (Efficiency & Diversity) ---

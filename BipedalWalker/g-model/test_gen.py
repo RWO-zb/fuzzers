@@ -327,6 +327,11 @@ def main():
     lose = 0
     failure_by_diffusion = 0
 
+    # [新增] 对齐评估指标：初始化数据结构和时间统计容器
+    selection_log_data = []
+    total_env_sim_time = 0.0
+    fuzzing_start_time = start_time
+
     print("--- Stage 2: Main Testing Loop ---")
     while current_time - start_time < 3600 * 12: 
 
@@ -354,7 +359,12 @@ def main():
                 failure_flag = False
                 state = None
                 test_case = diffusion_model.generate()
+                
+                # [新增] 对齐评估指标：记录环境重置时间开销
+                t0_env = time.time()
                 obs = env.reset(test_case)
+                total_env_sim_time += (time.time() - t0_env)
+
                 sequences = [obs[0]]
                 episode_reward = 0.0
                 
@@ -374,12 +384,14 @@ def main():
                     current_action = action[0]
 
                     # [Alignment] TodyNet 使用 Raw Data
-                    # 注意: obs[0] 是 normalized 的，我们这里用 raw
                     vec_28d = np.concatenate((current_obs_raw, current_action))
                     todynet_sequences.append(vec_28d)
 
                     # 执行动作
+                    # [新增] 对齐评估指标：记录物理仿真步进时间开销
+                    t0_env = time.time()
                     obs, reward, done, infos = env.step(action)
+                    total_env_sim_time += (time.time() - t0_env)
                     
                     # [Alignment] 获取 Raw Observation (下一步)
                     next_obs_norm = obs[0].copy()
@@ -406,6 +418,21 @@ def main():
                 bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
                 is_crash = (done or episode_reward < 10)
                 elapsed_time = time.time() - start_time
+
+                # [新增] 对齐评估指标：精细拆解失败状态，提取需要统一记录的核心字段
+                actual_done = bool(done[0] if isinstance(done, (list, np.ndarray)) else done)
+                did_crash_flag = actual_done
+                is_reward_fault_flag = (not actual_done) and (episode_reward < 10)
+                
+                selection_log_data.append({
+                    'mutate_state':np.array(test_case, dtype=np.int32),
+                    'did_crash': did_crash_flag,
+                    'is_reward_fault': is_reward_fault_flag,
+                    'elapsed_time': time.time() - fuzzing_start_time,
+                    'survival_steps': episode_steps,
+                    'parent_depth': 0,
+                    'output_trajectory': np.array(sequences, dtype=np.float32) if (did_crash_flag or is_reward_fault_flag) else None
+                })
                 
                 # [Data Collection] 
                 if args.save_transitions:
@@ -450,7 +477,6 @@ def main():
                 # ==========================================
                 # [修改] 修复 OverflowError
                 # ==========================================
-                # 原代码: norm_novelty = 1 / (math.e ** (novelty - 1))
                 norm_novelty = math.exp(-(novelty - 1)) # 使用 math.exp 避免数值溢出
 
                 normal_case_list.append(test_case)
@@ -464,7 +490,12 @@ def main():
             # --- Random Sampling Phase ---
             state = None
             normal_case = np.random.randint(low=1, high=4, size=15)
+            
+            # [新增] 对齐评估指标：记录环境重置时间开销
+            t0_env = time.time()
             obs = env.reset(normal_case)
+            total_env_sim_time += (time.time() - t0_env)
+
             sequences = [obs[0]]
             episode_reward = 0.0
             
@@ -472,12 +503,14 @@ def main():
             total_abs_angle_sum = 0.0
             episode_steps = 0
             
-            # 注意: 随机采样阶段我们这里不收集 TodyNet/Transition 数据，或者你可以选择收集
-            # 原逻辑中只用于 Metrics 计算，这里保持不变，只添加 Diversity 计算
             for _ in range(args.n_timesteps):
                 action, state = model.predict(obs, state=state, deterministic=deterministic)
-                obs, reward, done, infos = env.step(action)
                 
+                # [新增] 对齐评估指标：记录物理仿真步进时间开销
+                t0_env = time.time()
+                obs, reward, done, infos = env.step(action)
+                total_env_sim_time += (time.time() - t0_env)
+
                 real_env = get_real_unwrapped_env(env)
                 if hasattr(real_env, 'hull'):
                     total_x_pos_sum += real_env.hull.position[0]
@@ -492,6 +525,21 @@ def main():
             bd_mean_angle = total_abs_angle_sum / max(1, episode_steps)
             is_crash = (done or episode_reward < 10)
             elapsed_time = time.time() - start_time
+
+            # [新增] 对齐评估指标：精细拆解失败状态，提取需要统一记录的核心字段
+            actual_done = bool(done[0] if isinstance(done, (list, np.ndarray)) else done)
+            did_crash_flag = actual_done
+            is_reward_fault_flag = (not actual_done) and (episode_reward < 10)
+            
+            selection_log_data.append({
+                'mutate_state': np.array(normal_case, dtype=np.int32),
+                'did_crash': did_crash_flag,
+                'is_reward_fault': is_reward_fault_flag,
+                'elapsed_time': time.time() - fuzzing_start_time,
+                'survival_steps': episode_steps,
+                'parent_depth': 0,
+                'output_trajectory': np.array(sequences, dtype=np.float32) if (did_crash_flag or is_reward_fault_flag) else None
+            })
             
             all_test_cases_log.append({
                 "input": normal_case.tolist(), "is_crash": bool(is_crash), "source": "random",
@@ -531,7 +579,6 @@ def main():
                 # ==========================================
                 # [修改] 修复 OverflowError
                 # ==========================================
-                # 原代码: norm_novelty = 1 / (math.e ** (novelty - 1))
                 norm_novelty = math.exp(-(novelty - 1)) # 使用 math.exp 避免数值溢出
 
             metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
@@ -579,6 +626,21 @@ def main():
         json.dump(novelty_dict, f)
     with open(os.path.join(result_path, 'all_test_cases_log.pkl'), 'wb') as f:
         pickle.dump(all_test_cases_log, f)
+
+    # [新增] 对齐评估指标：将核心数据及性能元数据严格按照要求写入文件
+    selection_log_path = os.path.join(result_path, 'selection_log.pkl')
+    with open(selection_log_path, 'wb') as f_sel:
+        pickle.dump(selection_log_data, f_sel, protocol=pickle.HIGHEST_PROTOCOL)
+        
+    total_wall_time_val = time.time() - fuzzing_start_time
+    perf_meta_data = {
+        'total_wall_time': total_wall_time_val,
+        'env_sim_time': total_env_sim_time,
+        'algo_logic_time': total_wall_time_val - total_env_sim_time
+    }
+    perf_meta_path = os.path.join(result_path, 'perf_meta.pkl')
+    with open(perf_meta_path, 'wb') as f_perf:
+        pickle.dump(perf_meta_data, f_perf, protocol=pickle.HIGHEST_PROTOCOL)
 
 if __name__ == '__main__':  
     start_time = datetime.now()
