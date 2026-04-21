@@ -115,8 +115,6 @@ class Framework():
         self.last_cell_updated = None
 
         self.cells: list[list[int]] = []
-        # a 7-tuple: (input, performance, oracle result, behavior, mutation_count, elapsed_time, seed_id)
-        # [修改] 注释更新：增加了 seed_id
         self.cells_data: list[list[tuple[np.ndarray, float, bool, np.ndarray, int, float, int]]] = []
 
         self.config = {
@@ -138,7 +136,6 @@ class Framework():
         except ValueError:
             pass
 
-
     def save_configuration(self, filepath: str):
         if not filepath.endswith('config'):
             filepath += '_config'
@@ -146,24 +143,20 @@ class Framework():
         f.write(json.dumps(self.config))
         f.close()
 
-
     def save_random_state(self, filepath: str):
         f = open(f'{filepath}_state.json', 'w')
         f.write(json.dumps(self.rng.bit_generator.state))
         f.close()
         return self.rng.bit_generator.state
 
-
     def save_state(self, filepath: str):
         cell_dfs = []
         base_columns = ['score', 'is_faulty', 'cell_index'] + [f'cell{i}' for i in range(2)] + [f'behavior{i}' for i in range(2)]
-        # [修改] 增加了 seed_id 列
         all_columns = base_columns + ['input', 'mutation_count', 'elapsed_time', 'seed_id']
 
         for i, cell_data in enumerate(self.cells_data):
             records = []
             for item in cell_data:
-                # [修改] 解包增加 seed_id
                 _input, score, is_faulty, behavior, mutation_count, elapsed_time, seed_id = item
                 record = [
                     score, 
@@ -174,7 +167,7 @@ class Framework():
                     json.dumps(_input.tolist()),
                     mutation_count,
                     elapsed_time,
-                    seed_id # [修改] 保存 seed_id
+                    seed_id
                 ]
                 records.append(record)
 
@@ -194,7 +187,6 @@ class Framework():
         self.save_random_state(filepath)
         self.save_configuration(filepath)
 
-
     def load_configuration(self, filepath: str):
         if not filepath.endswith('config'):
             filepath += '_config'
@@ -202,14 +194,12 @@ class Framework():
         self.config = json.load(f)
         f.close()
 
-
     def load_random_state(self, filepath: str):
         if not filepath.endswith('state'):
             filepath += '_state'
         f = open(f'{filepath}.json', 'r')
         self.rng.bit_generator.state = json.load(f)
         f.close()
-
 
     def load_state(self, filepath: str):
         df_fp = f'{filepath}_data.csv'
@@ -224,7 +214,7 @@ class Framework():
 
         has_elapsed_time = 'elapsed_time' in df.columns
         has_mutation_count = 'mutation_count' in df.columns
-        has_seed_id = 'seed_id' in df.columns # [修改] 检查 seed_id
+        has_seed_id = 'seed_id' in df.columns
 
         for i, row in df.iterrows():
             cell = row[cell_cols].astype(int).tolist()
@@ -240,7 +230,7 @@ class Framework():
             
             mutation_count = int(row['mutation_count']) if has_mutation_count else 0
             elapsed_time = float(row['elapsed_time']) if has_elapsed_time else 0.0
-            seed_id = int(row['seed_id']) if has_seed_id else -1 # [修改] 加载 seed_id，缺省为 -1
+            seed_id = int(row['seed_id']) if has_seed_id else -1
             
             self.update_cell(cell, input_vec, performance, is_faulty, np.array(behavior), mutation_count, elapsed_time, seed_id)
 
@@ -249,20 +239,15 @@ class Framework():
         self.loaded = True
         return len(df)
 
-
     def select_input(self, index: int):
         input_index: int = self.rng.integers(0, len(self.cells_data[index]))
         selected_data = self.cells_data[index][input_index]
-        # [修改] 返回 (input, mutation_count, seed_id)
         return selected_data[0], selected_data[4], selected_data[6]
-
 
     def select_cell(self):
         return int(self.rng.integers(0, len(self.cells)))
 
-
     def update_cell(self, cell: List[int], input: np.ndarray, performance: float, is_faulty: bool, behavior: np.ndarray, mutation_count: int, elapsed_time: float, seed_id: int):
-        # [修改] 增加了 seed_id 参数
         index = None
         try:
             index = self.cells.index(cell)
@@ -275,7 +260,6 @@ class Framework():
             self.last_cell_updated = index if index is not None else (len(self.cells) - 1)
         return self.last_cell_updated
 
-
     def mutate(self, input: np.ndarray) -> np.ndarray:
         mutation = self.rng.choice(2, 15, p=[0.9, 0.1])
         if np.sum(mutation) == 0:
@@ -284,7 +268,6 @@ class Framework():
         mutated_input = np.remainder(mutated_input, 4)
         mutated_input = np.clip(mutated_input, 1, 3)
         return mutated_input
-
 
     def _check_budget(self, start_time: float, current_executions: int, time_budget_hours: Optional[float], execution_budget: Optional[int]) -> bool:
         if execution_budget is not None and current_executions >= execution_budget:
@@ -296,7 +279,6 @@ class Framework():
                 print(f"Time budget ({time_budget_hours}h) reached.")
                 return False
         return True
-
 
     def test_policy(self, model: BaseAlgorithm,
                     env_seed: int,
@@ -339,11 +321,11 @@ class Framework():
         final_states: List[np.ndarray] = []
         acc_rewards: List[float] = []
         oracles: List[bool] = []
-        seed_ids: List[int] = [] # [修改] 记录 Init 阶段的 seed_id
+        seed_ids: List[int] = [] 
         
-        testing_start_time = time.time() # 记录总时间
+        testing_start_time = time.time() 
         execution_times = []
-        n_executions = 0 # 记录总执行次数
+        n_executions = 0 
         
         # [容器]
         all_window_data = [] 
@@ -356,28 +338,28 @@ class Framework():
         TRANSITION_CRASH_CAP = 10000
         TRANSITION_SUCCESS_CAP = 90000
 
+        # [新增] 对齐评估指标：预留列表和累计计时
+        eval_selection_log = []
+        total_env_sim_time = 0.0
+
         print("Starting initialization phase...")
-        # [修改] Init 阶段不检查 Budget，也不收集数据
         for i in tqdm.tqdm(range(init_budget), disable=disable_pbar):
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
             
-            # [修改] Init 阶段分配唯一的 seed_id (即循环索引 i)
             current_seed_id = i 
 
             t0 = time.time()
-            # 执行策略，解包数据但不使用 todynet_trace 和 rl_data
-            episode_reward, oracle, behavior, fs, _, _, _ = execute_policy(input, model, env_seed, self.descriptors)
+            # [修改] 提取 8 个返回值，包括 eval_info
+            episode_reward, oracle, behavior, fs, _, _, _, _ = execute_policy(input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
-
-            # [注意] 这里移除了 save_data 逻辑
 
             inputs.append(input)
             behaviors.append(behavior)
             final_states.append(fs)
             acc_rewards.append(episode_reward)
             oracles.append(oracle)
-            seed_ids.append(current_seed_id) # [修改]
+            seed_ids.append(current_seed_id) 
             n_executions += 1
         
         if not inputs:
@@ -397,7 +379,6 @@ class Framework():
         for i in range(len(inputs)): 
             behavior = behaviors[i]
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
-            # [修改] 传入 seed_id
             mutated_input_index = self.update_cell(cell, inputs[i], acc_rewards[i], oracles[i], behavior, 0, 0.0, seed_ids[i])
             print(f'episode_reward: {acc_rewards[i]}, oracle: {float(oracles[i])}, cell_selected_index: -1, cell_updated_index: {mutated_input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, inputs[i].reshape(1, -1), fmt='%1.0f', delimiter=',')
@@ -405,7 +386,6 @@ class Framework():
             np.savetxt(final_states_buffer, final_states[i].reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
 
-        # [修改] 重置 Budget 计数器，只计算 Fuzzing 阶段
         fuzz_executions = 0
         fuzzing_start_time = time.time()
 
@@ -418,23 +398,33 @@ class Framework():
 
         print("Starting fuzzing loop (Data Collection Active)...")
         
-        # [修改] 使用 fuzzing_start_time 和 fuzz_executions 进行预算检查
         while self._check_budget(fuzzing_start_time, fuzz_executions, time_budget_hours, execution_budget):
             cell_index = self.select_cell()
             self.last_cell_selected = cell_index
-            # [修改] 从父代获取 seed_id
             input, parent_mutation_count, parent_seed_id = self.select_input(cell_index)
 
             mutated_input = self.mutate(input)
             t0 = time.time()
             
-            # [Fuzz阶段] 接收并使用数据
-            episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data = execute_policy(mutated_input, model, env_seed, self.descriptors)
+            # [修改] 提取 eval_info，以支持统一评估指标的数据收集
+            episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data, eval_info = execute_policy(mutated_input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
             
             n_executions += 1 
-            fuzz_executions += 1 # 增加 Fuzz 计数
+            fuzz_executions += 1 
+
+            # [新增] 对齐评估指标：累加时间开销和收集日志
+            total_env_sim_time += eval_info['env_sim_time']
+            eval_selection_log.append({
+                'mutate_state': mutated_input.copy(),
+                'did_crash': eval_info['did_crash'],
+                'is_reward_fault': eval_info['is_reward_fault'],
+                'elapsed_time': time.time() - fuzzing_start_time,
+                'survival_steps': eval_info['survival_steps'],
+                'parent_depth': parent_mutation_count,
+                'output_trajectory': eval_info['output_trajectory']
+            })
 
             # [Fuzz阶段] 数据收集逻辑
             if save_data:
@@ -463,7 +453,6 @@ class Framework():
             new_mutation_count = parent_mutation_count + 1
             elapsed_time = time.time() - fuzzing_start_time
             
-            # [修改] 传递 parent_seed_id 给子代
             mutated_input_index = self.update_cell(cell, mutated_input, episode_reward, oracle, behavior, new_mutation_count, elapsed_time, parent_seed_id)
             print(f'episode_reward: {episode_reward}, oracle: {float(oracle)}, cell_selected_index: {cell_index}, cell_updated_index: {mutated_input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, mutated_input.reshape(1, -1), fmt='%1.0f', delimiter=',')
@@ -503,6 +492,19 @@ class Framework():
             with open(trans_file, 'wb') as f_t:
                 pickle.dump(save_dict, f_t, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"RL Transitions saved. (Crash: {len(crash_transitions)}, Success: {len(success_transitions)})")
+
+        # [新增] 保存对齐评估指标与开销
+        out_dir = os.path.dirname(filepath) if os.path.dirname(filepath) else '.'
+        with open(os.path.join(out_dir, 'selection_log.pkl'), 'wb') as f:
+            pickle.dump(eval_selection_log, f)
+            
+        perf_meta = {
+            'total_wall_time': time.time() - fuzzing_start_time,
+            'env_sim_time': total_env_sim_time,
+            'algo_logic_time': (time.time() - fuzzing_start_time) - total_env_sim_time
+        }
+        with open(os.path.join(out_dir, 'perf_meta.pkl'), 'wb') as f:
+            pickle.dump(perf_meta, f)
 
 
     def random_testing(self, model: BaseAlgorithm,
@@ -557,6 +559,10 @@ class Framework():
         success_transitions = []
         TRANSITION_CRASH_CAP = 10000
         TRANSITION_SUCCESS_CAP = 90000
+
+        # [新增] 对齐评估指标：预留列表和累计计时
+        eval_selection_log = []
+        total_env_sim_time = 0.0
         
         if execution_budget is not None:
             pbar = tqdm.tqdm(total=execution_budget, disable=disable_pbar)
@@ -565,16 +571,28 @@ class Framework():
 
         while self._check_budget(start_time, n_executions, time_budget_hours, execution_budget):
             input: np.ndarray = self.rng.integers(low=1, high=4, size=15)
-            # [修改] Random Testing 每次都是新种子，使用 n_executions 作为 ID
             current_seed_id = n_executions 
             
             t0 = time.time()
             
-            episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data = execute_policy(input, model, env_seed, self.descriptors)
+            # [修改] 解包增加 eval_info
+            episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data, eval_info = execute_policy(input, model, env_seed, self.descriptors)
             t1 = time.time()
             execution_times.append(t1 - t0)
             
             n_executions += 1 
+
+            # [新增] 对齐评估指标收集
+            total_env_sim_time += eval_info['env_sim_time']
+            eval_selection_log.append({
+                'mutate_state': input.copy(),
+                'did_crash': eval_info['did_crash'],
+                'is_reward_fault': eval_info['is_reward_fault'],
+                'elapsed_time': time.time() - start_time,
+                'survival_steps': eval_info['survival_steps'],
+                'parent_depth': 0,
+                'output_trajectory': eval_info['output_trajectory']
+            })
 
             if save_data:
                 is_crash = oracle
@@ -599,7 +617,6 @@ class Framework():
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
             elapsed_time = time.time() - start_time
 
-            # [修改] 传递 seed_id
             input_index = self.update_cell(cell, input, episode_reward, oracle, behavior, 0, elapsed_time, current_seed_id)
             print(f'episode_reward: {episode_reward}, oracle: {float(oracle)}, cell_selected_index: -1, cell_updated_index: {input_index}, nb_cells: {len(self.cells)}, execution_time: {t1 - t0}', file=logs_buffer)
             np.savetxt(inputs_buffer, input.reshape(1, -1), fmt='%1.0f', delimiter=',')
@@ -638,6 +655,19 @@ class Framework():
             with open(trans_file, 'wb') as f_t:
                 pickle.dump(save_dict, f_t, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"RL Transitions saved. (Crash: {len(crash_transitions)}, Success: {len(success_transitions)})")
+
+        # [新增] 保存对齐评估指标与开销
+        out_dir = os.path.dirname(filepath) if os.path.dirname(filepath) else '.'
+        with open(os.path.join(out_dir, 'selection_log.pkl'), 'wb') as f:
+            pickle.dump(eval_selection_log, f)
+            
+        perf_meta = {
+            'total_wall_time': time.time() - start_time,
+            'env_sim_time': total_env_sim_time,
+            'algo_logic_time': (time.time() - start_time) - total_env_sim_time
+        }
+        with open(os.path.join(out_dir, 'perf_meta.pkl'), 'wb') as f:
+            pickle.dump(perf_meta, f)
 
 
     def novelty_search(self, model: BaseAlgorithm,
@@ -692,6 +722,10 @@ class Framework():
         success_transitions = []
         TRANSITION_CRASH_CAP = 10000
         TRANSITION_SUCCESS_CAP = 90000
+
+        # [新增] 对齐评估指标：预留列表和累计计时
+        eval_selection_log = []
+        total_env_sim_time = 0.0
         
         print(f'Starting novelty_search. Time Budget: {time_budget_hours}h, Execution Budget: {execution_budget} (Init not counted)')
 
@@ -699,10 +733,8 @@ class Framework():
         self.config['xedges'] = list(self.xedges)
         self.config['yedges'] = list(self.xedges)
 
-        # [修改] record 增加 seed_id
         def record(input: np.ndarray, reward: float, oracle: bool, behavior: np.ndarray, final_state: np.ndarray, mutation_count: int, elapsed_time: float, seed_id: int) -> None:
             cell = compute_cell(behavior, self.xedges, self.yedges).tolist()
-            # [修改] 传递 seed_id
             updated_cell_index = self.update_cell(cell, input, reward, oracle, behavior, mutation_count, elapsed_time, seed_id)
             print(f'episode_reward: {reward}, oracle: {float(oracle)}, cell_updated_index: {updated_cell_index}, nb_cells: {len(self.cells)}', file=logs_buffer)
             np.savetxt(inputs_buffer, input.reshape(1, -1), fmt='%1.0f', delimiter=',')
@@ -710,25 +742,37 @@ class Framework():
             np.savetxt(final_states_buffer, final_state.reshape(1, -1), delimiter=',')
             np.savetxt(cells_buffer, np.array(cell).reshape(1, -1), fmt='%1.0f', delimiter=',')
         
-        # [修改] evaluate 增加 seed_ids 参数
         def evaluate(individuals: np.ndarray, mutation_counts: np.ndarray, seed_ids: np.ndarray, loop_start_time: float = None, check_budget: bool = True, collect_data: bool = True) -> np.ndarray:
             nonlocal n_executions 
             nonlocal fuzz_executions
             nonlocal todynet_success_count 
+            nonlocal total_env_sim_time # [新增] 对齐评估指标需要
             
             behaviors = []
             for i, ind in enumerate(individuals):
-                # 如果处于 Fuzz 阶段 (check_budget=True)，则检查预算
                 if check_budget:
                     if not self._check_budget(loop_start_time, fuzz_executions, time_budget_hours, execution_budget):
                         break 
                 
-                episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data = execute_policy(ind, model, env_seed, self.descriptors, 300)
+                # [修改] 提取 eval_info
+                episode_reward, oracle, behavior, fs, _, todynet_trace, rl_data, eval_info = execute_policy(ind, model, env_seed, self.descriptors, 300)
                 n_executions += 1
-                if check_budget:
-                    fuzz_executions += 1 # 仅 Fuzz 阶段增加计数
                 
-                # 如果 collect_data 为 True (仅 Fuzz 阶段)，则收集数据
+                if check_budget:
+                    fuzz_executions += 1 
+                    
+                    # [新增] 仅在Fuzzing阶段进行对齐评估指标的收集
+                    total_env_sim_time += eval_info['env_sim_time']
+                    eval_selection_log.append({
+                        'mutate_state': ind.copy(),
+                        'did_crash': eval_info['did_crash'],
+                        'is_reward_fault': eval_info['is_reward_fault'],
+                        'elapsed_time': time.time() - loop_start_time,
+                        'survival_steps': eval_info['survival_steps'],
+                        'parent_depth': mutation_counts[i],
+                        'output_trajectory': eval_info['output_trajectory']
+                    })
+                
                 if collect_data and save_data:
                     is_crash = oracle
                     label = 1 if is_crash else 0
@@ -754,7 +798,6 @@ class Framework():
                 else:
                     e_time = time.time() - loop_start_time
 
-                # [修改] 传递 seed_ids[i]
                 record(ind, episode_reward, oracle, behavior, fs, mutation_counts[i], e_time, seed_ids[i])
                 behaviors.append(behavior)
             return np.array(behaviors)
@@ -771,10 +814,8 @@ class Framework():
         pop = self.rng.integers(low=1, high=4, size=(pop_size, 15))
         pop_mutation_counts = np.zeros(pop_size, dtype=int)
         
-        # [修改] 为初始种群分配 seed_id (0 到 pop_size-1)
         pop_seed_ids = np.arange(pop_size, dtype=int)
         
-        # [修改] Init 阶段: 传递 pop_seed_ids
         pop_behaviors = evaluate(pop, pop_mutation_counts, pop_seed_ids, loop_start_time=None, check_budget=False, collect_data=False)
         
         if not pop_behaviors.any():
@@ -801,17 +842,14 @@ class Framework():
              pbar = tqdm.tqdm(disable=disable_pbar)
 
         print("Starting Novelty Search loop (Data Collection Active)...")
-        ns_start_time = time.time() # 记录 Fuzz 开始时间
+        ns_start_time = time.time() 
 
-        # [修改] 使用 Fuzz 计数器检查预算
         while self._check_budget(ns_start_time, fuzz_executions, time_budget_hours, execution_budget):
             offspring = mutate(pop)
             offspring_mutation_counts = pop_mutation_counts + 1
-            # [修改] 子代继承父代的 seed_id (因为是逐个突变，顺序对应)
             offspring_seed_ids = pop_seed_ids.copy()
             
             prev_executions = fuzz_executions
-            # [修改] Loop 阶段: 传递 offspring_seed_ids
             offspring_behaviors = evaluate(offspring, offspring_mutation_counts, offspring_seed_ids, loop_start_time=ns_start_time, check_budget=True, collect_data=True)
             
             executions_diff = fuzz_executions - prev_executions
@@ -826,7 +864,6 @@ class Framework():
             joined_pop = np.vstack([pop, offspring[:len(offspring_behaviors)]]) 
             joined_scores = np.hstack([pop_nov_scores, offspring_nov_scores])
             joined_mutation_counts = np.hstack([pop_mutation_counts, offspring_mutation_counts[:len(offspring_behaviors)]])
-            # [修改] 合并 seed_ids
             joined_seed_ids = np.hstack([pop_seed_ids, offspring_seed_ids[:len(offspring_behaviors)]])
             
             median_score = np.median(joined_scores)
@@ -838,7 +875,6 @@ class Framework():
             pop = joined_pop[mask].copy()
             pop_behaviors = np.vstack([pop_behaviors, offspring_behaviors])[mask]
             pop_mutation_counts = joined_mutation_counts[mask]
-            # [修改] 筛选 seed_ids
             pop_seed_ids = joined_seed_ids[mask]
             
             pop_nov_scores = nov_archive.score(pop_behaviors)
@@ -847,7 +883,6 @@ class Framework():
                 pop_behaviors = pop_behaviors[:pop_size]
                 pop_nov_scores = pop_nov_scores[:pop_size]
                 pop_mutation_counts = pop_mutation_counts[:pop_size]
-                # [修改] 截断 seed_ids
                 pop_seed_ids = pop_seed_ids[:pop_size]
 
             [np.savetxt(nov_scores_buffer, s.reshape(1, -1), delimiter=',') for s in pop_nov_scores]
@@ -881,6 +916,19 @@ class Framework():
                 pickle.dump(save_dict, f_t, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"RL Transitions saved. (Crash: {len(crash_transitions)}, Success: {len(success_transitions)})")
 
+        # [新增] 保存对齐评估指标与开销
+        out_dir = os.path.dirname(filepath) if os.path.dirname(filepath) else '.'
+        with open(os.path.join(out_dir, 'selection_log.pkl'), 'wb') as f:
+            pickle.dump(eval_selection_log, f)
+            
+        perf_meta = {
+            'total_wall_time': time.time() - ns_start_time,
+            'env_sim_time': total_env_sim_time,
+            'algo_logic_time': (time.time() - ns_start_time) - total_env_sim_time
+        }
+        with open(os.path.join(out_dir, 'perf_meta.pkl'), 'wb') as f:
+            pickle.dump(perf_meta, f)
+
 class MAPElitesFramework(Framework):
     def __init__(self, rand_seed: int, cell_granularity: int, descriptors: List[int], **kwargs) -> None:
         if kwargs.get('name') is None:
@@ -895,7 +943,6 @@ class MAPElitesFramework(Framework):
         scores = list(map(lambda x: x[1], self.cells_data[index]))
         best_performer_index = int(np.argmin(scores))
         selected_data = self.cells_data[index][best_performer_index]
-        # [修改] 增加返回 seed_id (index 6)
         return selected_data[0], selected_data[4], selected_data[6]
 
 
@@ -907,9 +954,9 @@ if __name__ == '__main__':
 
     # --- 配置区域 ---
     TIME_BUDGET_HOURS = None    
-    EXECUTION_BUDGET = 5000    
+    EXECUTION_BUDGET = 500    
     
-    init_budget = 1000
+    init_budget = 100
     cell_granularity = 50
 
     population_size = 100

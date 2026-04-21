@@ -1,4 +1,10 @@
-import argparse, importlib, os, sys, time, copy, tqdm, pickle, gym, yaml
+import os
+# [性能优化] 必须在导入 torch 之前设置，强制单线程以对齐性能
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+
+import argparse, importlib, sys, time, copy, tqdm, pickle, gym, yaml
 import numpy as np
 import torch as th
 from stable_baselines3.common.utils import set_random_seed
@@ -12,6 +18,27 @@ from datetime import datetime
 
 from interfaces import normalize_data, Memory, Density, compute_sensitivity, case_clip, compute_novelty, Grid
 from diffusion import Diffusion
+
+# [性能优化] 限制 PyTorch 内部线程
+th.set_num_threads(1)
+
+# =============================================================================
+# --- 极速推理接口：绕过 SB3 distribution.py 的高额开销 ---
+# =============================================================================
+def fast_predict(model, obs):
+    """
+    直接提取网络均值输出，彻底规避 distribution.py 产生的计算开销。
+    """
+    obs_tensor = th.as_tensor(obs).float().to("cpu")
+    with th.no_grad():
+        # 针对 BipedalWalker 常用的 TQC / SAC / TD3 算法
+        if hasattr(model.policy, "actor") and hasattr(model.policy.actor, "get_action_dist_params"):
+            mean_actions, _, _ = model.policy.actor.get_action_dist_params(obs_tensor)
+            # 动作必须经过 tanh 映射到 [-1, 1]
+            action = th.tanh(mean_actions).cpu().numpy()
+            return action
+        # 兜底：如果算法不匹配，使用原版 predict
+        return model.predict(obs, deterministic=True)[0]
 
 # ==========================================
 # [Alignment] 辅助函数：获取 Raw Observation
@@ -215,8 +242,8 @@ def main():
 
     set_random_seed(args.seed)
 
-    if args.num_threads > 0:
-        th.set_num_threads(args.num_threads)
+    # 强制线程数为 1 (即使 argparse 传入了其他值，这里也由全局优化决定)
+    th.set_num_threads(1)
 
     is_atari = ExperimentManager.is_atari(env_id)
 
@@ -235,7 +262,7 @@ def main():
 
     log_dir = args.reward_log if args.reward_log != "" else None
 
-    # 创建环境 (可能包含 VecNormalize)
+    # 创建环境
     env = create_test_env(
         env_id,
         n_envs=args.n_envs,
@@ -259,7 +286,8 @@ def main():
             "clip_range": lambda _: 0.0,
         }
 
-    model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, **kwargs)
+    # [优化] 强制加载模型到 CPU
+    model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, device="cpu", **kwargs)
 
     # Diffusion Setup
     case_dimension = 15
@@ -333,7 +361,7 @@ def main():
     fuzzing_start_time = start_time
 
     print("--- Stage 2: Main Testing Loop ---")
-    while current_time - start_time < 3600 * 12: 
+    while current_time - start_time < 3600 * 0.05: 
 
         if cur_step > 0 and cur_step % args.step == 0:
             # --- Generative Phase ---
@@ -380,7 +408,8 @@ def main():
                     current_obs_norm = obs[0].copy()
                     current_obs_raw = get_raw_obs(env, current_obs_norm)
 
-                    action, state = model.predict(obs, state=state, deterministic=deterministic)
+                    # [替换] 使用极速接口规避分布开销
+                    action = fast_predict(model, obs)
                     current_action = action[0]
 
                     # [Alignment] TodyNet 使用 Raw Data
@@ -419,7 +448,7 @@ def main():
                 is_crash = (done or episode_reward < 10)
                 elapsed_time = time.time() - start_time
 
-                # [新增] 对齐评估指标：精细拆解失败状态，提取需要统一记录的核心字段
+                # [新增] 对齐评估指标：精细拆解失败状态
                 actual_done = bool(done[0] if isinstance(done, (list, np.ndarray)) else done)
                 did_crash_flag = actual_done
                 is_reward_fault_flag = (not actual_done) and (episode_reward < 10)
@@ -474,10 +503,7 @@ def main():
                 novelty_dict[abstract_id] = novelty_dict.get(abstract_id, 0) + 1
                 novelty = novelty_dict[abstract_id]
                 
-                # ==========================================
-                # [修改] 修复 OverflowError
-                # ==========================================
-                norm_novelty = math.exp(-(novelty - 1)) # 使用 math.exp 避免数值溢出
+                norm_novelty = math.exp(-(novelty - 1)) 
 
                 normal_case_list.append(test_case)
                 metric_list.append([0, 0, 0, norm_novelty])
@@ -504,7 +530,8 @@ def main():
             episode_steps = 0
             
             for _ in range(args.n_timesteps):
-                action, state = model.predict(obs, state=state, deterministic=deterministic)
+                # [替换] 使用极速接口规避分布开销
+                action = fast_predict(model, obs)
                 
                 # [新增] 对齐评估指标：记录物理仿真步进时间开销
                 t0_env = time.time()
@@ -526,7 +553,7 @@ def main():
             is_crash = (done or episode_reward < 10)
             elapsed_time = time.time() - start_time
 
-            # [新增] 对齐评估指标：精细拆解失败状态，提取需要统一记录的核心字段
+            # [新增] 对齐评估指标：精细拆解失败状态
             actual_done = bool(done[0] if isinstance(done, (list, np.ndarray)) else done)
             did_crash_flag = actual_done
             is_reward_fault_flag = (not actual_done) and (episode_reward < 10)
@@ -548,7 +575,7 @@ def main():
 
             normal_case_list.append(normal_case)
             
-            # Metrics calculation (Density, Sensitivity, etc.)
+            # Metrics calculation
             density, norm_density = 0, 0
             sensitivity, norm_sensitivity = 0, 0
             performance, norm_performance = 0, 0
@@ -575,11 +602,7 @@ def main():
                 abstract_id = novelty_grid.state_abstract(np.array([sequences[-1]]))[0]
                 novelty_dict[abstract_id] = novelty_dict.get(abstract_id, 0) + 1
                 novelty = novelty_dict[abstract_id]
-                
-                # ==========================================
-                # [修改] 修复 OverflowError
-                # ==========================================
-                norm_novelty = math.exp(-(novelty - 1)) # 使用 math.exp 避免数值溢出
+                norm_novelty = math.exp(-(novelty - 1))
 
             metric_list.append([norm_density, norm_sensitivity, norm_performance, norm_novelty])
             memory_model.append(normal_case, density, sensitivity, performance, novelty)
