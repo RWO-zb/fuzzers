@@ -1,7 +1,15 @@
-import argparse, importlib, os, sys, time, copy, tqdm, pickle, yaml
+import os
+# [新增] 性能优化：强制单线程以减少 CPU 上下文切换开销
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+
+import argparse, importlib, sys, time, copy, tqdm, pickle, yaml
 import numpy as np
 import torch as th
 import torch 
+# [新增] 性能优化：限制 PyTorch 内部线程
+torch.set_num_threads(1)
 import random 
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecEnvWrapper, VecVideoRecorder, VecNormalize
@@ -32,6 +40,24 @@ def get_raw_obs(env, obs):
         return norm_env.unnormalize_obs(obs)
     
     return obs
+
+# ==========================================
+# [新增] 辅助函数：极速推理
+# ==========================================
+def fast_predict(model, obs):
+    """
+    直接提取网络均值输出，彻底规避 distribution.py 产生的计算开销。
+    """
+    obs_tensor = th.as_tensor(obs).float().to("cpu")
+    with th.no_grad():
+        # 针对 BipedalWalker 常用的 TQC / SAC / TD3 算法
+        if hasattr(model.policy, "actor") and hasattr(model.policy.actor, "get_action_dist_params"):
+            mean_actions, _, _ = model.policy.actor.get_action_dist_params(obs_tensor)
+            # 动作必须经过 tanh 映射到 [-1, 1]
+            action = th.tanh(mean_actions).cpu().numpy()
+            return action
+        # 兜底：如果算法不匹配，使用原版 predict
+        return model.predict(obs, deterministic=True)[0]
 
 # ==========================================
 # [Helper] TodyNet 数据处理函数
@@ -231,7 +257,7 @@ def main():
         env_kwargs=env_kwargs,
     )
 
-    kwargs = dict(seed=args.seed)
+    kwargs = dict(seed=args.seed, device='cpu') # [修改] 强制 SB3 模型在 CPU 上加载
     if algo in off_policy_algos:
         kwargs.update(dict(buffer_size=1))
 
@@ -250,14 +276,14 @@ def main():
     obs = env.reset(states)
 
     siamese_model = predict_siamese.load_tapnet_mode()
-    siamese_model.cuda()
-    siamese_model.load_state_dict(th.load(r'./tapnet/data/weights/tapnet.pkl'))
+    siamese_model.cpu() # [修改] TodyNet 模型强制放在 CPU
+    siamese_model.load_state_dict(th.load(r'./tapnet/data/weights/tapnet.pkl', map_location='cpu')) # [修改] 权重映射到 CPU
     siamese_model.eval()
     bench_noCrash = Hyperparameter.bench_noCrash
     if len(bench_noCrash) == 0:
-        bench_noCrash = th.zeros((1, Hyperparameter.Step, Hyperparameter.Dimension)).cuda()
+        bench_noCrash = th.zeros((1, Hyperparameter.Step, Hyperparameter.Dimension)).cpu() # [修改] Tensor 强制生成在 CPU
     else:
-         bench_noCrash = th.FloatTensor(np.array(bench_noCrash)).cuda()
+         bench_noCrash = th.FloatTensor(np.array(bench_noCrash)).cpu() # [修改] Tensor 强制生成在 CPU
          if len(bench_noCrash.shape) == 2:
             bench_noCrash = bench_noCrash.unsqueeze(0)
    
@@ -271,7 +297,7 @@ def main():
     ep_len = 0
     successes = []
     fuzzer = fuzzing()
-    seeds_num = 1000
+    seeds_num = 100
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
 
@@ -297,7 +323,7 @@ def main():
         obs = env.reset(states)
         sequences = [obs[0]]
         for _ in range(args.n_timesteps):
-            action, state = model.predict(obs, state=state, deterministic=deterministic)
+            action = fast_predict(model, obs) # [修改] 使用 fast_predict 绕过 distribution.py
             obs, reward, done, infos = env.step(action)
             sequences.append(obs[0])
             episode_reward += reward[0]
@@ -315,7 +341,7 @@ def main():
             print('mutate states ', mutate_states)
 
             for _ in range(args.n_timesteps):
-                action, state = model.predict(obs, state=state, deterministic=deterministic)
+                action = fast_predict(model, obs) # [修改] 使用 fast_predict
                 obs, reward, done, infos = env.step(action)
                 episode_reward_mutate += reward[0]
                 if done: break
@@ -357,7 +383,11 @@ def main():
     timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
     seedcount = 0
     
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount < 5000:
+    # [新增] 对齐评估指标：初始化记录结构
+    unified_selection_log = []
+    unified_env_sim_time = 0.0
+    
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount < 500:
         is_crash = False
         seedcount+=1
         output_obs = []
@@ -370,8 +400,13 @@ def main():
         episode_reward = 0.0
         
         # Reset Env
+        # [新增] 对齐评估指标：环境仿真计时开始
+        _t_sim_start = time.time()
         obs = env.reset(mutate_states)
+        unified_env_sim_time += (time.time() - _t_sim_start)
+
         sequences = [obs[0]]
+        unified_traj = [obs[0].copy()] # [新增] 对齐评估指标：记录原始轨迹序列
         
         # [Fix] Containers for this episode
         current_ep_transitions_raw = [] 
@@ -385,10 +420,13 @@ def main():
             # [Fix] Get Raw Observation (Current)
             curr_obs_raw = get_raw_obs(env, obs[0].copy())
             
-            action, state = model.predict(obs, state=state, deterministic=deterministic)
+            action = fast_predict(model, obs) # [修改] 使用 fast_predict
             
             # Step
+            # [新增] 对齐评估指标：环境仿真计时开始
+            _t_sim_start = time.time()
             next_obs, reward, done, infos = env.step(action)
+            unified_env_sim_time += (time.time() - _t_sim_start)
             
             # [Fix] Get Raw Observation (Next)
             next_obs_raw = get_raw_obs(env, next_obs[0].copy())
@@ -405,6 +443,7 @@ def main():
 
             obs = next_obs
             sequences.append(obs[0])
+            unified_traj.append(obs[0].copy()) # [新增] 对齐评估指标：追加当前步状态
             if not args.no_render:
                 env.render("human")
             episode_reward += reward[0]
@@ -491,6 +530,20 @@ def main():
                 # <--- 修改：传入 root_id=current_root_id
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose, current_gen, root_id=current_root_id)
         
+        # [新增] 对齐评估指标：构建和剥离干净的单次探索评估数据
+        _did_crash = bool(done)
+        _is_reward_fault = bool((episode_reward < 10) and not _did_crash)
+
+        unified_selection_log.append({
+            'mutate_state': copy.deepcopy(mutate_states),
+            'did_crash': _did_crash,
+            'is_reward_fault': _is_reward_fault,
+            'elapsed_time': time.time() - start_fuzz_time,
+            'survival_steps': episode_steps,
+            'parent_depth': current_gen,
+            'output_trajectory': np.array(unified_traj, dtype=np.float32) if (_did_crash or _is_reward_fault) else None
+        })
+        
         # [Restore] Record Data for seqfuzzplot.py (Exact format requested)
         log_entry = {
             'state': copy.deepcopy(mutate_states),
@@ -539,6 +592,18 @@ def main():
         
         if seedcount % 10 == 0 and args.save_data:
              print(f"[Info] Trans(F/S): {len(crash_transitions)}/{len(success_transitions)}, TodyNet(S): {todynet_success_count}")
+
+    # [新增] 对齐评估指标：主循环结束，保存开销元数据与日志列表
+    unified_total_wall_time = time.time() - start_fuzz_time
+    perf_meta = {
+        'total_wall_time': unified_total_wall_time,
+        'env_sim_time': unified_env_sim_time,
+        'algo_logic_time': unified_total_wall_time - unified_env_sim_time
+    }
+    with open(os.path.join(result_path, 'selection_log.pkl'), 'wb') as f_sel:
+        pickle.dump(unified_selection_log, f_sel, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(os.path.join(result_path, 'perf_meta.pkl'), 'wb') as f_perf:
+        pickle.dump(perf_meta, f_perf, protocol=pickle.HIGHEST_PROTOCOL)
 
     if args.em:
         file_name = os.path.join(result_path, 'crash_EM.pkl')

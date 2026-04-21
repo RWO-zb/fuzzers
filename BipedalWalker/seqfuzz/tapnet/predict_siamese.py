@@ -71,7 +71,7 @@ def predict_once(model, bench_noCrash0, seq):
         seq = seq[:Hyperparameter.Step]
     
     siameseP2 = [seq]
-    siameseP2 = torch.FloatTensor(np.array(siameseP2)).cuda()
+    siameseP2 = torch.FloatTensor(np.array(siameseP2)).cpu()
     
     # 确保输入张量有正确的形状 [batch_size, seq_len, input_size]
     if len(siameseP2.shape) == 2:
