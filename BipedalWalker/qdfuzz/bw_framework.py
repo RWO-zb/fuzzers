@@ -953,10 +953,10 @@ if __name__ == '__main__':
     model = load_model()
 
     # --- 配置区域 ---
-    TIME_BUDGET_HOURS = None    
-    EXECUTION_BUDGET = 500    
+    TIME_BUDGET_HOURS = 12   
+    EXECUTION_BUDGET = None   
     
-    init_budget = 100
+    init_budget = 1000
     cell_granularity = 50
 
     population_size = 100

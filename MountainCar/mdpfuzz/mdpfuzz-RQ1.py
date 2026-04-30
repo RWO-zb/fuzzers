@@ -3,7 +3,7 @@ import numpy as np
 import csv
 
 #LOG_FILE = 'logs/MC_DQN_NoCov_5_0.01_0.1_0_12h_logs.txt'
-LOG_FILE = 'logs/MC_DQN_RT_0_budget730000_logs.txt' 
+LOG_FILE = 'logs/MC_DQN_RT_1022_10000it_logs.txt' 
 
 #LABEL = 'MDPFuzz' 
 LABEL = 'Random Testing'

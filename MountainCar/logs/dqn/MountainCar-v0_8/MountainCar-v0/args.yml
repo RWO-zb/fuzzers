@@ -26,7 +26,7 @@
   - - n_startup_trials
     - 10
   - - n_timesteps
-    - 90000
+    - 98000
   - - n_trials
     - 10
   - - no_optim_plots
@@ -46,7 +46,7 @@
   - - save_replay_buffer
     - false
   - - seed
-    - 2750392984
+    - 0
   - - storage
     - null
   - - study_name

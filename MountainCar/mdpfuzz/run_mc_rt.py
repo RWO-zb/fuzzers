@@ -32,7 +32,7 @@ if __name__ == '__main__':
     BUDGET_TYPE = 'ITERATION' 
     
     BUDGET_HOURS = 12       
-    BUDGET_ITERS = 5000 
+    BUDGET_ITERS = 10000
     # ============================
 
     if BUDGET_TYPE == 'TIME':

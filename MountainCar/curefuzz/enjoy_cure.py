@@ -233,7 +233,7 @@ def main():
     fuzz_selection_log = []
     all_obs_sequences = [] 
 
-    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 and seedcount<5000:
+    while current_time - start_fuzz_time < (3600 * 12) and len(fuzzer.corpus) > 0 :
         seedcount += 1
 
         selected_info = fuzzer.get_pose()

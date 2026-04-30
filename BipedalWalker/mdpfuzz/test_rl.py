@@ -96,7 +96,8 @@ if __name__ == '__main__':
             exp_name=RL_NAMES[rl_index],
             save_data=args.save_data,             # 新增
             save_transitions=args.save_transitions, # 新增
-            window_size=args.window_size          # 新增
+            window_size=args.window_size,          # 新增
+            check_redundant_input=False
         )
     elif method == 'fuzzer':
         fuzzer.fuzzing_no_coverage(**fuzz_kwargs)
