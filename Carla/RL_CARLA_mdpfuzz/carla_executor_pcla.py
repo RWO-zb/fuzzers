@@ -584,7 +584,7 @@ class PCLAExecutor(Executor):
                 raise RuntimeError("Empty Waypoints")
             route_maker(waypoints, route_file)
             
-            agent = PCLA("carl_roach_0", vehicle, route_file, self.env.client)
+            agent = PCLA("carl_carlv11", vehicle, route_file, self.env.client)
 
             collision_queue = queue.Queue()
             collision_sensor = self.env.world.spawn_actor(

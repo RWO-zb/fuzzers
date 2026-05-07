@@ -193,7 +193,7 @@ def set_global_seed(seed):
         torch.backends.cudnn.benchmark = False
     except ImportError: pass
 
-AGENT_NAME = "carl_roach_0" 
+AGENT_NAME = "carl_carlv11" 
 VIDEO_FPS = 20.0
 ARRIVAL_DISTANCE = 5.0
 RND_INPUT_SIZE = 18
@@ -206,7 +206,7 @@ WEATHERS = {
     10: carla.WeatherParameters.WetCloudySunset,
     14: carla.WeatherParameters.SoftRainNoon
 }
-
+ 
 def calculate_reward(prev_distance, cur_distance, cur_collid, cur_invade, cur_speed, prev_speed):
     r_dist = np.clip(prev_distance - cur_distance, -10.0, 10.0)
     cur_speed_norm = np.linalg.norm(cur_speed)
