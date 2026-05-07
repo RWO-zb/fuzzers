@@ -1,7 +1,7 @@
 # =============================================================================
 # --- Imports & Dependencies ---
 # =============================================================================
-import pickle
+import json
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
@@ -14,72 +14,147 @@ import os
 # =============================================================================
 # --- Global Configuration & Constants ---
 # =============================================================================
-LOG_FILE = 'selection_log.pkl'
-OBS_FILE = 'obs_sequences.pkl'
-PERF_FILE = 'perf_meta.pkl' 
-PLOT_3_FILE = 'MountainCar_crash_generation_histogram.png'
-PLOT_4_FILE = 'MountainCar_unique_crashes_over_time.png'       
-PLOT_6_FILE = 'MountainCar_survival_steps_boxplot.png'
+# 【配置区】请修改这里的 BASE_PREFIX 指向你想分析的实验结果前缀 (无需带 _logs.txt / _obs.txt 后缀)
+# 示例 1 (MDPFuzz): 'logs/MC_DQN_NoCov_5_0.01_0.1_0_12h'
+# 示例 2 (RT):      'logs/MC_DQN_RT_1022_10000it'
+BASE_PREFIX = 'MC_DQN_NoCov_5_0.01_0.1_0_12h'
 
-# 采用 50x50 的网格划分作为理论状态空间大小 (MountainCar 特有)
+# 自动推断当前是 MDPFuzz 还是 Random Testing
+IS_RT = '_RT_' in BASE_PREFIX
+METHOD_NAME = 'Random Testing' if IS_RT else 'MDPFuzz'
+
+LOG_FILE = f"{BASE_PREFIX}_logs.txt"
+OBS_FILE = f"{BASE_PREFIX}_obs.txt"
+
+PLOT_CUMULATIVE_FILE = f"{METHOD_NAME.replace(' ', '_')}_unique_crashes_over_time.png"       
+PLOT_GEN_FILE = f"{METHOD_NAME.replace(' ', '_')}_crash_generation_histogram.png"
+PLOT_SURVIVAL_FILE = f"{METHOD_NAME.replace(' ', '_')}_survival_steps_boxplot.png"
+
+# MountainCar 理论状态空间划分 (50x50 网格)
 THEORETICAL_STATE_SPACE = 50 * 50 
 
-def load_data(file_path):
-    if not os.path.exists(file_path):
-        return None
-    try:
-        with open(file_path, 'rb') as f:
-            return pickle.load(f)
-    except Exception as e:
-        print(f"Error loading pickle: {e}")
-        return None
-
 # =============================================================================
-# --- Data Merging & Deduplication Module ---
+# --- Log Parser & Merging Module ---
 # =============================================================================
-def merge_and_deduplicate(logs, obs_seqs):
+def load_and_merge_mdpfuzz_data(log_file, obs_file):
     """
-    将 selection_log 和 obs_sequences 合并，并使用原始状态数据进行严格去重。
-    保留了优先级覆盖：新记录为Crash时覆盖旧的安全记录。
+    解析并合并 _logs.txt 和 _obs.txt，兼容 RT 中字段为 'None' 的情况。
     """
-    if len(logs) != len(obs_seqs):
-        print(f"Warning: Logs count ({len(logs)}) and Obs count ({len(obs_seqs)}) mismatch. Truncating.")
+    if not os.path.exists(log_file) or not os.path.exists(obs_file):
+        print(f"Error: Log or Obs file not found for prefix '{BASE_PREFIX}'.")
+        return None, None
+        
+    print(f"Parsing log files for [{METHOD_NAME}]...")
     
-    min_len = min(len(logs), len(obs_seqs))
-    state_to_entry = {}
+    # 解析 _logs.txt
+    logs = []
+    with open(log_file, 'r') as f:
+        headers = f.readline().strip().split('; ')
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            vals = line.split('; ')
+            if len(vals) < len(headers): continue
+            logs.append(dict(zip(headers, vals)))
+            
+    # 解析 _obs.txt
+    obs_data = []
+    with open(obs_file, 'r') as f:
+        current_info = None
+        current_traj = []
+        is_crash = False
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            if line.startswith("--- Test Case Info:"):
+                if current_info is not None:
+                    obs_data.append((current_info, current_traj))
+                json_str = line[len("--- Test Case Info: "):-len(" ---")]
+                current_info = json.loads(json_str)
+                current_traj = []
+                is_crash = current_info.get('Oracle', False)
+            else:
+                if is_crash:
+                    current_traj.append([float(x) for x in line.split(',')])
+        if current_info is not None:
+            obs_data.append((current_info, current_traj))
+            
+    if len(logs) != len(obs_data):
+        print(f"Warning: Logs count ({len(logs)}) and Obs count ({len(obs_data)}) mismatch. Truncating to min.")
+        
+    merged_logs = []
+    min_len = min(len(logs), len(obs_data))
+    
+    total_algo_time = 0.0
+    max_run_time = 0.0
     
     for i in range(min_len):
-        entry = logs[i]
-        traj = obs_seqs[i]
-        state = entry.get('mutate_state')
+        log_row = logs[i]
+        obs_info, traj = obs_data[i]
         
+        mutate_state = np.array(obs_info['Input'])
+        did_crash = obs_info.get('Oracle', False)
+        parent_depth = obs_info.get('Generation', 0)
+        survival_steps = obs_info.get('Steps', len(traj))
+        
+        # 提取时间数据，处理 RT 中可能出现的 'None'
+        run_time = log_row.get('RunTime', 'None')
+        run_time = float(run_time) if run_time != 'None' else 0.0
+        max_run_time = max(max_run_time, run_time)
+        
+        crash_time = log_row.get('CrashTime', 'None')
+        crash_time = float(crash_time) if crash_time != 'None' else run_time
+        
+        algo_time = log_row.get('CoverageTime', 'None')
+        algo_time = float(algo_time) if algo_time != 'None' else 0.0
+        total_algo_time += algo_time
+        
+        merged_logs.append({
+            'mutate_state': mutate_state,
+            'did_crash': did_crash,
+            'parent_depth': parent_depth,
+            'survival_steps': survival_steps,
+            'output_trajectory': np.array(traj) if did_crash else None,
+            'run_time': run_time,
+            'crash_time': crash_time
+        })
+        
+    perf_data = {
+        'total_wall_time': max_run_time,
+        'algo_logic_time': total_algo_time
+    }
+        
+    return merged_logs, perf_data
+
+# =============================================================================
+# --- Data Deduplication Module ---
+# =============================================================================
+def deduplicate_log(merged_logs):
+    """严格的元组哈希去重与优先级覆盖 (Crash 覆盖 Safe)"""
+    state_to_entry = {}
+    
+    for entry in merged_logs:
+        state = entry['mutate_state']
         if state is None: continue
-            
-        # 【修改点】: 直接使用原始的浮点数数组转为 Tuple 作为严格去重的哈希键
         state_key = tuple(state)
         
-        entry_copy = entry.copy()
-        entry_copy['output_trajectory'] = traj
-        entry_copy['survival_steps'] = len(traj)
-        
         if state_key not in state_to_entry:
-            state_to_entry[state_key] = entry_copy
+            state_to_entry[state_key] = entry
         else:
             old_entry = state_to_entry[state_key]
-            if entry_copy.get('did_crash', False) and not old_entry.get('did_crash', False):
-                state_to_entry[state_key] = entry_copy
+            if entry.get('did_crash', False) and not old_entry.get('did_crash', False):
+                state_to_entry[state_key] = entry
 
     return list(state_to_entry.values())
 
 # =============================================================================
 # --- Core Analysis Module (Efficiency & Diversity) ---
 # =============================================================================
-def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_data=None):
+def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_data):
     print(f"\n{'='*85}")
-    print(f"{'Academic-Grade Crash & Diversity Analysis (Strictly did_crash == True)':^85}")
+    print(f"{f'[{METHOD_NAME}] Academic-Grade Evaluation (Strictly did_crash == True)':^85}")
     print(f"{'='*85}")
     
-    # --- 1. Global Fuzzing Metrics (Overhead, Hit Ratio, Coverage) ---
     total_mutations = len(original_log)
     total_valid_crashes = sum(1 for e in original_log if e.get('did_crash', False))
     hit_ratio = (total_valid_crashes / total_mutations * 100) if total_mutations > 0 else 0
@@ -87,26 +162,25 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     explored_unique_states = len(deduplicated_log)
     state_space_coverage = (explored_unique_states / THEORETICAL_STATE_SPACE) * 100
     
-    print("[1. Overhead, Hit Ratio & State Space Coverage]")
-    print(f"  Total Mutations Executed:   {total_mutations}")
-    print(f"  Valid Crash Mutations:      {total_valid_crashes}")
-    print(f"  Hit Ratio (Valid Rate):     {hit_ratio:.2f}%  <-- % of mutations leading to a crash")
+    print("[1. Global Metrics & State Space Coverage]")
+    print(f"  Total Evaluations Executed: {total_mutations}")
+    print(f"  Valid Crash Inputs:         {total_valid_crashes}")
+    print(f"  Hit Ratio (Valid Rate):     {hit_ratio:.2f}%")
     print(f"  Explored Unique States:     {explored_unique_states} / {THEORETICAL_STATE_SPACE} Grid Bins")
     print(f"  State Space Coverage:       {state_space_coverage:.6f}%")
     
-    if perf_data:
+    if IS_RT:
+        print(f"  Fuzzer Overhead Ratio:      N/A (Random Testing has no algorithmic overhead)\n")
+    elif perf_data:
         total_t = perf_data['total_wall_time']
         algo_t = perf_data['algo_logic_time']
         overhead_ratio = (algo_t / total_t) * 100 if total_t > 0 else 0
-        print(f"  Fuzzer Overhead Ratio:      {overhead_ratio:.2f}% <-- % time spent in logic vs physics\n")
-    else:
-        print(f"  Fuzzer Overhead Ratio:      N/A (perf_meta.pkl not found)\n")
+        print(f"  Fuzzer Overhead Ratio:      {overhead_ratio:.2f}% (Coverage Algo Time / Total Wall Time)\n")
 
-    # --- 2. Data Extraction for Crash Analysis ---
     inputs, outputs, times, depths, raw_survival_steps = [], [], [], [], []
     
     for entry in deduplicated_log:
-        if entry.get('did_crash', False) == True:
+        if entry.get('did_crash', False):
             inputs.append(entry['mutate_state'])
             outputs.append(np.array(entry['output_trajectory']).flatten())
             depths.append(entry.get('parent_depth', 0) + 1)
@@ -117,7 +191,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
                 
     unique_crash_count = len(inputs)
     if unique_crash_count < 2:
-        print(f"Not enough crash data to calculate metrics (Found {unique_crash_count}, needs >= 2).")
+        print(f"Not enough crash data to calculate advanced metrics (Found {unique_crash_count}, needs >= 2).")
         return
         
     inputs = np.array(inputs)
@@ -129,7 +203,6 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     max_time_hrs = max([e.get('crash_time', 0.0) for e in original_log if e.get('crash_time') is not None] + [0.0]) / 3600.0
     if max_time_hrs <= 0: max_time_hrs = times_hrs[-1] if len(times_hrs) > 0 else 1.0
 
-    # --- 3. Basic Efficiency & Survival Depth Analysis ---
     intervals_hrs = np.diff(np.insert(times_hrs, 0, 0.0))
     mean_interval = np.mean(intervals_hrs)      
     median_interval = np.median(intervals_hrs)  
@@ -142,26 +215,28 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     print(f"  Survival Steps (Depth) - Median: {np.median(raw_survival_steps):.1f} steps")
     print(f"  Survival Steps Range:            [{np.min(raw_survival_steps)}, {np.max(raw_survival_steps)}] steps\n")
     
+    # 绘图: 随时间累积的独特 Crash 数量
     cumulative_crashes = np.arange(1, len(times_hrs) + 1)
-    plt.figure(figsize=(12, 7))
-    plt.step(times_hrs, cumulative_crashes, where='post', color='darkred', linewidth=2, label='Unique Crash Inputs')
-    plt.fill_between(times_hrs, cumulative_crashes, step='post', color='darkred', alpha=0.1)
-    plt.title('MountainCar: Cumulative Unique Crashes Discovered Over Time')
+    plt.figure(figsize=(10, 6))
+    plot_color = '#1f77b4' if IS_RT else '#ff7f0e'
+    plt.step(times_hrs, cumulative_crashes, where='post', color=plot_color, linewidth=2, label=f'{METHOD_NAME} Unique Crashes')
+    plt.fill_between(times_hrs, cumulative_crashes, step='post', color=plot_color, alpha=0.1)
+    plt.title(f'Cumulative Unique Crashes Discovered Over Time ({METHOD_NAME})')
     plt.xlabel('Time Elapsed (hours)')
     plt.ylabel('Number of Unique Crashing Inputs')
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.xlim(left=0, right=max_time_hrs)
     plt.ylim(bottom=0)
     plt.legend()
-    plt.savefig(PLOT_4_FILE)
+    plt.tight_layout()
+    plt.savefig(PLOT_CUMULATIVE_FILE)
     plt.close()
 
-    # --- 4. Trajectory Padding for Sequence Clustering ---
+    # Trajectory Padding
     max_len = max(len(t) for t in outputs)
     padded_outputs = [np.pad(t, (0, max_len - len(t)), mode='constant') for t in outputs]
     outputs_padded = np.array(padded_outputs)
     
-    # --- 5. Advanced Diversity Quality Metrics (PCA + KMeans) ---
     def compute_diversity_metrics(data_matrix, times_array, name, raw_lengths=None):
         n_samples = data_matrix.shape[0]
         n_components = min(n_samples, data_matrix.shape[1], 10) 
@@ -176,12 +251,14 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
             best_k = 2
             kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
             labels = kmeans.fit_predict(reduced_data)
-            best_score = silhouette_score(reduced_data, labels)
+            # 加速: 数据量过大时抽样计算轮廓系数
+            sample_sz = 5000 if len(reduced_data) > 5000 else None
+            best_score = silhouette_score(reduced_data, labels, sample_size=sample_sz, random_state=42)
             
             for k in range(3, max_k + 1):
                 kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
                 labels = kmeans.fit_predict(reduced_data)
-                score = silhouette_score(reduced_data, labels)
+                score = silhouette_score(reduced_data, labels, sample_size=sample_sz, random_state=42)
                 if score >= best_score * 1.20:
                     best_score = score
                     best_k = k
@@ -189,7 +266,6 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
         kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
         labels = kmeans.fit_predict(reduced_data)
         
-        # Cluster Distance & Entropy Calculation
         centroids = kmeans.cluster_centers_
         intra_dists = []
         for i in range(best_k):
@@ -208,7 +284,6 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
         probs = counts / len(labels)
         entropy = -np.sum(probs * np.log(probs + 1e-9))
         
-        # Time-To-Discovery (TTD) & AUC Calculation
         discovery_times_hrs = []
         for cluster_id in range(best_k):
             cluster_times = times_array[labels == cluster_id] / 3600.0
@@ -243,15 +318,15 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
         print(f"  Mean Time-to-Discovery per Category: {mean_ttd:.4f} hours")
         print(f"  Diversity AUC (Clusters vs Time):    {auc_val:.4f} (category*hours)\n")
 
-        # Boxplot Generation
+        # 仅针对 Output 绘制存活步数箱线图
         if name == "Output" and raw_lengths is not None:
             cluster_steps = [raw_lengths[labels == k] for k in range(best_k)]
             plt.figure(figsize=(10, 6))
             plt.boxplot(cluster_steps, tick_labels=[f"Cluster {k+1}\n(n={len(cluster_steps[k])})" for k in range(best_k)])
-            plt.title('MountainCar: Crash Episode Length (Survival Steps) per Fault Type')
+            plt.title(f'Crash Episode Length (Survival Steps) per Fault Type ({METHOD_NAME})')
             plt.ylabel('Timesteps until Crash')
             plt.grid(axis='y', linestyle='--', alpha=0.6)
-            plt.savefig(PLOT_6_FILE)
+            plt.savefig(PLOT_SURVIVAL_FILE)
             plt.close()
 
     compute_diversity_metrics(inputs, times, "Input")
@@ -259,9 +334,14 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     print(f"{'='*85}\n")
 
 # =============================================================================
-# --- Supplementary Plotting Module ---
+# --- Evolutionary Depth Module ---
 # =============================================================================
 def plot_generation_histogram(deduplicated_log):
+    if IS_RT:
+        print(f"[Evolutionary Depth Analysis]")
+        print("  Average/Deepest Generation: N/A (Random Testing operates solely on Generation 0)\n")
+        return
+
     crash_generations = []
     for entry in deduplicated_log:
         if entry.get('did_crash', False):
@@ -278,44 +358,43 @@ def plot_generation_histogram(deduplicated_log):
     print(f"[Evolutionary Depth Analysis]")
     print(f"  Average Crash Generation (Mean):   {avg_gen:.2f}")
     print(f"  Median Crash Generation (Median):  {median_gen:.2f}")
-    print(f"  Deepest Crash Found at Generation: {max_gen}")
+    print(f"  Deepest Crash Found at Generation: {max_gen}\n")
 
     generation_counts = Counter(crash_generations)
-    generations = range(0, max_gen + 2)
+    generations = range(1, max_gen + 2)
     counts = [generation_counts.get(gen, 0) for gen in generations]
 
-    plt.figure(figsize=(12, 7))
-    plt.bar(generations, counts, color='red', alpha=0.7, zorder=3)
-    plt.title('MountainCar: Histogram of Unique Crash Generations')
+    plt.figure(figsize=(10, 6))
+    plt.bar(generations, counts, color='#ff7f0e', alpha=0.8, edgecolor='black', zorder=3)
+    plt.title('Histogram of Unique Crash Generations (MDPFuzz)')
     plt.xlabel('Mutation Generation')
     plt.ylabel('Number of Unique Crashing Inputs')
-    step = max(1, (max_gen // 20))
-    plt.xticks(np.arange(0, max_gen + 2, step=step))
+    step = max(1, (max_gen // 10))
+    plt.xticks(np.arange(1, max_gen + 2, step=step))
     plt.grid(axis='y', linestyle='--', alpha=0.6, zorder=0)
-    plt.savefig(PLOT_3_FILE)
+    plt.tight_layout()
+    plt.savefig(PLOT_GEN_FILE)
     plt.close()
 
 # =============================================================================
 # --- Main Execution Flow ---
 # =============================================================================
 def main():
-    original_log_data = load_data(LOG_FILE)
-    obs_seqs = load_data(OBS_FILE)
-    perf_data = load_data(PERF_FILE) 
+    print(f"Loading files for prefix: {BASE_PREFIX}")
+    merged_logs, perf_data = load_and_merge_mdpfuzz_data(LOG_FILE, OBS_FILE)
     
-    if not original_log_data or not obs_seqs: 
-        print("Failed to load log or observation data.")
+    if not merged_logs:
         return
         
-    deduplicated_log = merge_and_deduplicate(original_log_data, obs_seqs)
+    deduplicated_log = deduplicate_log(merged_logs)
     if not deduplicated_log: 
         print("Deduplicated log is empty.")
         return
     
-    analyze_and_plot_comprehensive_metrics(original_log_data, deduplicated_log, perf_data)
+    analyze_and_plot_comprehensive_metrics(merged_logs, deduplicated_log, perf_data)
     plot_generation_histogram(deduplicated_log)
 
-    print("All analysis and plotting completed. Check the generated PNG files.")
+    print(f"All analysis and plotting completed for [{METHOD_NAME}]. Check the generated PNG files.")
 
 if __name__ == "__main__":
     main()
