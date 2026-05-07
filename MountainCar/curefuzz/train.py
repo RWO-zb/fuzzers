@@ -115,7 +115,6 @@ if __name__ == "__main__":  # noqa: C901
         importlib.import_module(env_module)
 
     env_id = args.env
-    # 修正后的代码
     registered_envs = set(gym.envs.registry.keys())  # pytype: disable=module-attr
 
     # If the environment is not found, suggest the closest match

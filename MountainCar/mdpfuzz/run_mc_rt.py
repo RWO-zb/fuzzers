@@ -3,13 +3,13 @@ import sys
 import torch
 import numpy as np
 
-# 1. 环境配置
+# Environment configuration
 os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 os.environ['OMP_NUM_THREADS'] = '1'
 torch.set_num_threads(1)
 
-# 2. 路径与导入配置
+# Path configuration
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(current_dir)
@@ -19,25 +19,23 @@ from fuzz.mdpfuzz import Fuzzer
 from mc_executor import MountainCarExecutor
 
 if __name__ == '__main__':
-    # --- A. 参数配置 ---
+    # --- Parameters ---
     k = 1 
     tau = 0.01
     gamma = 0.1
     seed = 1022
     sim_steps = 200
 
-    # === [关键配置] 预算模式选择 ===
-    # 可选值: 'TIME' 或 'ITERATION'
-    # RT 默认建议用次数，但如果你想跑固定时间也可以
+    # --- Budget Configuration ---
+    # Options: 'TIME' or 'ITERATION'
     BUDGET_TYPE = 'ITERATION' 
     
-    BUDGET_HOURS = 12       
-    BUDGET_ITERS = 10000
-    # ============================
+    BUDGET_HOURS = 12       # Runtime in hours if BUDGET_TYPE is 'TIME'
+    BUDGET_ITERS = 10000    # Number of iterations if BUDGET_TYPE is 'ITERATION'
 
     if BUDGET_TYPE == 'TIME':
         time_budget = BUDGET_HOURS * 3600
-        n_val = None # RT 中 n 用于迭代次数限制
+        n_val = None        # 'n' is used for iteration limits in RT
         suffix = f'{BUDGET_HOURS}h'
         print(f"Mode: Time-Based RT ({BUDGET_HOURS} hours)")
     else:
@@ -46,7 +44,7 @@ if __name__ == '__main__':
         suffix = f'{BUDGET_ITERS}it'
         print(f"Mode: Iteration-Based RT ({BUDGET_ITERS} iterations)")
 
-    # --- B. 路径设置 ---
+    # --- Path Settings ---
     logs_base_dir = os.path.join(parent_dir, "logs")
     model_path = os.path.join(logs_base_dir, "dqn", "MountainCar-v0_8", "best_model.zip")
     
@@ -61,7 +59,7 @@ if __name__ == '__main__':
 
     if not os.path.exists(model_path):
         print(f"Error: Model file not found at {model_path}")
-        # 尝试备用路径
+        # Try alternate path
         model_path_alt = os.path.join(current_dir, "logs", "dqn", "MountainCar-v0_8", "best_model.zip")
         if os.path.exists(model_path_alt):
             print(f"Found model at alternate path: {model_path_alt}")
@@ -69,7 +67,7 @@ if __name__ == '__main__':
         else:
             sys.exit(1)
 
-    # --- C. 初始化与执行 ---
+    # --- Initialization & Execution ---
     executor = MountainCarExecutor(sim_steps=sim_steps, env_seed=0, model_path=model_path)
     policy = executor.load_policy()
     
@@ -78,8 +76,8 @@ if __name__ == '__main__':
     print("Starting Random Testing...")
     
     fuzzer.random_testing(
-        n=n_val,                 # 次数预算
-        time_budget=time_budget, # 时间预算
+        n=n_val,
+        time_budget=time_budget,
         policy=policy,
         path=save_path,
         check_redundant_input=False, 

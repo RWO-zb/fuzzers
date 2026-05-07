@@ -1,6 +1,3 @@
-# =============================================================================
-# --- Imports & Dependencies ---
-# =============================================================================
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,9 +8,6 @@ from scipy.spatial.distance import cdist, pdist
 from collections import Counter
 import os
 
-# =============================================================================
-# --- Global Configuration & Constants ---
-# =============================================================================
 LOG_FILE = 'selection_log.pkl'
 OBS_FILE = 'obs_sequences.pkl'
 PERF_FILE = 'perf_meta.pkl' 
@@ -21,7 +15,7 @@ PLOT_3_FILE = 'MountainCar_crash_generation_histogram.png'
 PLOT_4_FILE = 'MountainCar_unique_crashes_over_time.png'       
 PLOT_6_FILE = 'MountainCar_survival_steps_boxplot.png'
 
-# 采用 50x50 的网格划分作为理论状态空间大小 (MountainCar 特有)
+# Theoretical state space size based on 50x50 grid partition
 THEORETICAL_STATE_SPACE = 50 * 50 
 
 def load_data(file_path):
@@ -34,13 +28,10 @@ def load_data(file_path):
         print(f"Error loading pickle: {e}")
         return None
 
-# =============================================================================
-# --- Data Merging & Deduplication Module ---
-# =============================================================================
 def merge_and_deduplicate(logs, obs_seqs):
     """
-    将 selection_log 和 obs_sequences 合并，并使用原始状态数据进行严格去重。
-    保留了优先级覆盖：新记录为Crash时覆盖旧的安全记录。
+    Merge selection_log and obs_sequences, and perform strict deduplication using raw state data.
+    Maintains priority overriding: a new Crash record overrides an old safe record.
     """
     if len(logs) != len(obs_seqs):
         print(f"Warning: Logs count ({len(logs)}) and Obs count ({len(obs_seqs)}) mismatch. Truncating.")
@@ -55,7 +46,7 @@ def merge_and_deduplicate(logs, obs_seqs):
         
         if state is None: continue
             
-        # 【修改点】: 直接使用原始的浮点数数组转为 Tuple 作为严格去重的哈希键
+        # Use the original float array as a tuple for strict deduplication hash key
         state_key = tuple(state)
         
         entry_copy = entry.copy()
@@ -71,9 +62,6 @@ def merge_and_deduplicate(logs, obs_seqs):
 
     return list(state_to_entry.values())
 
-# =============================================================================
-# --- Core Analysis Module (Efficiency & Diversity) ---
-# =============================================================================
 def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_data=None):
     print(f"\n{'='*85}")
     print(f"{'Academic-Grade Crash & Diversity Analysis (Strictly did_crash == True)':^85}")
@@ -258,9 +246,6 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     compute_diversity_metrics(outputs_padded, times, "Output", raw_lengths=raw_survival_steps)
     print(f"{'='*85}\n")
 
-# =============================================================================
-# --- Supplementary Plotting Module ---
-# =============================================================================
 def plot_generation_histogram(deduplicated_log):
     crash_generations = []
     for entry in deduplicated_log:
@@ -295,9 +280,6 @@ def plot_generation_histogram(deduplicated_log):
     plt.savefig(PLOT_3_FILE)
     plt.close()
 
-# =============================================================================
-# --- Main Execution Flow ---
-# =============================================================================
 def main():
     original_log_data = load_data(LOG_FILE)
     obs_seqs = load_data(OBS_FILE)
