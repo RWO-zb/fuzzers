@@ -55,7 +55,7 @@ def main():
     parser.add_argument("--em", action="store_true", default=True)
     args = parser.parse_args()
 
-    # --- 文件夹与日志初始化 ---
+    # Initialize folders and logs
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
     result_folder = f"{now_str}_seed_{args.seed}"
     if not os.path.exists('./results'):
@@ -160,9 +160,7 @@ def main():
 
     model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, **kwargs)
 
-    # --- Initial Random State ---
-    # [随机数修复] 已注释掉硬编码种子，确保 --seed 参数生效
-    # np.random.seed(2021) 
+    # Initial random state
     states = np.array([np.random.uniform(-0.6, -0.4), 0.0])
     obs = env.reset()
     env.envs[0].unwrapped.state = states
@@ -211,7 +209,7 @@ def main():
     i = 0
     pbar = tqdm.tqdm(total=seeds_num)
     
-    # === 循环 1: 初始种群生成 ===
+    # Loop 1: Initial population generation
     while i < seeds_num:
         # MountainCar Random State
         states = np.array([np.random.uniform(-0.6, -0.4), 0.0])
@@ -225,7 +223,7 @@ def main():
         
         sequences = [obs[0]]
         
-        # 运行第一次 Episode
+        # Run the first episode
         for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
             obs, reward, done, infos = env.step(action)
@@ -234,14 +232,14 @@ def main():
             if done:
                 break
         
-        # 判定是否成功 (MountainCar)
+        # Determine success
         is_success = False
         if done:
             final_pos = -1.2
             if infos and 'terminal_observation' in infos[0]:
                 final_pos = infos[0]['terminal_observation'][0]
             elif len(obs) > 0:
-                final_pos = obs[0][0] # Fallback
+                final_pos = obs[0][0]
             
             if final_pos >= 0.5:
                 is_success = True
@@ -270,7 +268,7 @@ def main():
                 if done:
                     break
             
-            # 计算敏感度 (Entropy)
+            # Calculate sensitivity 
             entropy = np.abs(episode_reward_mutate - episode_reward)
             
             cvg = fuzzer.state_coverage(sequences)
@@ -295,7 +293,7 @@ def main():
     fuzzer.original = copy.deepcopy(fuzzer.corpus)
     mutation_log = [] 
 
-    # HACK: start fuzzing
+    # Start fuzzing
     start_fuzz_time = time.time()
     cvg_threshold = 0.02
 
@@ -311,13 +309,11 @@ def main():
     noCrashF_40 = open(os.path.join(result_path, 'noCrashStateSeqV2_40.txt'), mode='a')
     timeStamp = open(os.path.join(result_path, 'timeStamp.txt'), mode='a')
     
-    # --- [新增] 创建记录所有Episode观测值的文件 ---
+    # Create file to record all episode observations
     allObsFile = open(os.path.join(result_path, 'all_episodes_obs.txt'), mode='a')
-    # --------------------------------------------
-
     seedcount = 0
     
-    # === 循环 2: Fuzzing Main Loop ===
+    # Loop 2: Fuzzing Main Loop
     while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 and seedcount<5000:
         is_crash = False
         seedcount+=1
@@ -357,7 +353,7 @@ def main():
             if done:
                 break
 
-        # --- [新增] 将当前Episode的所有观测值写入文件 ---
+        # Write current episode observations to file
         if len(output_obs) > 0:
             for i in range(len(output_obs)):
                 outputStr = ''
@@ -365,12 +361,9 @@ def main():
                     outputStr = outputStr + str(d) + ', '
                 allObsFile.write(outputStr)
                 allObsFile.write('\n')
-            allObsFile.write('######') # 分隔符，表示一个Episode结束
+            allObsFile.write('######') 
             allObsFile.write('\n')
-            # 实时刷新缓冲区，防止程序中断丢失数据
             allObsFile.flush()
-        # ---------------------------------------------
-
         temp2_time = time.time()
         time_of_env += temp2_time - temp1_time
         cvg = fuzzer.state_coverage(sequences)
@@ -378,14 +371,14 @@ def main():
         time_of_DynEM += temp3_time - temp2_time
         local_sensitivity = np.abs(episode_reward - fuzzer.current_reward)
         
-        # --- Crash Definition (MountainCar Specific) ---
+        # --- Crash Definition  ---
         final_pos = -1.2
         if infos and 'terminal_observation' in infos[0]:
              final_pos = infos[0]['terminal_observation'][0]
         elif len(obs) > 0:
              final_pos = obs[0][0]
 
-        # 判定条件：如果最终位置小于 0.5，视为失败/Crash
+        # Condition: If the final position is less than 0.5, it is considered a failure/crash
         if final_pos < 0.5:
             is_crash = True
             if len(output_obs) == Hyperparameter.Step:
@@ -399,8 +392,7 @@ def main():
                 crashF_40.write('\n')
 
                 current_time = time.time()
-                s = 'fail_40: '
-                timeStamp.write(s)
+                timeStamp.write('fail_40: ')
                 timeStamp.write(str(current_time))
                 timeStamp.write('\n')
 
@@ -415,8 +407,7 @@ def main():
                 failObs.write('\n')
 
                 current_time = time.time()
-                s = 'fail: '
-                timeStamp.write(s)
+                timeStamp.write('fail: ')
                 timeStamp.write(str(current_time))
                 timeStamp.write('\n')
 
@@ -436,8 +427,7 @@ def main():
                 noCrashF_40.write('\n')
                 current_time = time.time()
 
-                s = 'success_40: '
-                timeStamp.write(s)
+                timeStamp.write('success_40: ')
                 timeStamp.write(str(current_time))
                 timeStamp.write('\n')
             else:
@@ -451,8 +441,7 @@ def main():
                 successObs.write('\n')
                 current_time = time.time()
 
-                s = 'success: '
-                timeStamp.write(s)
+                timeStamp.write('success: ')
                 timeStamp.write(str(current_time))
                 timeStamp.write('\n')
 
@@ -472,8 +461,7 @@ def main():
                 noCrashF_40.write('\n')
                 current_time = time.time()
 
-                s = 'success_40: '
-                timeStamp.write(s)
+                timeStamp.write('success_40: ')
                 timeStamp.write(str(current_time))
                 timeStamp.write('\n')
             else:
@@ -487,8 +475,7 @@ def main():
                 successObs.write('\n')
                 current_time = time.time()
 
-                s = 'success: '
-                timeStamp.write(s)
+                timeStamp.write('success: ')
                 timeStamp.write(str(current_time))
                 timeStamp.write('\n')
 
@@ -497,14 +484,13 @@ def main():
                 orig_pose = fuzzer.current_original
                 fuzzer.further_mutation(current_pose, episode_reward, local_sensitivity, cvg, orig_pose,current_gen)
         
-        # --- 修改位置：添加 crash_time 和 root_seed ---
         current_time_log = time.time()
         log_entry = {
             'state': copy.deepcopy(mutate_states),
             'generation': current_gen,
             'crashed': is_crash,
-            'crash_time': current_time_log - start_fuzz_time, # [修改] 添加时间字段
-            'root_seed': copy.deepcopy(fuzzer.current_original) # [修改] 添加原始种子信息，方便后续绘图分析
+            'crash_time': current_time_log - start_fuzz_time,
+            'root_seed': copy.deepcopy(fuzzer.current_original)
         }
         mutation_log.append(log_entry)
         
@@ -512,8 +498,7 @@ def main():
         time_of_fuzzer += current_time - temp2_time
         print('total reward: ', episode_reward, ', coverage: ', cvg, ', passed time: ', current_time - start_fuzz_time, ', corpus size: ', len(fuzzer.corpus), 'time_of_fuzzer: ', time_of_fuzzer, 'time_of_env: ', time_of_env)
     
-    # 循环结束后关闭所有文件句柄
-    allObsFile.close() # 关闭新增的文件
+    allObsFile.close()
     successObs.close()
     failObs.close()
     crashF_40.close()
@@ -530,22 +515,19 @@ def main():
     with open(os.path.join(result_path, 'all_run_seeds_0.pkl'), 'wb') as handle:
         pickle.dump(mutation_log, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    # --- [新增] 统计导致 Crash 的不同初始种子数量 ---
     unique_root_seeds = set()
     for item in fuzzer.result:
-        # 检查 item 是否为字典且包含 root_seed (兼容修改后的 fuzz.py)
-        if isinstance(item, dict) and "root_seed" in item:
-            seed = item["root_seed"]
-            # 如果 seed 是 numpy 数组，转换为 tuple 以便放入 set (因为 numpy array 不可哈希)
-            if isinstance(seed, np.ndarray):
-                seed = tuple(seed.tolist())
-            elif isinstance(seed, list):
-                seed = tuple(seed)
-            unique_root_seeds.add(seed)
+            if isinstance(item, dict) and "root_seed" in item:
+                seed = item["root_seed"]
+                if isinstance(seed, np.ndarray):
+                    seed = tuple(seed.tolist())
+                elif isinstance(seed, list):
+                    seed = tuple(seed)
+                unique_root_seeds.add(seed)
     
     print(f"Total Crashes Found: {len(fuzzer.result)}")
     print(f"Unique Root Seeds Causing Crash: {len(unique_root_seeds)}")
-    # ------------------------------------------------
+
 
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")

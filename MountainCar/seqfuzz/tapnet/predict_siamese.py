@@ -1,4 +1,4 @@
-import math
+ import math
 import argparse
 import numpy as np
 import torch
@@ -13,29 +13,19 @@ from sklearn.metrics import f1_score
 from tapnet import Hyperparameter
 
 def load_tapnet_mode():
-    # [修改] 移除 argparse，避免与 enjoy.py 的参数解析冲突
-    # parser = argparse.ArgumentParser()
-    # args = parser.parse_args()
-
-    # [修改] 使用一个简单的类来模拟 args 对象，存储原有的默认配置参数
+    # Mock args object to store default configurations
     class Args:
         pass
     args = Args()
 
-    # [关键修改] 移除以下强制重置种子的代码
-    # 这些代码会覆盖 enjoy.py 中通过 --seed 设置的种子，导致结果无法随种子变化
-    # args.seed = 42
-    # np.random.seed(42)
-    # torch.manual_seed(args.seed)
-    # if torch.cuda.is_available():
-    #     torch.cuda.manual_seed(args.seed)
+
     
-    # 保留原有的参数配置
+    # Keep original parameter configurations
     args.sparse = True
     args.layers = "500,300"
     args.layers = [int(l) for l in args.layers.split(",")]
     
-    # MountainCar 使用小卷积核
+    # Use small kernels for MountainCar
     args.kernels = "2,1,1"
     args.kernels = [int(l) for l in args.kernels.split(",")]
     args.filters = "256,256,128"
@@ -43,7 +33,7 @@ def load_tapnet_mode():
     args.rp_params = '-1,3'
     args.rp_params = [float(l) for l in args.rp_params.split(",")]
 
-    # --- 修正 1: dim 应该是特征维度 (Dimension)，而不是时间步长 (Step) ---
+    # Set RP parameters based on feature dimension
     if args.rp_params[0] < 0:
         dim = Hyperparameter.Dimension  # Dimension = 2
         args.rp_params = [3, math.floor(dim / (3 / 2))]
@@ -58,8 +48,7 @@ def load_tapnet_mode():
     if args.dilation == -1:
         args.dilation = math.floor(Hyperparameter.Dimension / 64)
 
-    # --- 修正 2: TapNet 初始化参数互换 ---
-    # 确保这里的 nfeat=2, len_ts=80，与训练时保持一致
+    # Initialize TapNet with parameters consistent with training (nfeat=Dimension, len_ts=Step)
     model = TapNet(
                    nfeat=Hyperparameter.Dimension,  # 2
                    len_ts=Hyperparameter.Step,      # 80
@@ -79,36 +68,33 @@ def load_tapnet_mode():
     return model
 
 def predict_once(model, bench_noCrash0, seq):
-    # 确保 seq 有正确的形状
+    # Ensure correct shape
     if len(seq) < Hyperparameter.Step:
-        # 如果序列长度不够，进行填充
+        # Pad sequence if too short
         padding = [[0] * Hyperparameter.Dimension] * (Hyperparameter.Step - len(seq))
         seq = seq + padding
     elif len(seq) > Hyperparameter.Step:
-        # 如果序列太长，进行截断
+        # Truncate sequence if too long
         seq = seq[:Hyperparameter.Step]
     
-    # seq 此时是 list 形式 [Step, Dim] -> [80, 2]
+    # seq is [Step, Dim] list
     
-    # 转换为 Tensor: [1, Step, Dim] -> [1, 80, 2]
+    # Convert to Tensor: [1, Step, Dim]
     siameseP2 = [seq]
     siameseP2 = torch.FloatTensor(np.array(siameseP2))
     
     if torch.cuda.is_available():
         siameseP2 = siameseP2.cuda()
     
-    # --- 关键修正：转置输入数据 ---
-    # 训练时的输入是 (N, Dim, Step) 即 (N, 2, 80)
-    # 当前 siameseP2 是 (N, 80, 2)，需要转置
-    if siameseP2.shape[2] == Hyperparameter.Dimension: # 如果最后一维是2
-        siameseP2 = siameseP2.transpose(1, 2) # 变为 (1, 2, 80)
+    # Transpose input to (N, Dim, Step) format expected by the model
+    if siameseP2.shape[2] == Hyperparameter.Dimension: # If the last dimension is the feature dimension
+        siameseP2 = siameseP2.transpose(1, 2) # Change to (1, Dim, Step) format
     
-    # 同时也要检查 bench_noCrash0 并进行转置
-    # enjoy.py 中创建的 bench_noCrash 通常也是 (1, 80, 2)
+    # Also transpose reference data if needed
     if bench_noCrash0.shape[2] == Hyperparameter.Dimension:
         bench_noCrash0 = bench_noCrash0.transpose(1, 2)
 
-    # 现在两个输入都是 (1, 2, 80)，符合模型期望
+    # Inputs now match model expectations (1, Dim, Step)
     output1 = model(bench_noCrash0, siameseP2)
     output1 = torch.nn.Sigmoid()(output1)
 

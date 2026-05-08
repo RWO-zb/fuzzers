@@ -7,7 +7,6 @@ class fuzzing:
     def __init__(self):
         self.corpus = []
         self.rewards = []
-        # result 列表现在将存储字典，包含 'crash_state' 和 'root_seed'
         self.result = [] 
         self.entropy = []
         self.coverage = []
@@ -33,7 +32,6 @@ class fuzzing:
         self.GMMthreshold = 0.1
 
     def get_pose(self):
-        # 防止除以零
         entropy_sum = np.array(self.entropy).sum()
         if entropy_sum == 0:
             p = np.ones(len(self.corpus)) / len(self.corpus)
@@ -62,11 +60,9 @@ class fuzzing:
         return self.current_pose
 
     def add_crash(self, result_pose):
-        # [修改] 保存详细的 Crash 信息，包括溯源信息 (root_seed)
-        # 这样 crash_*.pkl 文件中也会包含种子溯源信息
         crash_info = {
-            "crash_state": result_pose,      # 导致 Crash 的具体状态
-            "root_seed": self.current_original # 该状态所属的原始种子
+            "crash_state": result_pose,     
+            "root_seed": self.current_original 
         }
         self.result.append(crash_info)
 
@@ -102,8 +98,6 @@ class fuzzing:
             self.generations.append(generation)
 
     def mutation(self, states):
-        # --- 修改：适应 MountainCar 的连续空间变异 ---
-        # 原始代码是针对离散整数的，这里改为添加高斯噪声
         delta_states = np.random.normal(0, 0.05, size=states.shape)
         mutate_states = states + delta_states
         mutate_states[0] = np.clip(mutate_states[0], -0.6, -0.4)
@@ -136,7 +130,6 @@ class fuzzing:
         for i in range(self.GMMK):
             temp = dict()
             temp[0] = 1 / self.GMMK
-            # 防止数据不足
             end_idx = min(i+15, len(data_corpus))
             if i >= len(data_corpus):
                  slice_data = data_corpus[-1:]

@@ -4,7 +4,6 @@ import os
 from tapnet import Hyperparameter
 import random
 def read_data_tapnet(file_path):
-    # 检查文件是否存在
     if not os.path.exists(file_path):
         print(f"Warning: File not found: {file_path}")
         return []
@@ -15,66 +14,59 @@ def read_data_tapnet(file_path):
     curSeq = []
     
     for line in lines:
-        d = line.strip() # 去除换行符和首尾空格
-        if not d: continue # 跳过空行
-
         if d == "######":
-            # 一个序列结束
             if len(curSeq) > 0:
                 data.append(curSeq)
             curSeq = []
         else:
-            # --- 修复部分：适配 'val1, val2, ' 的格式 ---
-            # 1. 按逗号分割
             parts = d.split(',')
             arr = []
             for p in parts:
-                p = p.strip() # 去除每个数值旁的空格
-                if p: # 确保不是空字符串（因为末尾可能有逗号导致最后一个元素为空）
+                p = p.strip()
+                if p: # Ensure not empty string due to trailing comma
                     try:
                         arr.append(float(p))
                     except ValueError:
                         print(f"Warning: Could not parse '{p}' in line: {d}")
                         pass
             
-            # 只有当这一行解析出数据才加入
             if len(arr) > 0:
                 curSeq.append(arr)
     
     f.close()
 
-    # --- 数据对齐与转置 ---
-    # TapNet 需要 [Dim, Step] 的格式，且长度必须固定
+    # --- Data alignment and transposition ---
+    # TapNet requires fixed-length [Dim, Step] format
     ret = []
     target_len = Hyperparameter.Step
     target_dim = Hyperparameter.Dimension
 
     for s in data:
-        # 1. 长度对齐 (Padding / Truncating)
+        # 1. Length alignment (Padding / Truncating)
         current_len = len(s)
         
-        # 如果当前序列是空的，跳过
+        # Skip empty sequences
         if current_len == 0: continue
 
-        # 如果序列太短，用最后一步填充 (Padding)
+        # Pad with last frame if too short
         if current_len < target_len:
             last_frame = s[-1]
             for _ in range(target_len - current_len):
-                s.append(last_frame) # 或者填充0: s.append([0.0] * target_dim)
+                s.append(last_frame)
         
-        # 如果序列太长，截断 (Truncating)
+        # Truncate if too long
         elif current_len > target_len:
             s = s[:target_len]
 
-        # 2. 维度检查与转置
-        # 原始 s 是 [Step, Dim]，我们需要转置为 [Dim, Step] 以适配 TapNet
+        # 2. Dimension check and transposition
+        # Transpose from [Step, Dim] to [Dim, Step] for TapNet
         var = []
         for _ in range(target_dim):
             var.append([])
         
         is_valid = True
         for i in range(target_len):
-            # 确保每一步的维度都足够 (比如 MountainCar 应该是 2维)
+            # Ensure correct dimensions (e.g., 2D for MountainCar)
             if len(s[i]) < target_dim:
                 is_valid = False
                 break
@@ -87,7 +79,7 @@ def read_data_tapnet(file_path):
     return ret
 
 def get_data():
-    # 请确保您的 txt 文件确实在这个路径下
+    # Paths for data files
     failObs_path = './tapnet/data/crashStateSeqV2.txt'
     successObs_path = './tapnet/data/noCrashStateSeqV2.txt'
 
@@ -107,7 +99,7 @@ def get_data():
 
 
 def get_data_siamese(x, labels, idx_train, idx_val, idx_test):
-    # 此函数保持原样，未修改
+
     train = x[idx_train].tolist()
     test = x[idx_test].tolist()
     labels_train = labels[idx_train].tolist()
@@ -128,7 +120,7 @@ def get_data_siamese(x, labels, idx_train, idx_val, idx_test):
             noCrash_test.append(test[i])
 
     siamese_train_p1, siamese_train_p2, siamese_test_p1, siamese_test_p2, labels_train, labels_test = [], [], [], [], [], []
-    # train:
+
     for i in range(len(crash_train)):
         for j in range(len(noCrash_train)):
             siamese_train_p1.append(crash_train[i])
@@ -146,7 +138,7 @@ def get_data_siamese(x, labels, idx_train, idx_val, idx_test):
             siamese_train_p2.append(noCrash_train[j])
             labels_train.append(1)
 
-    # test:
+
     for i in range(len(crash_test)):
         for j in range(i):
             siamese_test_p1.append(crash_test[i])
@@ -167,7 +159,7 @@ def get_data_siamese(x, labels, idx_train, idx_val, idx_test):
 
 
 def get_data_siamese2(x, labels, idx_train, idx_val, idx_test):
-    # 将 tensor 转为 list
+    # Convert tensor to list
     train = x[idx_train].tolist()
     test = x[idx_test].tolist()
     labels_train = labels[idx_train].tolist()
@@ -175,7 +167,7 @@ def get_data_siamese2(x, labels, idx_train, idx_val, idx_test):
 
     crash_train, noCrash_train, crash_test, noCrash_test = [], [], [], []
 
-    # 分离 Crash 和 NoCrash 数据
+    # Separate Crash and NoCrash data
     for i in range(len(train)):
         if labels_train[i][0] == 1:
             crash_train.append(train[i])
@@ -191,37 +183,36 @@ def get_data_siamese2(x, labels, idx_train, idx_val, idx_test):
     siamese_train_p1, siamese_train_p2, siamese_test_p1, siamese_test_p2 = [], [], [], []
     labels_train, labels_test = [], []
 
-    # --- 关键修改：限制采样数量 (Limit Sampling) ---
-    # 我们不进行全排列，而是为每个样本随机匹配固定数量的对子
-    # 这样可以将数据量控制在可接受范围内 (例如原始数据的 20 倍，而不是 1000 倍)
+    # --- Limit sampling to control data size ---
+    # Match each sample with a fixed number of random pairs to keep volume manageable
     
-    PAIR_PER_SAMPLE = 10 # 每个样本只生成 10 个正对和 10 个负对
+    PAIR_PER_SAMPLE = 10 # Generate 10 positive and 10 negative pairs per sample
 
-    # 1. 构建训练集 (Train)
+    # 1. Construct training set (Train)
     
-    # (A) 负样本对 (Different Class): Crash vs NoCrash
-    # 遍历所有 Crash，从 NoCrash 中随机选一些配对
+    # (A) Negative pairs (Different Class): Crash vs NoCrash
+    # Iterate through all Crash samples and randomly match with NoCrash samples
     for c_item in crash_train:
-        # 如果 NoCrash 足够多，随机选 PAIR_PER_SAMPLE 个；否则全选
+        # Select up to PAIR_PER_SAMPLE samples from NoCrash
         samples = random.sample(noCrash_train, min(len(noCrash_train), PAIR_PER_SAMPLE))
         for nc_item in samples:
             siamese_train_p1.append(c_item)
             siamese_train_p2.append(nc_item)
-            labels_train.append(0) # 0 表示不同类
+            labels_train.append(0) # 0 indicates different classes
 
-    # (B) 正样本对 (Same Class): Crash vs Crash
+    # (B) Positive pairs (Same Class): Crash vs Crash
     for c_item in crash_train:
         samples = random.sample(crash_train, min(len(crash_train), PAIR_PER_SAMPLE))
         for other_c in samples:
             siamese_train_p1.append(c_item)
             siamese_train_p2.append(other_c)
-            labels_train.append(1) # 1 表示同类
+            labels_train.append(1) # 1 indicates same class
 
-    # (C) 正样本对 (Same Class): NoCrash vs NoCrash
-    # NoCrash 数量较多，我们也限制一下采样，避免正样本过多导致不平衡
-    # 我们只遍历一部分 NoCrash，或者减少每个 NoCrash 的配对数
-    target_nocrash_count = len(crash_train) * 2 # 保持一定比例
-    # 随机选取一部分 NoCrash 作为锚点
+    # (C) Positive pairs (Same Class): NoCrash vs NoCrash
+    # Limit NoCrash pairs to prevent class imbalance
+    # Subsample NoCrash samples as anchors
+    target_nocrash_count = len(crash_train) * 2 # Maintain ratio
+    # Randomly select a subset of NoCrash as anchors
     subset_nocrash = random.sample(noCrash_train, min(len(noCrash_train), target_nocrash_count))
     
     for nc_item in subset_nocrash:
@@ -233,8 +224,8 @@ def get_data_siamese2(x, labels, idx_train, idx_val, idx_test):
 
     print(f"Constructed {len(labels_train)} training pairs (Optimized).")
 
-    # 2. 构建测试集 (Test) - 保持原逻辑或同样优化
-    # 为了测试速度，简单构建即可
+    # 2. Construct test set (Test)
+    # Simplified construction for faster testing
     if len(noCrash_train) > 0 and len(crash_train) > 0:
         bench_noCrash = noCrash_train[0]
         bench_crash = crash_train[0]
@@ -263,7 +254,7 @@ def get_data_siamese2(x, labels, idx_train, idx_val, idx_test):
 
 
 def get_test_data(x, labels, idx_train, idx_val, idx_test):
-    # 此函数保持原样，未修改
+
     train = x[idx_train].tolist()
     test = x[idx_test].tolist()
     labels_train = labels[idx_train].tolist()
