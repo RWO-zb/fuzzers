@@ -1,6 +1,3 @@
-# =============================================================================
-# --- Imports & Dependencies ---
-# =============================================================================
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,17 +8,12 @@ from scipy.spatial.distance import cdist, pdist
 from collections import Counter
 import os
 
-# =============================================================================
-# --- Global Configuration & Constants ---
-# =============================================================================
 LOG_FILE = 'all_test_cases_log.pkl'
 OBS_FILE = 'all_trajectories.pkl'
-PERF_FILE = 'perf_meta.pkl' # Optional, likely missing in g-model
-PLOT_3_FILE = 'MountainCar_crash_generation_histogram.png'
+PERF_FILE = 'perf_meta.pkl' 
 PLOT_4_FILE = 'MountainCar_unique_crashes_over_time.png'       
 PLOT_6_FILE = 'MountainCar_survival_steps_boxplot.png'
 
-# Theoretical state space size based on 50x50 grid partition
 THEORETICAL_STATE_SPACE = 50 * 50 
 
 def load_data(file_path):
@@ -34,9 +26,6 @@ def load_data(file_path):
         print(f"Error loading pickle: {e}")
         return None
 
-# =============================================================================
-# --- Data Merging & Deduplication Module ---
-# =============================================================================
 def merge_and_deduplicate(logs, obs_seqs):
     """
     Merge log and obs_sequences, and perform strict deduplication using raw state data.
@@ -54,11 +43,8 @@ def merge_and_deduplicate(logs, obs_seqs):
         
         inp = entry.get('input')
         if inp is None: continue
-        state = np.array(inp)
-            
-        # Use the original float array as a tuple for strict deduplication hash key
+        state = np.array(inp) 
         state_key = tuple(state)
-        
         entry_copy = entry.copy()
         
         # --- Map G-Model fields to CureFuzz standard fields ---
@@ -79,9 +65,6 @@ def merge_and_deduplicate(logs, obs_seqs):
 
     return list(state_to_entry.values())
 
-# =============================================================================
-# --- Core Analysis Module (Efficiency & Diversity) ---
-# =============================================================================
 def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_data=None):
     print(f"\n{'='*85}")
     print(f"{'Academic-Grade Crash & Diversity Analysis (Strictly did_crash == True)':^85}")
@@ -184,12 +167,13 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
             best_k = 2
             kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
             labels = kmeans.fit_predict(reduced_data)
-            best_score = silhouette_score(reduced_data, labels)
+            sample_sz = 5000 if len(reduced_data) > 5000 else None
+            best_score = silhouette_score(reduced_data, labels, sample_size=sample_sz, random_state=42)
             
             for k in range(3, max_k + 1):
                 kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
                 labels = kmeans.fit_predict(reduced_data)
-                score = silhouette_score(reduced_data, labels)
+                score = silhouette_score(reduced_data, labels, sample_size=sample_sz, random_state=42)
                 if score >= best_score * 1.20:
                     best_score = score
                     best_k = k
@@ -266,46 +250,26 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     compute_diversity_metrics(outputs_padded, times, "Output", raw_lengths=raw_survival_steps)
     print(f"{'='*85}\n")
 
-# =============================================================================
-# --- Supplementary Plotting Module ---
-# =============================================================================
-def plot_generation_histogram(deduplicated_log):
-    crash_generations = []
+def print_generation_stats(deduplicated_log):
+    """Print crash step/generation statistics without plotting (not meaningful for diffusion models)."""
+    crash_steps = []
     for entry in deduplicated_log:
         if entry.get('did_crash', False):
             parent_depth = entry.get('parent_depth')
             if parent_depth is not None:
-                crash_generations.append(parent_depth + 1)
+                crash_steps.append(parent_depth + 1)
             
-    if not crash_generations: return
+    if not crash_steps: return
 
-    avg_gen = np.mean(crash_generations)
-    median_gen = np.median(crash_generations)
-    max_gen = np.max(crash_generations)
+    avg_step = np.mean(crash_steps)
+    median_step = np.median(crash_steps)
+    max_step = np.max(crash_steps)
     
-    print(f"[Evolutionary Depth Analysis]")
-    print(f"  Average Crash Step/Generation (Mean):   {avg_gen:.2f}")
-    print(f"  Median Crash Step/Generation (Median):  {median_gen:.2f}")
-    print(f"  Deepest Crash Found at Step/Generation: {max_gen}")
+    print(f"[Crash Step Distribution (G-Model has no generational structure)]")
+    print(f"  Average Crash Step (Mean):   {avg_step:.2f}")
+    print(f"  Median Crash Step (Median):  {median_step:.2f}")
+    print(f"  Deepest Crash at Step:       {max_step}")
 
-    generation_counts = Counter(crash_generations)
-    generations = range(0, max_gen + 2)
-    counts = [generation_counts.get(gen, 0) for gen in generations]
-
-    plt.figure(figsize=(12, 7))
-    plt.bar(generations, counts, color='red', alpha=0.7, zorder=3)
-    plt.title('MountainCar: Histogram of Unique Crash Steps/Generations (G-Model)')
-    plt.xlabel('Step/Generation')
-    plt.ylabel('Number of Unique Crashing Inputs')
-    step = max(1, (max_gen // 20))
-    plt.xticks(np.arange(0, max_gen + 2, step=step))
-    plt.grid(axis='y', linestyle='--', alpha=0.6, zorder=0)
-    plt.savefig(PLOT_3_FILE)
-    plt.close()
-
-# =============================================================================
-# --- Main Execution Flow ---
-# =============================================================================
 def main():
     original_log_data = load_data(LOG_FILE)
     obs_seqs = load_data(OBS_FILE)
@@ -321,7 +285,7 @@ def main():
         return
     
     analyze_and_plot_comprehensive_metrics(original_log_data, deduplicated_log, perf_data)
-    plot_generation_histogram(deduplicated_log)
+    print_generation_stats(deduplicated_log)
 
     print("All analysis and plotting completed. Check the generated PNG files.")
 

@@ -54,9 +54,6 @@ def main():
     parser.add_argument(
         "--env-kwargs", type=str, nargs="+", action=StoreDict, help="Optional keyword argument to pass to the env constructor"
     )
-
-
-    ######################## parameters for generative testing ############################################
     parser.add_argument("--method", help="select the guidance for testing", default="generative+novelty", type=str, required=False)
     parser.add_argument("--hour", help="test time", default=12, type=int)
     parser.add_argument("--step", help="number of normal cases at each training step", default=50, type=int)
@@ -70,8 +67,6 @@ def main():
     f = open(log_file_path, 'w', buffering=1)
     sys.stdout = f
     sys.stderr = f
-
-    # Going through custom gym packages to let them register in the global registory
     for env_module in args.gym_packages:
         importlib.import_module(env_module)
 
@@ -82,7 +77,6 @@ def main():
     if args.exp_id == 0:
         args.exp_id = get_latest_run_id(os.path.join(folder, algo), env_id)
 
-    # Sanity checks
     if args.exp_id > 0:
         log_path = os.path.join(folder, algo, f"{env_id}_{args.exp_id}")
     else:
@@ -163,17 +157,12 @@ def main():
         }
 
     model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, **kwargs)
-
-    ##################################################################################################
-
     case_dimension = 2 
     diffusion_model = Diffusion(batch_size = 1, epoch = 100, data_size = case_dimension, training_step_per_spoch = 25, num_diffusion_step = 25)
     diffusion_model.setup()
     memory_model = Memory(size = 100)
     density_model = Density()
 
-
-    ################################### nvovelty computation ########################################
     min_obs = np.array([-1.2, -0.07])
     max_obs = np.array([0.6, 0.07])
     
@@ -207,49 +196,42 @@ def main():
     random_failure_list = []
     diffusion_failure_count = []
     random_failure_count = []
-    #######################################################################################
     trajectory_list = []
     termination_list = []
     information_list = []
     failure_flag = False
 
     all_test_cases_log = []
-    all_trajectories = [] # 用于保存主循环中的轨迹
+    all_trajectories = [] 
 
     def get_random_mc_state():
         pos = np.random.uniform(-0.6, -0.4) 
         vel = 0
         return np.array([pos, vel])
 
-    # --- 阶段 1：严格遵循论文的初始化预热 (Strict Initialization) ---
+    # --- Stage 1: Strict Initialization  ---
     print("--- Stage 1: Initialization (Warm-up) ---")
-    initial_collection_count = 2000 # 论文要求：采样 1000 个正常用例
+    initial_collection_count = 2000
     
     for pre_step in tqdm.tqdm(range(initial_collection_count), desc="Initial Random Sampling"):
-        # 仅生成随机初始状态，不执行环境交互，不计算 metrics
         normal_case = get_random_mc_state()
         normal_case_list.append(normal_case)
 
-    # --- 阶段 2：预训练扩散模型 (Pre-training) ---
+    # --- Stage 2: Pre-train Diffusion Model ---
     if len(normal_case_list) > 0:
         print(f"--- Pre-training Diffusion Model with {len(normal_case_list)} samples ---")
         normal_case_list = np.array(normal_case_list)
-        
-        # 论文要求：在第一阶段，扩散模型仅捕捉正常分布，不涉及 metrics。
-        # 强制 metrics=None 且 method='generative'
         diffusion_model.train(normal_case_list, None, 'generative')
-        
-        # 清空数据，为正式测试循环做准备
         normal_case_list = []
         metric_list = []
         memory_model.clear()
 
-    # --- 阶段 3：主循环 ---
+    # --- Stage 3: Main Testing Loop ---
     print("--- Stage 3: Main Testing Loop ---")
     start_time = time.time()
     current_time = time.time()
     
-    while current_time - start_time < 3600 * 12 and len(all_test_cases_log)<5000: # 使用参数 args.hour 控制时长
+    while current_time - start_time < 3600 * 12 and len(all_test_cases_log)<5000:
 
         if cur_step > 0 and cur_step % args.step == 0:
             normal_case_list = np.array(normal_case_list)
@@ -276,14 +258,10 @@ def main():
             metric_list = []
             memory_model.clear()
 
-            for _ in range(args.step): # 使用 step 大小进行验证
+            for _ in range(args.step):
                 failure_flag = False
                 state = None
-                
-                # --- 生成测试用例 ---
-                test_case = diffusion_model.generate()[0] # diffusion返回 (1,2)，取[0]得 (2,)
-                
-                # --- 设置环境状态 ---
+                test_case = diffusion_model.generate()[0] 
                 obs = env.reset()
                 env.envs[0].unwrapped.state = test_case
                 obs = np.array([test_case])
@@ -295,7 +273,7 @@ def main():
                     action, state = model.predict(obs, state=state, deterministic=deterministic)
                     obs, reward, done, infos = env.step(action)
                     
-                    # 记录 OBS 序列
+                    # Record OBS sequence
                     if done and "terminal_observation" in infos[0]:
                         sequences.append(infos[0]["terminal_observation"])
                     else:
@@ -305,16 +283,16 @@ def main():
                     if done:
                         break
                 
-                # 保存 Generative 阶段的轨迹
+                # Save trajectories from the Generative phase
                 all_trajectories.append(sequences)
 
-                # --- Crash 定义修改 ---
+                # --- Modified Crash Definition ---
                 if "terminal_observation" in infos[0]:
                     is_crash = (infos[0]['terminal_observation'][0] < 0.5)
                 else:
                     is_crash = (obs[0][0] < 0.5)
                 
-                # 计算时间戳
+                # Calculate timestamp
                 elapsed_time = time.time() - start_time
 
                 all_test_cases_log.append({
@@ -347,7 +325,8 @@ def main():
                 else:
                     novelty_dict[abstract_id] = 1
                 novelty = novelty_dict[abstract_id]
-                # 修复 OverflowError
+                
+                # Fix OverflowError
                 try:
                     norm_novelty = 1 / (math.e ** (novelty - 1))
                 except OverflowError:
@@ -362,7 +341,7 @@ def main():
 
                 information_list.append([sequences[-1].tolist(), failure_flag, abstract_id, norm_novelty])
         else:
-            # --- 随机生成逻辑 ---
+            # --- Random Generation Logic ---
             state = None
             normal_case = get_random_mc_state()
             
@@ -377,7 +356,7 @@ def main():
                 action, state = model.predict(obs, state=state, deterministic=deterministic)
                 obs, reward, done, infos = env.step(action)
                 
-                # 记录 OBS 序列
+                # Record OBS sequence
                 if done and "terminal_observation" in infos[0]:
                     sequences.append(infos[0]["terminal_observation"])
                 else:
@@ -387,7 +366,7 @@ def main():
                 if done:
                     break
             
-            # 保存 Random 阶段的轨迹
+            # Save trajectories from the Random phase
             all_trajectories.append(sequences)
             
             if "terminal_observation" in infos[0]:
@@ -395,7 +374,7 @@ def main():
             else:
                 is_crash = (obs[0][0] < 0.5)
 
-            # 计算时间戳
+            # Calculate timestamp
             elapsed_time = time.time() - start_time
 
             all_test_cases_log.append({
@@ -440,7 +419,8 @@ def main():
                 else:
                     novelty_dict[abstract_id] = 1
                 novelty = novelty_dict[abstract_id]
-                # 修复 OverflowError
+                
+                # Fix OverflowError
                 try:
                     norm_novelty = 1 / (math.e ** (novelty - 1))
                 except OverflowError:
@@ -471,7 +451,7 @@ def main():
     with open(log_filename, 'wb') as f:
         pickle.dump(all_test_cases_log, f)
         
-    # 保存所有轨迹 (PKL)
+    # Save all trajectories (PKL)
     traj_pkl_filename = os.path.join(result_path, 'all_trajectories.pkl')
     with open(traj_pkl_filename, 'wb') as f:
         pickle.dump(all_trajectories, f)

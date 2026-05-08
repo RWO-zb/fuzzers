@@ -70,18 +70,14 @@ class Diffusion:
         self.betas = np.linspace(self.beta_start ** 0.5, self.beta_end ** 0.5, self.num_diffusion_step) ** 2
         self.alphas = 1 - self.betas
 
-        # send parameters to device
         self.betas = torch.tensor(self.betas).to(torch.float32).to(self.device)
         self.alphas = torch.tensor(self.alphas).to(torch.float32).to(self.device)
 
-        # alpha_bar_t is the product of all alpha_ts from 0 to t
         self.list_bar_alphas = [self.alphas[0]]
         for t in range(1,self.num_diffusion_step):
             self.list_bar_alphas.append(reduce(mul,self.alphas[:t]))
             
         self.list_bar_alphas = torch.cumprod(self.alphas, axis=0).to(torch.float32).to(self.device)
-
-        # CHANGE: Use reduction='none' to support per-sample weighting
         self.criterion = nn.MSELoss(reduction='none')
         self.denoising_model = Denoising(self.data_size, self.num_diffusion_step).to(self.device)
         self.denoising_model.emb = self.denoising_model.emb.to(self.device)
@@ -93,7 +89,6 @@ class Diffusion:
         """
         indices = [i for i in range(len(training_data))]
         
-        # Hyperparameter lambda from the paper (Source 277)
         lambda_guide = 0.1
 
         for epoch in range(self.epoch):
@@ -115,8 +110,7 @@ class Diffusion:
         
                 mu_theta = self.denoising_model(q_t , t)
                 
-                # --- CHANGE: Weighted Loss Implementation ---
-                # Calculate raw MSE per sample (mean over dimensions)
+                # Calculate raw MSE per sample
                 loss_mse = self.criterion(mu_t, mu_theta).mean() 
 
                 if method == 'generative':
@@ -150,10 +144,8 @@ class Diffusion:
         
         mu_theta = denoise_model(x_t,t)
         
-        # Sample from posterior mean with noise (Standard DDPM sampling)
         if t > 0:
             noise = torch.randn_like(x_t).to(device)
-            # approximate sigma_t as sqrt(beta_t)
             sigma_t = torch.sqrt(beta_t)
             x_t_before = mu_theta + sigma_t * noise
         else:
@@ -181,17 +173,12 @@ class Diffusion:
         return mu_tilde, cov
 
     def clip_samples(self, sample):
-        # CHANGE: Added .detach() to avoid RuntimeError during generation
         sample = sample.detach().cpu().numpy()
         
         # Ensure correct shape (Batch, Dim)
         if sample.ndim == 1:
             sample = sample[None, :]
             
-        # MountainCar State Clipping Logic
-        # Position: [-1.2, 0.6], Velocity: [-0.07, 0.07]
-        # The user's previous code clipped pos to [-0.6, -0.4] and vel to 0
-        # effectively resetting to a standard start distribution.
         if sample.shape[1] == 2:
             sample[:, 0] = np.clip(sample[:, 0], -0.6, -0.4)
             sample[:, 1] = np.clip(sample[:, 1], 0, 0)
@@ -201,14 +188,12 @@ class Diffusion:
         return sample
 
     def generate(self):
-        # CHANGE: Use torch.no_grad() for efficient inference
         with torch.no_grad():
             data = torch.distributions.MultivariateNormal(
                 loc=torch.zeros(self.data_size).to(self.device),
                 covariance_matrix=torch.eye(self.data_size).to(self.device)
             ).sample().to(self.device)
             
-            # Ensure batch dimension exists
             if data.dim() == 1:
                 data = data.unsqueeze(0)
 

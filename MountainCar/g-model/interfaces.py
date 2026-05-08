@@ -23,7 +23,6 @@ def compute_sensitivity(case, cases_list, performance_list, episode_reward):
     min_distance = distances[min_index] 
     
     sensitivity = abs(performance_list[min_index] - episode_reward)
-    # a larger sensitivity is the better
     return sensitivity
 
 
@@ -46,7 +45,6 @@ def case_clip(original_case):
             target_case[i] = 3
     return target_case
 
-## Define the NN architecture
 class Net(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(Net, self).__init__()
@@ -89,12 +87,8 @@ class Grid(AbstractModel):
         upper_bound = self.max
         unit = (upper_bound - lower_bound)/self.k
         abs_states = np.zeros(con_states.shape[0],dtype=np.int8)
-        
-        #print(lower_bound)
-        #print(upper_bound)
         indixes = np.where(unit == 0)[0]
         unit[indixes] = 1
-        #print('unit:\t', unit)
         
         tmp = ((con_states-self.min)/unit).astype(int)
         if self.clipped:
@@ -103,7 +97,6 @@ class Grid(AbstractModel):
         dims = tmp.shape[1]
         for i in range(dims):
             abs_states = abs_states + tmp[:,i]*pow(self.k, i)
-#         abs_states = np.expand_dims(abs_states,axis=-1)
         abs_states = [str(item) for item in abs_states]
         return abs_states
     
