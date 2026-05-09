@@ -7,12 +7,18 @@ import copy
 from scipy.spatial import distance
 
 def compute_novelty(data_list):
+    """
+    Computes the novelty score for a list of data points based on their L2 norm.
+    """
     data_list = np.array(data_list)
     result_list = np.linalg.norm(data_list, axis=1)
     norm_novelties = normalize_data(result_list, np.min(result_list), np.max(result_list))
     return norm_novelties
 
 def compute_sensitivity(case, cases_list, performance_list, episode_reward):
+    """
+    Computes the sensitivity of a case by comparing its performance with the most similar case in memory.
+    """
     if cases_list == []:
         return episode_reward
 
@@ -23,6 +29,9 @@ def compute_sensitivity(case, cases_list, performance_list, episode_reward):
     return sensitivity
 
 def normalize_data(data, lbound, ubound):
+    """
+    Normalizes data values to a range of [0, 1] based on provided bounds.
+    """
     if lbound == ubound:
         return 0
     norm_data = (data - lbound) / (ubound - lbound)
@@ -30,6 +39,9 @@ def normalize_data(data, lbound, ubound):
     return norm_data
 
 def case_clip(original_case):
+    """
+    Discretizes continuous case values into categorical bins (1, 2, or 3).
+    """
     target_case = copy.deepcopy(original_case)
     for i in range(len(original_case)):
         if original_case[i] < 0.333:
@@ -41,11 +53,17 @@ def case_clip(original_case):
     return target_case
 
 class AbstractModel():
+    """
+    Base class for state abstraction models.
+    """
     def __init__(self):
         self.initial = []
         self.final = []
 
 class Grid(AbstractModel):
+    """
+    Grid-based state abstraction that maps continuous states to discrete grid IDs.
+    """
     def __init__(self, min_val, max_val, grid_num, clipped=True):
         super().__init__()
         self.min = min_val
@@ -57,6 +75,9 @@ class Grid(AbstractModel):
         self.clipped = clipped
         
     def state_abstract(self, con_states):
+        """
+        Abstracts continuous states into discrete grid IDs.
+        """
         con_states = con_states
         lower_bound = self.min
         upper_bound = self.max
@@ -77,7 +98,10 @@ class Grid(AbstractModel):
         return abs_states
 
 class Memory:
-    def __init__(self, size = 100):
+    """
+    A buffer to store and manage test cases along with their calculated metrics (density, novelty, sensitivity).
+    """
+    def __init__(self, size=100):
         self.ptr = 0
         self.size = size
         self.count = 0
@@ -96,6 +120,9 @@ class Memory:
         self.performance_list = [0 for i in range(self.size)]
 
     def append(self, case, density, sensitivity, performance, novelty):
+        """
+        Appends a new case and its metrics to memory, updating global min/max bounds.
+        """
         self.max_density = max(self.max_density, density)
         self.min_density = min(self.min_density, density)
         self.max_novelty = max(self.max_novelty, novelty)
@@ -121,6 +148,9 @@ class Memory:
             return self.size
 
     def clear(self):
+        """
+        Resets the memory buffer.
+        """
         self.ptr = 0
         self.count = 0
         self.case_list = [None for i in range(self.size)]
@@ -136,6 +166,9 @@ class Memory:
     def get_performances(self): return self.performance_list[0: self.get_index()]
 
 class Carla_ENV:
+    """
+    Manages CARLA environment parameters and vector-to-scene conversion.
+    """
     def __init__(self):
         self.start_pose = None
         self.target_pose = None
@@ -148,12 +181,14 @@ class Carla_ENV:
         self.weather_scope = 13
         self.target_scope = 101
         
-        # 定义偏移范围标准
-        self.ego_pos_range = 0.15  # 主车位置偏移 ±0.15 米
-        self.npc_pos_range = 0.1   # 背景车位置偏移 ±0.1 米
+        # Define offset range standards
+        self.ego_pos_range = 0.15  # Ego vehicle position offset ±0.15 meters
+        self.npc_pos_range = 0.1   # NPC vehicle position offset ±0.1 meters
 
     def from_vector(self, vector_info):
-        # Flatten input if needed
+        """
+        Decodes a normalized vector into CARLA environment configuration parameters.
+        """
         if hasattr(vector_info, 'flatten'):
             vector_info = vector_info.flatten()
             
@@ -164,11 +199,11 @@ class Carla_ENV:
         if self.start_pose in [39,40,41,42,43,48,51,68,79]:
             self.start_pose = 1
 
-        # 应用主车位置偏移系数 (范围 [-0.15, 0.15])
+        # Apply ego vehicle position offset coefficients (range [-0.15, 0.15])
         self.start_pose_x = vector_info[1] * self.ego_pos_range
         self.start_pose_y = vector_info[2] * self.ego_pos_range
         
-        # 主车角度偏移 (范围 [-5, 5])
+        # Ego vehicle yaw offset (range [-5, 5])
         self.start_pose_yaw = vector_info[3] * self.yaw_scope
 
         self.target_pose = int(((vector_info[4] -  self.min) /  (self.max -  self.min)) * self.target_scope)
@@ -178,14 +213,16 @@ class Carla_ENV:
         
         self.vehicles = []
         for i in range(100):
-            # Check range to avoid index error
             if 6 + i * 2 + 1 < len(vector_info):
-                # 应用背景车位置偏移系数 (范围 [-0.1, 0.1])
+                # Apply NPC vehicle position offset coefficients (range [-0.1, 0.1])
                 v_x = vector_info[6 + i * 2] * self.npc_pos_range
                 v_y = vector_info[7 + i * 2] * self.npc_pos_range
                 self.vehicles.append((v_x, v_y))
 
 class Density:
+    """
+    Provides density estimation using Gaussian Mixture Models (GMM) for MDP state sequences.
+    """
     def __init__(self):
         self.GMM = None
         self.GMMupdate = None
@@ -196,6 +233,9 @@ class Density:
         self.GMMthreshold = 0.1
 
     def flatten_states(self, states):
+        """
+        Prepares state sequences and conditional transition pairs (x_t, x_{t+1}) for GMM processing.
+        """
         states = np.array(states)
         states_cond = np.zeros((states.shape[0]-1, states.shape[1] * 2))
         for i in range(states.shape[0]-1):
@@ -203,6 +243,9 @@ class Density:
         return states, states_cond
 
     def GMMinit(self, data_corpus, data_corpus_cond):
+        """
+        Initializes GMM parameters (means, weights, covariances) using a subset of the data corpus.
+        """
         res = []
         for i in range(self.GMMK):
             temp = dict()
@@ -220,7 +263,7 @@ class Density:
         for i in range(self.GMMK):
             weights[i] = res[i][0]
             means[i] = res[i][1] / res[i][0]
-            # [Fix] Add jitter to ensure positive definiteness
+            # Add jitter to ensure positive definiteness
             covariances[i] = np.eye(data_corpus.shape[1]) + 1e-5 * np.eye(data_corpus.shape[1])
 
         self.GMM = dict()
@@ -245,7 +288,7 @@ class Density:
         for i in range(self.GMMK_cond):
             weights_cond[i] = res_cond[i][0]
             means_cond[i] = res_cond[i][1] / res_cond[i][0]
-            # [Fix] Add jitter
+            # Add jitter
             covariances_cond[i] = np.eye(data_corpus_cond.shape[1]) + 1e-5 * np.eye(data_corpus_cond.shape[1])
 
         self.GMM_cond = dict()
@@ -256,12 +299,13 @@ class Density:
         return res, res_cond
 
     def get_mdp_pdf(self, states_seq, states_seq_cond):
-        # [Fix] Clean NaN input
+        """
+        Calculates the probability density of an MDP sequence using the chain rule.
+        """
         first_frame = np.nan_to_num(states_seq[0:1])
         GMMpdf = np.zeros(self.GMMK)
         
         for k in range(self.GMMK):
-            # [Fix] allow_singular=True
             try:
                 GMMpdf[k] = self.GMM['weights'][k] * multivariate_normal.pdf(
                     first_frame, self.GMM['means'][k], self.GMM['covariances'][k], allow_singular=True)
@@ -303,6 +347,9 @@ class Density:
         return GMMpdfvalue, GMMpdf, other_frame_pdf
 
     def state_coverage(self, states_seq):
+        """
+        Estimates state coverage and updates GMM parameters incrementally if density is low.
+        """
         states_seq, states_seq_cond = self.flatten_states(states_seq)
         
         if self.GMM == None:
@@ -332,11 +379,11 @@ class Density:
             for i in range(self.GMMK):
                 self.GMM['weights'][i] = new_S[i][0]
                 self.GMM['means'][i] = new_S[i][1] / new_S[i][0]
-                # [Fix] Regularize updated covariance
+                # Regularize updated covariance
                 raw_cov = (new_S[i][2] - np.matmul(self.GMM['means'][i].reshape(1, -1).T, new_S[i][1])) / new_S[i][0]
                 self.GMM['covariances'][i] = raw_cov + 1e-5 * np.eye(raw_cov.shape[0])
                 
-                # Check eigen for extra safety
+                # Check eigenvalues for numerical stability
                 W, V = np.linalg.eigh(self.GMM['covariances'][i])
                 W = np.maximum(W, 1e-3)
                 D = np.diag(W)
@@ -360,7 +407,7 @@ class Density:
                 for i in range(self.GMMK_cond):
                     self.GMM_cond['weights'][i] = new_S_cond[i][0]
                     self.GMM_cond['means'][i] = new_S_cond[i][1] / new_S_cond[i][0]
-                    # [Fix] Regularize updated covariance
+                    # Regularize updated covariance
                     raw_cov = (new_S_cond[i][2] - np.matmul(self.GMM_cond['means'][i].reshape(1, -1).T, new_S_cond[i][1])) / new_S_cond[i][0]
                     self.GMM_cond['covariances'][i] = raw_cov + 1e-5 * np.eye(raw_cov.shape[0])
                     

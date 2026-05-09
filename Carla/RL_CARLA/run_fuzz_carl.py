@@ -1,9 +1,6 @@
 import os
 import sys
-
-# [修复1] 必须在 import pygame 之前设置，防止 Headless 模式卡死
 os.environ["SDL_VIDEODRIVER"] = "dummy"
-
 import time
 import math
 import random
@@ -16,7 +13,7 @@ from pathlib import Path
 import carla
 import pygame
 
-# 路径设置
+# Path configuration
 current_script_path = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_script_path)
 
@@ -25,7 +22,7 @@ if current_script_path not in sys.path:
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# 导入依赖模块
+# Import internal dependencies
 try:
     from bird_view.utils import map_utils
 except ImportError:
@@ -42,14 +39,12 @@ except ImportError:
 try:
     from fuzz.cure_fuzz import cure
     from fuzz.replayer import replayer 
+    from fuzz.replayer import replayer 
 except ImportError:
     sys.exit(1)
 
-# ==========================================
-# 辅助函数：Patch Pygame & Map Utils
-# ==========================================
+# Helper functions: Patch Pygame and Map Utils
 def patch_map_utils():
-    # 再次确认环境变量，兼容不同加载顺序
     os.environ["SDL_VIDEODRIVER"] = "dummy"
     
     @classmethod
@@ -88,13 +83,11 @@ def patch_map_utils():
 
 patch_map_utils()
 
-# ==========================================
-# 辅助函数：序列化完整状态
-# ==========================================
+# Helper functions: Full state serialization
 def get_full_state_str(ego_transform, npc_info_list):
     """
-    将自我车辆和NPC的状态序列化为字符串，保留2位小数以便去重比较。
-    格式: Ego:[x,y,yaw]|NPCs:(x1,y1),(x2,y2)...
+    Serializes ego vehicle and NPC states into a string for deduplication.
+    Format: Ego:[x,y,yaw]|NPCs:(x1,y1),(x2,y2)...
     """
     if ego_transform is None:
         ego_str = "None"
@@ -114,9 +107,7 @@ def get_full_state_str(ego_transform, npc_info_list):
 
     return f"Ego:{ego_str}|NPCs:{npc_str}"
 
-# ==========================================
-# 类定义：多样性管理
-# ==========================================
+# Class definitions: Diversity Management
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
         self.x_min, self.x_max = x_range
@@ -178,9 +169,7 @@ class BehaviorDiversityManager:
         fault_diversity_count = len(self.fault_archive)
         return behavior_count, fault_diversity_count
 
-# ==========================================
-# 全局设置与工具
-# ==========================================
+# Global settings and utility functions
 def set_global_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -252,9 +241,7 @@ def save_replayer_pickle(replayer_obj, log_dir):
             pickle.dump(replayer_obj, handle, protocol=pickle.HIGHEST_PROTOCOL)
     except Exception: pass
 
-# ==========================================
-# 仿真环境管理类
-# ==========================================
+# Simulation environment management class
 class BenchmarkEnv:
     def __init__(self, args, result_dir):
         self.args = args
@@ -283,7 +270,6 @@ class BenchmarkEnv:
         self.traffic_manager.set_hybrid_physics_mode(False) 
         self.traffic_manager.set_global_distance_to_leading_vehicle(2.0)
 
-        # 创建轨迹数据保存目录
         (self.result_dir / "trajectories").mkdir(parents=True, exist_ok=True) 
 
         self.summary_csv = self.result_dir / "summary.csv"
@@ -357,9 +343,7 @@ class BenchmarkEnv:
         results = self.client.apply_batch_sync(batch, True)
         return [r.actor_id for r in results if not r.error]
 
-# ==========================================
-# 单次运行逻辑
-# ==========================================
+# Single run logic
 def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase, npc_count=0, npc_mutate_info=None, seed=None):
     if seed is not None:
         set_global_seed(seed)
@@ -368,7 +352,6 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
     client = env_manager.client
     world = env_manager.world
     
-    # 强制开启同步模式，确保环境稳定
     settings = world.get_settings()
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = 1.0 / VIDEO_FPS 
@@ -446,7 +429,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         if collision_sensor: collision_sensor.destroy()
         if vehicle: vehicle.destroy()
         client.apply_batch([carla.command.DestroyActor(x) for x in npc_ids])
-        world.tick() # 确保销毁后tick
+        world.tick() 
         return "INITIAL_CRASH" 
 
     route_file = f"route_{run_name}.xml"
@@ -577,14 +560,10 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         try: world.tick()
         except: pass
         
-        # [修复2]：删除了此处将 synchronous_mode 设为 False 的代码。
-        # 保持同步模式为 True，让服务器在 Python 处理数据时处于暂停状态，防止死锁。
-        
         if os.path.exists(route_file): 
             try: os.remove(route_file)
             except: pass
         
-        # 保存完整的轨迹数据 (.npz)
         if len(sequence) > 0 and len(episode_actions) > 0:
             min_len = min(len(sequence), len(episode_actions), len(reward_history))
             rewards_array = [r['total_reward'] for r in reward_history[:min_len]]
@@ -635,9 +614,7 @@ def run_single(env_manager, start_pose, target_pose, weather_id, run_name, phase
         "steer_std": steer_std if 'steer_std' in locals() else 0.0
     }
 
-# ==========================================
-# 主流程：基准测试套件
-# ==========================================
+# Main benchmark suite execution flow
 def run_benchmark_suite(args):
     set_global_seed(args.seed)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -654,7 +631,6 @@ def run_benchmark_suite(args):
     tasks = env_manager.load_suite_tasks(args.town, args.suite)
     weather_list = [1, 3, 6, 8]
     
-    # 生成所有 400 种组合 (100 routes * 4 weathers)
     all_combinations = []
     for task_idx, (start_id, target_id) in enumerate(tasks):
         for w_id in weather_list:
@@ -684,8 +660,6 @@ def run_benchmark_suite(args):
         target_pose = env_manager.spawn_points[target_id]
         
         current_attempt_seed = args.seed + attempt_idx 
-        
-        # 修改这里：task_id 格式改为 seed_001
         run_name = f"seed_{attempt_idx:03d}"
         
         res = run_single(env_manager, start_pose, target_pose, weather_id, run_name, "Phase1", npc_count=args.num_vehicles, seed=current_attempt_seed)
@@ -740,18 +714,15 @@ def run_benchmark_suite(args):
         current_fuzz_seed = args.seed + 100000 + fuzz_idx
         set_global_seed(current_fuzz_seed)
         
-        # Step 1: Capture Pre-Mutation State
         seed_pose = env_manager.fuzzer.get_pose() 
         current_generation = env_manager.fuzzer.current_generation
         seed_npc_info = env_manager.fuzzer.current_vehicle_info
         
         input_pre_str = get_full_state_str(seed_pose, seed_npc_info)
         
-        # Step 2: Perform Mutation
         mutated_start_pose = env_manager.fuzzer.mutation(seed_pose)
         mutated_vehicles = env_manager.fuzzer.vehicle_mutate(seed_npc_info)
         
-        # Step 3: Capture Post-Mutation State
         input_post_str = get_full_state_str(mutated_start_pose, mutated_vehicles)
         
         env_setting = env_manager.fuzzer.current_envsetting
@@ -806,9 +777,7 @@ def run_benchmark_suite(args):
     
     save_replayer_pickle(env_manager.replayer, result_folder)
 
-# ==========================================
-# 日志记录函数
-# ==========================================
+# Result logging function
 def log_result(env_manager, task_id, phase, weather, start, target, res, intrinsic, 
                coverage=0.0, distinct_crashes=0, final_x=0.0, final_y=0.0,
                behavior_count=0, fault_behavior_count=0, avg_speed=0.0, steer_std=0.0,

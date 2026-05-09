@@ -12,10 +12,10 @@ import pickle
 import queue
 from pathlib import Path
 
-# 禁用 SDL 视频驱动
+# Disable SDL video driver
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
-# 路径设置
+# Path configuration
 current_dir = os.path.dirname(os.path.abspath(__file__))
 workspace_dir = os.path.dirname(current_dir)
 pcla_dir = os.path.join(workspace_dir, 'PCLA')
@@ -50,10 +50,11 @@ def patch_map_utils():
     pass
 patch_map_utils()
 
-# ==========================================
-# 全局设置与工具 (参照 RL_CARLA 添加)
-# ==========================================
+# Global settings and utilities
 def set_global_seed(seed):
+    """
+    Sets the random seed for all libraries to ensure reproducibility.
+    """
     random.seed(seed)
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -66,6 +67,9 @@ def set_global_seed(seed):
     except ImportError: pass
 
 def get_full_state_str(ego_transform, npc_info_list):
+    """
+    Generates a string representation of the ego and NPC transforms for logging.
+    """
     if ego_transform is None:
         ego_str = "None"
     else:
@@ -84,6 +88,9 @@ def get_full_state_str(ego_transform, npc_info_list):
     return f"Ego:{ego_str}|NPCs:{npc_str}"
 
 class DiversityManager:
+    """
+    Tracks state coverage and unique crash locations using a grid-based approach.
+    """
     def __init__(self, x_range, y_range, num_bins=100):
         self.x_min, self.x_max = x_range
         self.y_min, self.y_max = y_range
@@ -117,6 +124,9 @@ class DiversityManager:
         return coverage, distinct_crashes
 
 class BehaviorDiversityManager:
+    """
+    Tracks behavioral diversity based on speed and steering standard deviation.
+    """
     def __init__(self, speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20):
         self.speed_min, self.speed_max = speed_range
         self.steer_min, self.steer_max = steer_range
@@ -157,6 +167,9 @@ WEATHERS = {
 }
 
 def calculate_reward(prev_distance, cur_distance, cur_collid, cur_invade, cur_speed, prev_speed):
+    """
+    Calculates the reward based on progress, speed, and safety violations.
+    """
     r_dist = np.clip(prev_distance - cur_distance, -10.0, 10.0)
     cur_speed_norm = np.linalg.norm(cur_speed)
     prev_speed_norm = np.linalg.norm(prev_speed)
@@ -172,6 +185,9 @@ def calculate_reward(prev_distance, cur_distance, cur_collid, cur_invade, cur_sp
     return total_reward, info
 
 def get_state_vector(vehicle, birdview_obs, target_location, command=2):
+    """
+    Constructs a 17-dimensional state vector including physical attributes and birdview stats.
+    """
     t = vehicle.get_transform()
     v = vehicle.get_velocity()
     a = vehicle.get_acceleration()
@@ -190,6 +206,9 @@ def get_state_vector(vehicle, birdview_obs, target_location, command=2):
     return final_state
 
 def save_replayer_pickle(replayer_obj, log_dir):
+    """
+    Saves the replayer object to a pickle file.
+    """
     filepath = os.path.join(log_dir, 'result.pkl')
     try:
         with open(filepath, 'wb') as handle:
@@ -198,6 +217,9 @@ def save_replayer_pickle(replayer_obj, log_dir):
         pass
 
 class SeqFuzzManager:
+    """
+    Manages the sequential fuzzing process, CARLA environment, and data logging.
+    """
     def __init__(self, args, result_dir):
         self.args = args
         self.client = carla.Client(args.host, args.port)
@@ -261,6 +283,9 @@ class SeqFuzzManager:
             pd.DataFrame(columns=columns).to_csv(self.summary_csv, index=False)
 
     def load_suite_tasks(self, town_name, suite_type="straight"):
+        """
+        Loads task (start/target spawn points) for the specified town and suite.
+        """
         base_path = Path(current_dir) / "benchmark"
         task_file = base_path / "corl2017" / "0915" / f"{suite_type}_{town_name}.txt"
         if not task_file.exists():
@@ -277,6 +302,9 @@ class SeqFuzzManager:
         return tasks
 
     def init_traffic(self, num_vehicles, hero_transform, seed=None):
+        """
+        Spawns background traffic actors.
+        """
         npc_info_list = [] 
         if num_vehicles <= 0: return [], []
         
@@ -306,8 +334,11 @@ class SeqFuzzManager:
         return npc_ids, npc_info_list
 
 def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phase, npc_data=None, seed=None):
+    """
+    Runs a single simulation episode in the CARLA environment.
+    """
     if seed is not None:
-        # 修改：使用更严格的 set_global_seed 替代简单的 random.seed
+        # Use a strict set_global_seed for better reproducibility
         set_global_seed(seed)
         env_manager.traffic_manager.set_random_device_seed(seed)
 
@@ -567,6 +598,9 @@ def run_episode(env_manager, start_pose, target_pose, weather_id, run_name, phas
     }
 
 def log_result(manager, task_id, phase, weather, start, target, res, cvg_metric, tapnet_anom, generation=0, input_pre="None", input_post="None"):
+    """
+    Logs the result of an episode to a CSV file.
+    """
     cov, dist_crash = manager.diversity_manager.get_metrics()
     b_cnt, f_cnt = manager.behavior_manager.get_metrics()
     
@@ -599,8 +633,6 @@ def main():
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--time_budget", type=float, default=None)
     args = parser.parse_args()
-
-    # 修改：在程序入口处立即设置全局种子，确保任务洗牌（shuffle）的确定性
     set_global_seed(args.seed)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -612,14 +644,12 @@ def main():
     total_spawns = len(manager.spawn_points)
     weather_list = [1, 3, 6, 8]
     
-    # 参照 RL_CARLA：生成所有组合列表
     all_combinations = []
     if tasks:
         for t_idx, (start_id, target_id) in enumerate(tasks):
             for w_id in weather_list:
                 all_combinations.append((t_idx, start_id, target_id, w_id))
         
-        # 因为前面调用了 set_global_seed(args.seed)，这里的 shuffle 现在是确定性的
         random.shuffle(all_combinations)
     
     print(f"Starting Phase 1: Exploring up to {len(all_combinations)} combinations to find {args.num_tasks} successful seeds...")
@@ -631,7 +661,7 @@ def main():
     try:
         while collected_seeds < args.num_tasks:
             try:
-                # 遍历列表，绝无重复（除非任务文件本身有重复）
+                # Iterate through combinations without duplicates
                 task_idx, start_id, target_id, weather_id = next(combo_iterator)
             except StopIteration:
                 print(f"Warning: Exhausted all {len(all_combinations)} combinations.")

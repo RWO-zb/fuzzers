@@ -1,6 +1,5 @@
 import datetime
 import numpy as np
-# [修改] 使用相对导入，确保在任何 sys.path 配置下都能找到同级模块
 from .Hyperparameter import Hyperparameter
 
 
@@ -39,20 +38,15 @@ def read_data_tapnet(file_path):
     return ret
 
 def get_data():
-    # [注意] 这里的路径可能需要根据实际运行目录调整，或者使用绝对路径
-    # 如果运行脚本在 seqfuzz 目录下，这个相对路径通常是有效的，但在 analysis 内部调用时需注意
     failObs_path = './seqfuzz/analysis/tapnet/data/crashStateSeqV2.txt'
     successObs_path = './seqfuzz/analysis/tapnet/data/noCrashStateSeqV2.txt'
     
-    # 简单的路径回退尝试，防止路径错误
     import os
     if not os.path.exists(failObs_path):
-         # 尝试备用路径 (假设当前工作目录是 seqfuzz)
          failObs_path = './analysis/tapnet/data/crashStateSeqV2.txt'
          successObs_path = './analysis/tapnet/data/noCrashStateSeqV2.txt'
 
     starttime = datetime.datetime.now()
-    # 增加异常处理防止文件不存在导致崩溃
     try:
         failObs_data = read_data_tapnet(failObs_path)
         successObs_data = read_data_tapnet(successObs_path)

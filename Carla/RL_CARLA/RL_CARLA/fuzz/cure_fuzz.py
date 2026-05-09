@@ -7,6 +7,9 @@ import torch.optim as optim
 import math
 
 class RND(nn.Module):
+    """
+    Random Network Distillation (RND) module for intrinsic reward calculation.
+    """
     def __init__(self, input_size=4, hidden_size=16, output_size=16):
         super(RND, self).__init__()
         self.target_net = nn.Sequential(
@@ -19,12 +22,10 @@ class RND(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(hidden_size, output_size)
         )
-        # Initialize the target network with random weights
         for m in self.target_net.modules():
             if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, 0, 1)
                 nn.init.constant_(m.bias, 0)
-        # Make target network's parameters not trainable
         for param in self.target_net.parameters():
             param.requires_grad = False
             
@@ -35,6 +36,9 @@ class RND(nn.Module):
 
 
 class cure:
+    """
+    CURE fuzzing management class.
+    """
     def __init__(self, input_size=7, hidden_size=64, output_size=16, learning_rate=1e-6):
         self.corpus = []
         self.final_state = []
@@ -45,10 +49,7 @@ class cure:
         self.original = []
         self.count = []
         self.envsetting = []
-        
-        # [NEW] 新增：用于记录每个种子的变异代数
         self.generations = []
-
         self.sequences = []
         self.current_pose = None
         self.current_final_state = None
@@ -59,8 +60,6 @@ class cure:
         self.current_index = None
         self.current_envsetting = None
         self.current_vehicle_info = None
-        
-        # [NEW] 新增：当前选中的代数
         self.current_generation = 0
         
         self.rnd = RND(input_size, hidden_size, output_size)
@@ -69,6 +68,9 @@ class cure:
         self.optimizer = optim.Adam(list(self.rnd.predictor_net.parameters()), lr=learning_rate)
 
     def get_pose(self, alpha=0.01, beta=0.001, gamma=1):
+        """
+        Selects a seed pose from the corpus based on rewards, intrinsic rewards, and entropy.
+        """
         if not self.corpus:
             return None
 
@@ -78,7 +80,6 @@ class cure:
             new_prob.append(prob)
         
         new_prob = np.array(new_prob)
-        
         new_prob = np.nan_to_num(new_prob, nan=0.0, posinf=None, neginf=0.0)
         new_prob = np.maximum(new_prob, 1e-6)
         
@@ -100,8 +101,6 @@ class cure:
         self.current_intrinsic_reward = self.intrinsic_reward[choose_index]
         self.current_original = self.original[choose_index]
         self.current_envsetting = self.envsetting[choose_index]
-        
-        # [NEW] 获取当前种子的代数
         self.current_generation = self.generations[choose_index]
         
         if self.count[choose_index] <= 0:
@@ -110,14 +109,22 @@ class cure:
         return self.current_pose
 
     def get_vehicle_info(self):
+        """
+        Returns information about NPC vehicles in the current scene.
+        """
         return self.current_vehicle_info
 
     def add_crash(self, result_pose):
+        """
+        Records a crash by adding the pose to the result set.
+        """
         self.result.append(result_pose)
         self.drop_current()
 
-    # [NEW] 修改：增加 generation 参数，默认值为 0
     def further_mutation(self, current_pose, rewards, entropy, intrinsic_reward, final_state, original, further_envsetting, generation=0):
+        """
+        Updates or adds a seed to the corpus for further mutation.
+        """
         choose_index = self.current_index
         pose = current_pose[0]
         newpose = carla.Transform(carla.Location(x=pose.location.x, y=pose.location.y, z=pose.location.z), carla.Rotation(pitch=pose.rotation.pitch, yaw=pose.rotation.yaw, roll=pose.rotation.roll))
@@ -140,7 +147,6 @@ class cure:
             self.intrinsic_reward[choose_index] = intrinsic_reward
             self.count[choose_index] = 5
             self.envsetting[choose_index] = copy_envsetting
-            # [NEW] 更新现有种子的代数
             self.generations[choose_index] = generation
         else:
             self.corpus.append(copy_pose)
@@ -151,10 +157,12 @@ class cure:
             self.original.append(original)
             self.count.append(5)
             self.envsetting.append(copy_envsetting)
-            # [NEW] 添加新种子的代数
             self.generations.append(generation)
     
     def mutation(self, pose):
+        """
+        Mutates the ego vehicle's pose.
+        """
         newpose = carla.Transform(carla.Location(x=pose.location.x, y=pose.location.y, z=pose.location.z), carla.Rotation(pitch=pose.rotation.pitch, yaw=pose.rotation.yaw, roll=pose.rotation.roll))
         newpose.location.x = pose.location.x + np.random.uniform(-0.15, 0.15)
         newpose.location.y = pose.location.y + np.random.uniform(-0.15, 0.15)
@@ -163,6 +171,9 @@ class cure:
         return newpose
     
     def vehicle_mutate(self, vehicle_info):
+        """
+        Mutates the poses of NPC vehicles in the scene.
+        """
         new_vehicle_info = []
         if vehicle_info is None:
             return []
@@ -178,6 +189,9 @@ class cure:
         return self.current_vehicle_info
     
     def drop_current(self):
+        """
+        Removes the currently selected seed from the corpus.
+        """
         choose_index = self.current_index
         if self.current_index is not None and choose_index < len(self.corpus):
             self.corpus.pop(choose_index)
@@ -188,11 +202,13 @@ class cure:
             self.original.pop(choose_index)
             self.count.pop(choose_index)
             self.envsetting.pop(choose_index)
-            # [NEW] 移除对应的 generation
             self.generations.pop(choose_index)
             self.current_index = None
 
     def flatten_states(self, states):
+        """
+        Flattens and stacks consecutive states for RND processing.
+        """
         states = np.array(states)
         states_cond = np.zeros((states.shape[0]-1, states.shape[1] * 2))
         for i in range(states.shape[0]-1):
@@ -200,6 +216,9 @@ class cure:
         return states, states_cond
     
     def compute_intrinsic_reward(self, states):
+        """
+        Computes the intrinsic reward based on the prediction error of the RND model.
+        """
         with torch.no_grad():
             state_tensor = torch.FloatTensor(states).to(self.device)
             target_out, predictor_out = self.rnd(state_tensor)
@@ -208,6 +227,9 @@ class cure:
         return intrinsic_reward
     
     def train_rnd(self, states, intrinsic_reward_scale=1e-6, l2_reg_coeff=1e-6):
+        """
+        Trains the RND predictor network using states from a simulation run.
+        """
         state_tensor = torch.FloatTensor(states).to(self.device)
         target_out, predictor_out = self.rnd(state_tensor)
         
@@ -219,7 +241,6 @@ class cure:
         loss = loss + l2_reg_coeff * l2_reg
         
         if not torch.isnan(loss):
-            # self.optimizer.zero_grad() 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.rnd.predictor_net.parameters(), 5)
             self.optimizer.step()

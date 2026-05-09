@@ -15,8 +15,6 @@ class fuzzing:
         self.count = []
         self.envsetting = []
         self.state_cvg = []
-        
-        # [NEW] 新增：用于记录每个种子的变异代数和最终状态
         self.generations = []
         self.final_state = []
 
@@ -29,12 +27,9 @@ class fuzzing:
         self.current_index = None
         self.current_envsetting = None
         self.current_vehicle_info = None
-        
-        # [NEW] 新增：当前选中的代数和状态
         self.current_generation = 0
         self.current_final_state = None
 
-        # GMM 参数
         self.GMM = None
         self.GMMupdate = None
         self.GMMK = 10
@@ -47,8 +42,6 @@ class fuzzing:
     def get_pose(self):
         if not self.corpus:
             return None
-
-        # 基于 Entropy 的概率选择 (保持 GMM 策略)
         entropy_arr = np.array(self.entropy)
         entropy_sum = entropy_arr.sum()
         if entropy_sum == 0:
@@ -67,8 +60,6 @@ class fuzzing:
         self.current_coverage = self.coverage[choose_index]
         self.current_original = self.original[choose_index]
         self.current_envsetting = self.envsetting[choose_index]
-        
-        # [NEW] 获取当前种子的代数和状态
         self.current_generation = self.generations[choose_index]
         self.current_final_state = self.final_state[choose_index]
         
@@ -84,15 +75,11 @@ class fuzzing:
         self.result.append(result_pose)
         self.drop_current()
 
-    # [NEW] 增加 generation 和 final_state 参数
     def further_mutation(self, current_pose, rewards, entropy, cvg, original, further_envsetting, generation=0, final_state=None):
         if final_state is None:
-            final_state = np.zeros(17) # 默认 17 维零向量
+            final_state = np.zeros(17) 
 
         choose_index = self.current_index
-        
-        # 构造新 Pose (这里逻辑保持原样，通常如果是新变异会走到 append)
-        # 注意：这里的 current_pose 实际上是传入的新变异后的 pose
         pose = current_pose[0]
         newpose = carla.Transform(carla.Location(x=pose.location.x, y=pose.location.y, z=pose.location.z), carla.Rotation(pitch=pose.rotation.pitch, yaw=pose.rotation.yaw, roll=pose.rotation.roll))
         vehicle_info = current_pose[1]
@@ -105,24 +92,20 @@ class fuzzing:
                 new_vehicle_info.append(temp)
         
         copy_pose = (newpose, new_vehicle_info)
-        # copy_envsetting = copy.deepcopy(further_envsetting) # 原代码手动复制
         copy_envsetting = []
         for i in range(len(further_envsetting)):
             copy_envsetting.append(further_envsetting[i])
 
         if choose_index is not None and choose_index < len(self.corpus):
-            # 更新当前种子 (如果策略允许覆盖)
             self.corpus[choose_index] = copy_pose
             self.rewards[choose_index] = rewards
             self.entropy[choose_index] = entropy
             self.coverage[choose_index] = cvg
             self.count[choose_index] = 5
             self.envsetting[choose_index] = copy_envsetting
-            # [NEW] 更新
             self.generations[choose_index] = generation
             self.final_state[choose_index] = final_state
         else:
-            # 添加新种子
             self.corpus.append(copy_pose)
             self.rewards.append(rewards)
             self.entropy.append(entropy)
@@ -130,7 +113,6 @@ class fuzzing:
             self.original.append(original)
             self.count.append(5)
             self.envsetting.append(copy_envsetting)
-            # [NEW] 添加
             self.generations.append(generation)
             self.final_state.append(final_state)
 
@@ -167,7 +149,6 @@ class fuzzing:
             self.original.pop(choose_index)
             self.count.pop(choose_index)
             self.envsetting.pop(choose_index)
-            # [NEW] 移除
             self.generations.pop(choose_index)
             self.final_state.pop(choose_index)
             self.current_index = None

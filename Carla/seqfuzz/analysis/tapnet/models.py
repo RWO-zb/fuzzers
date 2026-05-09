@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# [修改] 使用相对导入，将 'tapnet.utils' 改为 '.utils'
 from .utils import euclidean_dist, normalize, output_conv_size, dump_embedding
 import numpy as np
 

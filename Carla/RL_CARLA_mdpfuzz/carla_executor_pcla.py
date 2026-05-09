@@ -9,20 +9,20 @@ import pandas as pd
 from pathlib import Path
 from typing import Any, Optional
 import pygame 
-import gc     # [新增] 用于强制垃圾回收
-import torch  # [新增] 用于清理显存
+import gc
+import torch
 
-# 设置 SDL 视频驱动为 dummy，以支持无显示器运行
+# Set SDL video driver to dummy for headless operation
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
-# --- 路径设置 ---
+# Path configuration
 CURRENT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = CURRENT_DIR.parent
 
 if str(CURRENT_DIR) not in sys.path:
     sys.path.append(str(CURRENT_DIR))
 
-# 尝试添加 PCLA 路径
+# Add PCLA path to sys.path
 pcla_path = ROOT_DIR / 'PCLA'
 if pcla_path.exists():
     if str(pcla_path) not in sys.path:
@@ -33,7 +33,7 @@ else:
         if str(pcla_inner_path) not in sys.path:
             sys.path.append(str(pcla_inner_path))
 
-# 导入必要的模块
+
 try:
     from bird_view.utils import map_utils
     try:
@@ -45,9 +45,8 @@ except ImportError:
 
 from mdpfuzz.executor import Executor
 
-# --- Monkey Patching map_utils ---
+# Monkey patch map_utils for headless pygame initialization
 def patch_map_utils():
-    """Monkey patch map_utils to support headless pygame initialization."""
     @classmethod
     def patched_init(cls, client, world, carla_map, player):
         pygame.init()
@@ -88,13 +87,14 @@ def patch_map_utils():
 
 patch_map_utils()
 
-# --- Monkey Patching PCLA ---
+# Monkey patch PCLA to include entropy in action selection
 if not hasattr(PCLA, 'get_action_with_entropy'):
     def patched_get_action(self):
         return self.get_action(), 0.0
     PCLA.get_action_with_entropy = patched_get_action
 
-# --- 辅助函数 ---
+
+# Convert input vector to a string representation for state tracking
 def get_full_state_str(input_vector):
     if input_vector is None:
         return "None"
@@ -120,6 +120,7 @@ def get_full_state_str(input_vector):
     except Exception as e:
         return f"ErrorParsing:{str(e)}"
 
+# Manages spatial coverage and crash diversity
 class DiversityManager:
     def __init__(self, x_range, y_range, num_bins=100):
         self.x_min, self.x_max = x_range
@@ -151,6 +152,7 @@ class DiversityManager:
         distinct_crashes = len(self.crash_states)
         return coverage, distinct_crashes
 
+# Manages behavioral diversity based on speed and steering metrics
 class BehaviorDiversityManager:
     def __init__(self, speed_range=(0, 15), steer_range=(0, 0.5), num_bins=20):
         self.speed_min, self.speed_max = speed_range
@@ -177,6 +179,7 @@ class BehaviorDiversityManager:
     def get_metrics(self):
         return len(self.behavior_archive), len(self.fault_archive)
 
+# Set global random seeds for reproducibility
 def set_global_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -191,6 +194,7 @@ def set_global_seed(seed):
     except ImportError:
         pass
 
+# Construct an enhanced state vector including physical and sensor data
 def get_enhanced_state_vector(vehicle, birdview_obs, target_location, command=2.0):
     t = vehicle.get_transform()
     v = vehicle.get_velocity()
@@ -217,6 +221,7 @@ def get_enhanced_state_vector(vehicle, birdview_obs, target_location, command=2.
         final_state = np.hstack((physical_state, target_info, np.zeros(3)))
     return final_state
 
+# Calculate simulation reward based on progress and safety
 def calculate_reward(prev_distance, cur_distance, cur_collid, cur_invade, cur_speed, prev_speed):
     r_dist = np.clip(prev_distance - cur_distance, -10.0, 10.0)
     cur_speed_norm = np.linalg.norm(cur_speed)
@@ -226,6 +231,7 @@ def calculate_reward(prev_distance, cur_distance, cur_collid, cur_invade, cur_sp
     r_invade = -cur_speed_norm if cur_invade else 0.0
     return r_dist + r_speed + r_collision + r_invade
 
+# CARLA environment interface for PCLA agent
 class PCLAEnv:
     def __init__(self, host, port, town_name, seed=2024):
         self.client = carla.Client(host, port)
@@ -263,7 +269,7 @@ class PCLAEnv:
             
         self.world.tick()
 
-# --- Executor Implementation ---
+# Executor implementation for PCLA fuzzing
 class PCLAExecutor(Executor):
     def __init__(self, sim_steps: int, env: PCLAEnv, num_vehicles: int = 10, out_dir: str = "./results", init_budget: int = 10) -> None:
         super().__init__(sim_steps, env.seed)
@@ -301,7 +307,6 @@ class PCLAExecutor(Executor):
                 for w_idx in range(4):
                     self.all_combinations.append((s_idx, tgt_idx, w_idx))
             
-            # Initial Shuffle
             random.seed(self.env_seed)
             random.shuffle(self.all_combinations)
         
@@ -359,7 +364,6 @@ class PCLAExecutor(Executor):
         start_vec = self.start_positions[s_idx].copy()
         indices = []
         
-        # Add attempt counter to prevent infinite loops
         attempts = 0
         max_attempts = 2000 
         
@@ -683,53 +687,44 @@ class PCLAExecutor(Executor):
             stop_reason = "error"
             is_collision = True 
         
-        # ================= [修改点：强化清理逻辑] =================
         finally:
-            # 1. 停止传感器 (防止死锁)
+            # Cleanup simulation resources and actors
             for sensor in sensor_list:
                 if sensor and sensor.is_alive:
                     sensor.stop()
             
-            # 2. 销毁传感器
             for sensor in sensor_list:
                 if sensor and sensor.is_alive:
                     sensor.destroy()
             
-            # 3. 销毁主车
             if vehicle and vehicle.is_alive:
                 vehicle.destroy()
             
-            # 4. 销毁 NPC
             if npc_actors:
                 self.env.client.apply_batch([carla.command.DestroyActor(x) for x in npc_actors])
             
-            # 5. 销毁 Agent
             if agent and hasattr(agent, 'destroy'): 
                 agent.destroy()
             
-            # 6. 清理 Map Wrapper
             if wrapper_initialized: 
                 self.env.map_wrapper.clear()
             
-            # 7. 删除路由文件
             if route_file and os.path.exists(route_file): 
                 try:
                     os.remove(route_file)
                 except: pass
 
-            # 8. [关键修复] 强制 Tick！解决 Random 模式下的服务器死锁问题
+            # Force world tick to prevent server deadlock
             try:
                 self.env.world.tick()
             except Exception:
                 pass
             
-            # 9. [新增] 强制回收 Python 垃圾对象
+            # Memory cleanup
             gc.collect()
-            
-            # 10. [新增] 强制清空 PyTorch 显存缓存
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        # ========================================================
+
 
             current_global_time = time.time() - self.experiment_start_time
             duration = time.time() - start_time
