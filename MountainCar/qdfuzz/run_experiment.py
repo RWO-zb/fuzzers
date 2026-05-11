@@ -1,9 +1,16 @@
 import os
 import torch
+import argparse
 from mc_utils import load_model
 from mc_framework import MAPElitesFramework
 
 if __name__ == '__main__':
+    # --- 0. parser ---
+    parser = argparse.ArgumentParser(description="Run MAP-Elites for MountainCar")
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for experiment')
+    args = parser.parse_args()
+    current_seed = args.seed
+
     # --- 1. Thread configuration (single-threaded for reproducibility) ---
     os.environ['MKL_NUM_THREADS'] = '1'
     os.environ['NUMEXPR_NUM_THREADS'] = '1'
@@ -34,24 +41,24 @@ if __name__ == '__main__':
     # Mode A: Time only          -> TIME_BUDGET_HOURS=12, SAMPLE_BUDGET=None
     # Mode B: Sample count only  -> TIME_BUDGET_HOURS=None, SAMPLE_BUDGET=100000
     # Mode C: Hybrid (whichever limit is reached first)
-    TIME_BUDGET_HOURS = None
-    SAMPLE_BUDGET = 7000
+    TIME_BUDGET_HOURS = 12
+    SAMPLE_BUDGET = None
     
-    INIT_BUDGET = 2000  # Random samples for the initialization phase (counted in total budget)
+    INIT_BUDGET = 10000  # Random samples for the initialization phase (counted in total budget)
 
     print(f"--- Running MAP-Elites for MountainCar ---")
     print(f"Configuration: Time Limit={TIME_BUDGET_HOURS}h, Sample Limit={SAMPLE_BUDGET}")
-    
+    result_prefix = f'mc_test_seed{current_seed}'
     f = MAPElitesFramework(
-        rand_seed=42, 
+        rand_seed=current_seed, 
         cell_granularity=50, 
         descriptors=[0, 1] 
     )
     
     f.test_policy(
         model=model, 
-        env_seed=42, 
-        results_fp=os.path.join(results_dir, 'mc_test'),
+        env_seed=current_seed, 
+        results_fp=os.path.join(results_dir, result_prefix),
         init_budget=INIT_BUDGET,
         time_budget_hours=TIME_BUDGET_HOURS,
         max_samples=SAMPLE_BUDGET

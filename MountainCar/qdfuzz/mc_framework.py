@@ -106,13 +106,14 @@ class MAPElitesFramework:
         
         # --- 1. Budget setup ---
         start_time = time.time()
+        fuzz_start_time = start_time
         time_limit_sec = (time_budget_hours * 3600) if time_budget_hours is not None else float('inf')
         sample_limit = max_samples if max_samples is not None else float('inf')
         total_executions = 0
 
         def is_budget_exhausted():
             """Check if either time or sample budget is exceeded."""
-            time_used = time.time() - start_time
+            time_used = time.time() - fuzz_start_time
             if time_used >= time_limit_sec:
                 return True, "Time Budget Exceeded"
             if total_executions >= sample_limit:
@@ -153,7 +154,7 @@ class MAPElitesFramework:
             rew, oracle, beh, fs, traj, _ = execute_policy(inp, model, env_seed)
             total_executions += 1
             
-            dt = time.time() - start_time
+            dt = 0
             discovery_times.append(dt)
 
             inputs.append(inp)
@@ -193,6 +194,7 @@ class MAPElitesFramework:
             np.savetxt(files['cells'], np.array(cell).reshape(1, -1), fmt='%d', delimiter=',')
 
         print("Starting Fuzzing Loop...")
+        fuzz_start_time = time.time()
         pbar = tqdm.tqdm(desc="Fuzzing Phase")
         
         # --- 4. Fuzzing Loop: select, mutate, evaluate, and update the archive ---
@@ -209,7 +211,7 @@ class MAPElitesFramework:
             rew, oracle, beh, fs, traj, _ = execute_policy(mutated_inp, model, env_seed)
             total_executions += 1
             
-            current_discovery_time = time.time() - start_time
+            current_discovery_time = time.time() - fuzz_start_time
             current_generation = parent_cnt + 1
 
             cell = compute_cell(beh, self.xedges, self.yedges).tolist()
