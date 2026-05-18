@@ -12,7 +12,7 @@ import os
 # Configuration
 # Example (MDPFuzz): 'logs/MC_DQN_NoCov_5_0.01_0.1_0_12h'
 # Example (RT):      'logs/MC_DQN_RT_1022_10000it'
-BASE_PREFIX = 'MC_DQN_RT_1022_budget730000'
+BASE_PREFIX = 'logs/MC_DQN_RT_1022_100000it'  # <-- Set this to your log prefix (without _logs.txt or _obs.txt)
 
 # Infer method from prefix
 IS_RT = '_RT_' in BASE_PREFIX

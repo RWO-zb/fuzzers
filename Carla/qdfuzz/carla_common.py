@@ -45,7 +45,7 @@ except ImportError as e:
 
 # ==================== Global Constants ====================
 VIDEO_FPS = 20.0
-AGENT_NAME = "carl_roach_0"
+AGENT_NAME = "carl_carlv11"
 
 # ==================== Helper Functions ====================
 

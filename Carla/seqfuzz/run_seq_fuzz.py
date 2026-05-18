@@ -152,7 +152,7 @@ class BehaviorDiversityManager:
     def get_metrics(self):
         return len(self.behavior_archive), len(self.fault_archive)
 
-AGENT_NAME = "carl_roach_0"
+AGENT_NAME = "carl_carlv11"
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 600
 VIDEO_FPS = 20.0

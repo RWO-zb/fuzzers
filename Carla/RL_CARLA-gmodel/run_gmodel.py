@@ -166,7 +166,7 @@ class BehaviorDiversityManager:
         fault_diversity_count = len(self.fault_archive)
         return behavior_count, fault_diversity_count
 
-AGENT_NAME = "carl_roach_0"
+AGENT_NAME = "carl_carlv11"
 VIDEO_FPS = 20.0
 ARRIVAL_DISTANCE = 5.0
 RND_INPUT_SIZE = 18

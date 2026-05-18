@@ -29,7 +29,7 @@ def main():
     )
     parser.add_argument("--deterministic", action="store_true", default=False, help="Use deterministic actions")
     parser.add_argument(
-        "--load-best", action="store_true", default=False, help="Load best model instead of last model if available"
+        "--load-best", action="store_true", default=True, help="Load best model instead of last model if available"
     )
     parser.add_argument(
         "--load-checkpoint",
@@ -56,7 +56,7 @@ def main():
     parser.add_argument("--guide", action="store_true", default=False)
     parser.add_argument("--intrinsic", help="Threshold for intrinsic reward", default=10, type=int)
     parser.add_argument("--entropy", help="Threshold for reward", default=10, type=int)
-    parser.add_argument("--seed_number", help="Number of seeds", default=2000, type=int)
+    parser.add_argument("--seed_number", help="Number of seeds", default=10, type=int)
     args = parser.parse_args()
     
     now_str = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
@@ -223,7 +223,6 @@ def main():
     fuzzer.count = [5] * len(fuzzer.corpus)
     fuzzer.original = copy.deepcopy(fuzzer.corpus)
 
-    all_traces = []
 
     start_fuzz_time = time.time()
     current_time = time.time()
@@ -250,39 +249,13 @@ def main():
 
         sequences = [obs[0]]
         
-        trace_record = {
-            "steps": [],
-            "positions": [],
-            "velocities": [],
-            "action_gaps": [],
-            "q_values": [],
-            "actions": [],
-            "rewards": [],
-            "start_state": mutate_states
-        }
-        
-        reached_goal = False
-        is_crash_condition = False 
+        is_crash_condition = False
 
-        for step_idx in range(args.n_timesteps):
-            obs_tensor, _ = model.q_net.obs_to_tensor(obs)
-            with th.no_grad():
-                q_values = model.q_net(obs_tensor).cpu().numpy()[0]
-            
-            sorted_q = np.sort(q_values)
-            gap = sorted_q[-1] - sorted_q[-2]
+        for _ in range(args.n_timesteps):
             action, state = model.predict(obs, state=state, deterministic=deterministic)
-            
-            trace_record["steps"].append(step_idx)
-            trace_record["positions"].append(obs[0][0])
-            trace_record["velocities"].append(obs[0][1])
-            trace_record["action_gaps"].append(gap)
-            trace_record["q_values"].append(q_values)
-            trace_record["actions"].append(action[0])
 
             obs, reward, done, infos = env.step(action)
-            trace_record["rewards"].append(reward[0]) 
-            
+
             episode_reward += reward[0]
 
             if done:
@@ -296,10 +269,7 @@ def main():
         
         all_obs_sequences.append(sequences)
 
-        trace_record["did_crash"] = is_crash_condition
-        trace_record["total_reward"] = episode_reward
-        
-        all_traces.append(trace_record)
+
 
         intrinsic_reward = fuzzer.train_rnd(sequences)
         current_final_state = fuzzer.current_final_state if fuzzer.current_final_state is not None else obs[0]
@@ -357,9 +327,6 @@ def main():
         pickle.dump(all_obs_sequences, handle, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"Observation sequences saved to {obs_seq_file_name}")
 
-    trace_data_file = os.path.join(result_path, 'trace_data.pkl')
-    with open(trace_data_file, 'wb') as f:
-        pickle.dump(all_traces, f)
 
     if args.verbose > 0 and len(successes) > 0:
         print(f"Success rate: {100 * np.mean(successes):.2f}%")

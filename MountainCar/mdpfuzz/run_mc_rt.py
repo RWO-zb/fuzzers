@@ -31,7 +31,7 @@ if __name__ == '__main__':
     BUDGET_TYPE = 'ITERATION' 
     
     BUDGET_HOURS = 12       # Runtime in hours if BUDGET_TYPE is 'TIME'
-    BUDGET_ITERS = 10000    # Number of iterations if BUDGET_TYPE is 'ITERATION'
+    BUDGET_ITERS = 100000    # Number of iterations if BUDGET_TYPE is 'ITERATION'
 
     if BUDGET_TYPE == 'TIME':
         time_budget = BUDGET_HOURS * 3600
