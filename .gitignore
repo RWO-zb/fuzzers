@@ -1,0 +1,58 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python envs
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and runtime outputs
+*.log
+logs/
+runs/
+results/
+outputs/
+monitor/
+videos/
+
+# HybridFuzz outputs
+BipedalWalker/hybridfuzz/results/
+BipedalWalker/hybridfuzz/**/results/
+BipedalWalker/hybridfuzz/**/crashes/
+
+# Fuzzing generated artifacts
+*.csv
+*.jsonl
+*.npy
+*.npz
+
+# Keep source README/config jsons if needed; ignore generated summaries specifically
+summary.json
+iteration_log.csv
+seed_pool_stats.csv
+strategy_stats.csv
+ensemble_summary.json
+ensemble_crashes.json
+
+# Model / checkpoint artifacts
+*.pt
+*.pth
+*.pkl
+*.ckpt
+
+# Build / packaging
+build/
+dist/
