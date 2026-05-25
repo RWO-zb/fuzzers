@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+from sklearn.preprocessing import StandardScaler
 from scipy.spatial.distance import cdist, pdist
 from collections import Counter
 import os
@@ -12,6 +13,10 @@ import re
 INPUT_CSV = 'summary.csv'
 PLOT_4_FILE = 'unique_crashes_over_time.png'       
 PLOT_6_FILE = 'survival_steps_boxplot.png'
+
+# Ego behavior features saved by get_enhanced_state_vector:
+# x, y, forward_x, forward_y, velocity_x/y/z, acceleration_x/y/z, route command.
+OUTPUT_BEHAVIOR_COLS = [0, 1, 3, 4, 6, 7, 8, 9, 10, 11, 12]
 
 def parse_input_features(input_str):
     """
@@ -129,6 +134,8 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     # --- 2. Data Extraction for Crash Analysis ---
     inputs = []
     outputs = []
+    output_times = []
+    output_crash_distances = []
     times = []
     depths = []
     crash_distances = []
@@ -156,24 +163,23 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
             if os.path.exists(traj_path):
                 try:
                     data = np.load(traj_path, allow_pickle=True)
-                    traj = data['actions']  # Use actions as trajectory representation
+                    states_seq = data['states']
+                    if states_seq.ndim == 2 and states_seq.shape[1] > max(OUTPUT_BEHAVIOR_COLS):
+                        traj = states_seq[:, OUTPUT_BEHAVIOR_COLS]
                 except Exception:
                     traj = None
-                    
-            if traj is None:
-                # Fallback to simple behavior representation
-                avg_speed = entry.get('avg_speed', 0.0)
-                steer_std = entry.get('steer_std', 0.0)
-                traj = np.array([[float(avg_speed), float(steer_std)]])
             
             if feats is not None:
                 inputs.append(feats)
-                outputs.append(traj)
                 times.append(max(0.0, t))
                 depths.append(int(float(depth)))
                 crash_distances.append(final_dist)
                 crash_speeds.append(avg_speed)
                 crash_steers.append(steer_std)
+                if traj is not None:
+                    outputs.append(traj)
+                    output_times.append(max(0.0, t))
+                    output_crash_distances.append(final_dist)
                 
     unique_crash_count = len(inputs)
     if unique_crash_count < 2:
@@ -220,26 +226,32 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     plt.close()
 
     # --- 4. Trajectory Padding for Sequence Clustering ---
-    max_len = max(len(t) for t in outputs)
-    padded_outputs = []
-    for t in outputs:
-        pad_len = max_len - len(t)
-        padded = np.pad(t, ((0, pad_len), (0, 0)), mode='constant') if pad_len > 0 else t
-        padded_outputs.append(padded.flatten())
-    outputs_padded = np.array(padded_outputs)
+    outputs_padded = None
+    if outputs:
+        max_len = max(len(t) for t in outputs)
+        padded_outputs = []
+        for t in outputs:
+            pad_len = max_len - len(t)
+            padded = np.pad(t, ((0, pad_len), (0, 0)), mode='constant') if pad_len > 0 else t
+            padded_outputs.append(padded.flatten())
+        outputs_padded = np.array(padded_outputs)
     
     # --- 5. Advanced Diversity Quality Metrics (PCA + KMeans) ---
     def compute_diversity_metrics(data_matrix, times_array, name, raw_lengths=None):
         
         # 5a. Dimensionality Reduction & Optimal K Selection
         n_samples = data_matrix.shape[0]
+        if name == "Output" and n_samples < 5:
+            print(f"Not enough samples for clustering {name}.")
+            return
         n_components = min(n_samples, data_matrix.shape[1], 10) 
         pca = PCA(n_components=n_components, random_state=42)
-        reduced_data = pca.fit_transform(data_matrix)
+        pca_input = StandardScaler().fit_transform(data_matrix) if name == "Output" else data_matrix
+        reduced_data = pca.fit_transform(pca_input)
         
         best_k = 1
         best_score = -1
-        max_k = min(20, n_samples - 1) 
+        max_k = min(15 if name == "Output" else 20, n_samples - 1) 
         
         if max_k >= 2:
             best_k = 2
@@ -325,7 +337,8 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
             plt.close()
 
     compute_diversity_metrics(inputs, times, "Input")
-    compute_diversity_metrics(outputs_padded, times, "Output", raw_lengths=crash_distances)
+    if outputs_padded is not None:
+        compute_diversity_metrics(outputs_padded, np.array(output_times), "Output", raw_lengths=np.array(output_crash_distances))
     print(f"{'='*85}\n")
 
 def print_generation_stats(deduplicated_log):

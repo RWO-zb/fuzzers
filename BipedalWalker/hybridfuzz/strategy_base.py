@@ -25,3 +25,7 @@ class FuzzingStrategy:
         Returns a dict of scores, e.g., {'novelty_score': 0.5, 'diversity_score': 0.2}
         """
         return {}
+
+    def get_status(self):
+        """Return lightweight diagnostics for experiment summaries."""
+        return {}

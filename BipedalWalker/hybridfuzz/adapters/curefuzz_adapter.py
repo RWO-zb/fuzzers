@@ -19,8 +19,33 @@ class CureFuzzAdapter(FuzzingStrategy):
 
     def __init__(self):
         self.fuzzer = None
+        self.raw_uncertainty_min = None
+        self.raw_uncertainty_max = None
+        self.rnd_success_count = 0
+        self.rnd_exception_count = 0
+        self.imported = CURE_IMPORTED
+        self.norm_mode = "rolling"
+
+    def _normalize_uncertainty(self, value):
+        value = float(np.asarray(value).reshape(-1)[0])
+        if self.raw_uncertainty_min is None:
+            self.raw_uncertainty_min = value
+            self.raw_uncertainty_max = value
+            return 1.0
+
+        self.raw_uncertainty_min = min(self.raw_uncertainty_min, value)
+        self.raw_uncertainty_max = max(self.raw_uncertainty_max, value)
+
+        if self.norm_mode == "log":
+            return float(np.clip(np.log1p(max(0.0, value)) / 10.0, 0.0, 1.0))
+
+        denom = self.raw_uncertainty_max - self.raw_uncertainty_min
+        if denom <= 1e-9:
+            return 1.0
+        return float(np.clip((value - self.raw_uncertainty_min) / denom, 0.0, 1.0))
 
     def initialize(self, config):
+        self.norm_mode = getattr(config, "uncertainty_norm", "rolling")
         if CURE_IMPORTED:
             self.fuzzer = CureFuzz()
         else:
@@ -47,7 +72,23 @@ class CureFuzzAdapter(FuzzingStrategy):
         return np.clip(mutated, 1, 3)
 
     def update(self, candidate, result, features):
-        pass # RND is updated in compute_feedback
+        if self.fuzzer is None:
+            return
+        if result.get("is_fault", False) and hasattr(self.fuzzer, "add_crash"):
+            try:
+                self.fuzzer.add_crash(candidate)
+            except Exception:
+                pass
+        elif hasattr(self.fuzzer, "further_mutation"):
+            try:
+                entropy = 0.0
+                final_state = result.get("final_state", [])
+                parent_seed = features.get("parent_seed")
+                if parent_seed and parent_seed.get("final_state") is not None:
+                    entropy = float(np.linalg.norm(np.asarray(final_state) - np.asarray(parent_seed["final_state"])))
+                self.fuzzer.further_mutation(candidate, result.get("reward", 0.0), entropy, features.get("uncertainty_score", 0.0), final_state, candidate)
+            except Exception:
+                pass
 
     def compute_feedback(self, candidate, result, features):
         scores = {}
@@ -57,8 +98,22 @@ class CureFuzzAdapter(FuzzingStrategy):
             if len(obs_seq) > 0:
                 try:
                     intrinsic_reward = self.fuzzer.train_rnd(obs_seq)
-                    # Normalize intrinsic reward as uncertainty score
-                    scores["uncertainty_score"] = float(intrinsic_reward)
+                    raw_value = float(np.asarray(intrinsic_reward).reshape(-1)[0])
+                    scores["uncertainty_score"] = self._normalize_uncertainty(raw_value)
+                    scores["raw_uncertainty_score"] = raw_value
+                    self.rnd_success_count += 1
                 except Exception:
                     scores["uncertainty_score"] = 0.0
+                    self.rnd_exception_count += 1
         return scores
+
+    def get_status(self):
+        return {
+            "imported": self.imported,
+            "initialized": self.fuzzer is not None,
+            "rnd_success_count": self.rnd_success_count,
+            "rnd_exception_count": self.rnd_exception_count,
+            "raw_uncertainty_min": self.raw_uncertainty_min,
+            "raw_uncertainty_max": self.raw_uncertainty_max,
+            "norm_mode": self.norm_mode,
+        }

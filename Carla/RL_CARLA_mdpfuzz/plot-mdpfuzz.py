@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+from sklearn.preprocessing import StandardScaler
 from scipy.spatial.distance import cdist, pdist
 from collections import Counter
 
@@ -13,8 +14,12 @@ INPUT_CSV = 'summary.csv'
 TRAJ_DIR = 'trajectories'
 
 PLOT_3_FILE = 'crash_generation_histogram.png'
-PLOT_4_FILE = 'unique_crashes_over_time.png'       
+PLOT_4_FILE = 'unique_crashes_over_time.png'
 PLOT_6_FILE = 'crash_distance_boxplot.png'
+
+# Ego behavior features saved by get_enhanced_state_vector:
+# x, y, forward_x, forward_y, velocity_x/y/z, acceleration_x/y/z, route command.
+OUTPUT_BEHAVIOR_COLS = [0, 1, 3, 4, 6, 7, 8, 9, 10, 11, 12]
 
 plt.rcParams['font.family'] = 'serif'
 plt.rcParams['font.serif'] = ['Times New Roman', 'DejaVu Serif']
@@ -104,7 +109,7 @@ def deduplicate_log(original_log_data):
 # Analyze and plot comprehensive fuzzing metrics including diversity and efficiency
 def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     print(f"\n{'='*85}")
-    print(f"{'Academic-Grade Crash & Diversity Analysis (Strictly did_crash == True)':^85}")
+    print(f"{'Academic-Grade Crash & Diversity Analysis (crash = not success)':^85}")
     print(f"{'='*85}")
     
     total_mutations = len(original_log)
@@ -178,8 +183,9 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
             return
             
         n_components = min(n_samples, data_matrix.shape[1], 10) 
+        scaled_data = StandardScaler().fit_transform(data_matrix)
         pca = PCA(n_components=n_components, random_state=42)
-        reduced_data = pca.fit_transform(data_matrix)
+        reduced_data = pca.fit_transform(scaled_data)
         
         best_k = 1
         best_score = -1
@@ -254,7 +260,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
             cluster_steps = [raw_lengths[labels == k] for k in range(best_k)]
             plt.figure(figsize=(10, 6))
             plt.boxplot(cluster_steps, tick_labels=[f"C{k+1}\n(n={len(c)})" for k, c in enumerate(cluster_steps)])
-            plt.title('Crash Distance to Target per Failure Cluster')
+            plt.title('Distance to Target per Crash Cluster')
             plt.ylabel('Distance to Target (m)')
             plt.tight_layout()
             plt.savefig(PLOT_6_FILE, dpi=300)
@@ -263,6 +269,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     compute_diversity_metrics(inputs, times, "Input")
 
     outputs_padded = []
+    times_matched = []
     crash_distances_matched = []
     
     for i, t_id in enumerate(valid_task_ids):
@@ -270,8 +277,12 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
         if os.path.exists(npz_path):
             try:
                 data = np.load(npz_path, allow_pickle=True)
-                states_seq = data['states'] 
+                states_seq = data['states']
+                if states_seq.ndim != 2 or states_seq.shape[1] <= max(OUTPUT_BEHAVIOR_COLS):
+                    continue
+                states_seq = states_seq[:, OUTPUT_BEHAVIOR_COLS]
                 outputs_padded.append(states_seq)
+                times_matched.append(times[i])
                 crash_distances_matched.append(crash_distances[i])
             except Exception:
                 pass
@@ -285,8 +296,9 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
             final_outputs.append(padded.flatten())
         
         outputs_matrix = np.array(final_outputs)
+        times_matched = np.array(times_matched)
         crash_distances_matched = np.array(crash_distances_matched)
-        compute_diversity_metrics(outputs_matrix, times, "Output", raw_lengths=crash_distances_matched)
+        compute_diversity_metrics(outputs_matrix, times_matched, "Output", raw_lengths=crash_distances_matched)
     print(f"{'='*85}\n")
 
 # Plot the distribution of crash generations

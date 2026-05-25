@@ -10,14 +10,22 @@ class AdaptiveScheduler:
         self.counts = {s: 0 for s in strategies}
         self.rewards = {s: 0.0 for s in strategies}
         self.total_pulls = 0
+        self.round_robin_index = 0
 
     def select_strategy(self):
         if self.mode == "epsilon_greedy":
             return self._epsilon_greedy()
         elif self.mode == "ucb":
             return self._ucb()
+        elif self.mode == "round_robin":
+            return self._round_robin()
         else:
             return random.choice(self.strategies)
+
+    def _round_robin(self):
+        strategy = self.strategies[self.round_robin_index % len(self.strategies)]
+        self.round_robin_index += 1
+        return strategy
 
     def _epsilon_greedy(self):
         if random.random() < self.epsilon:
@@ -59,12 +67,14 @@ class AdaptiveScheduler:
         self.rewards[strategy_name] += reward
         self.total_pulls += 1
         
-    def compute_reward(self, is_unique_crash, is_crash, behavior_diversity_gain, trajectory_novelty_gain, g_model_improvement, execution_cost):
+    def compute_reward(self, is_unique_crash, is_crash, behavior_diversity_gain, trajectory_novelty_gain, g_model_improvement, execution_cost, reward_drop_score=0.0, uncertainty_score=0.0):
         r = 0.0
         r += 5.0 * float(is_unique_crash)
         r += 2.0 * float(is_crash)
         r += 1.0 * behavior_diversity_gain
         r += 1.0 * trajectory_novelty_gain
         r += 1.0 * g_model_improvement
+        r += 1.0 * reward_drop_score
+        r += 1.0 * uncertainty_score
         r -= 0.1 * execution_cost
         return r

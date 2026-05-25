@@ -6,7 +6,7 @@ class FeatureExtractor:
     def __init__(self):
         self.seen_crashes = set()
 
-    def extract_features(self, env, obs_seq, total_reward, is_crash, execution_cost, adapter_scores=None):
+    def extract_features(self, env, obs_seq, total_reward, is_crash, execution_cost, adapter_scores=None, execution_result=None):
         """
         Extract features from the episode execution.
         obs_seq: sequence of observations
@@ -18,11 +18,22 @@ class FeatureExtractor:
         if adapter_scores is None:
             adapter_scores = {}
 
-        # Basic behavior descriptor: taking the mean of observations (or specific dimensions)
-        # Assuming observation is 24-dimensional for BipedalWalker
+        did_physical_crash = bool(is_crash)
+        is_reward_fault = False
+        survival_steps = len(obs_seq)
+        behavior_features = []
+        qd_behavior = []
+        if execution_result is not None:
+            did_physical_crash = bool(execution_result.get("did_physical_crash", False))
+            is_reward_fault = bool(execution_result.get("is_reward_fault", False))
+            is_crash = bool(execution_result.get("is_fault", is_crash))
+            survival_steps = int(execution_result.get("survival_steps", survival_steps))
+            behavior_features = execution_result.get("behavior_features", [])
+            qd_behavior = execution_result.get("qd_behavior", [])
+
         obs_seq_arr = np.array(obs_seq)
         if len(obs_seq_arr) > 0:
-            behavior_descriptor = np.mean(obs_seq_arr, axis=0).tolist()
+            behavior_descriptor = behavior_features if behavior_features else np.mean(obs_seq_arr, axis=0).tolist()
             # Trajectory signature could be downsampled sequence
             indices = np.linspace(0, len(obs_seq_arr)-1, min(10, len(obs_seq_arr)), dtype=int)
             trajectory_signature = obs_seq_arr[indices].flatten().tolist()
@@ -41,10 +52,16 @@ class FeatureExtractor:
 
         return {
             "is_crash": is_crash,
+            "is_fault": is_crash,
+            "did_physical_crash": did_physical_crash,
+            "is_reward_fault": is_reward_fault,
             "is_unique_crash": is_unique_crash,
             "crash_signature": crash_signature,
             "trajectory_signature": trajectory_signature,
             "behavior_descriptor": behavior_descriptor,
+            "behavior_features": behavior_features,
+            "qd_behavior": qd_behavior,
+            "survival_steps": survival_steps,
             "novelty_score": adapter_scores.get("novelty_score", 0.0),
             "diversity_score": adapter_scores.get("diversity_score", 0.0),
             "uncertainty_score": adapter_scores.get("uncertainty_score", 0.0),

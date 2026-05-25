@@ -1,78 +1,229 @@
 # HybridFuzz for BipedalWalker
 
-This directory contains `HybridFuzz`, an integrated hybrid fuzzer that combines five different fuzzing strategies (CureFuzz, MDPFuzz, QDFuzz, G-Model, SeqFuzz) into a single, unified fuzzing loop for testing BipedalWalker environments.
+`hybridfuzz` 是对 BipedalWalker 中五种测试方法的组合框架：
 
-**Integrated HybridFuzz = shared seed pool + adaptive scheduler + unified feedback.**
-**Independent Ensemble = run original fuzzers separately and merge results.**
+- CureFuzz
+- MDPFuzz
+- QDFuzz
+- G-Model
+- SeqFuzz
+
+它的目标不是简单地把五个方法各跑一遍再合并结果，而是在一个统一 fuzzing loop 中使用：
+
+- shared seed pool
+- adaptive scheduler
+- unified execution/oracle
+- per-method feedback signals
+
+因此，`run_hybrid.py` 是真正的 integrated hybrid fuzzer；`run_independent_ensemble.py` 只是独立 ensemble baseline。
+
+## Current Design
+
+### Input
+
+五个方法在 BipedalWalker 上的 fuzz input 都对齐为一个 15 维离散数组：
+
+```text
+shape: (15,)
+value range: integers in [1, 3]
+usage: env.reset(input)
+```
+
+HybridFuzz 继续使用这个输入空间。大多数方法在 `BipedalWalkerHardcore-v3` 上执行；QDFuzz 保留自己的 `BipedalWalkerHardcore-v4` 执行环境，因为 QDFuzz 需要读取重写环境中的 behavior features。
+
+### Oracle
+
+HybridFuzz 现在把故障判定拆成三层：
+
+```text
+did_physical_crash = done/game_over/last_reward == -100
+is_reward_fault    = not did_physical_crash and total_reward < reward_fault_threshold
+is_fault           = did_physical_crash or is_reward_fault
+```
+
+默认 `reward_fault_threshold = 10.0`。
+
+日志中会同时保存 physical crash、reward fault 和 total fault，避免把真实摔倒和低 reward 性能故障混成一个不可区分的 crash 数。
+
+### Guidance Signals
+
+各方法在 adapter 中保留或近似使用自己的 guidance 信号：
+
+- CureFuzz: RND intrinsic reward / uncertainty.
+- MDPFuzz: fault signal and reward-drop feedback.
+- QDFuzz: QD behavior descriptor and grid-cell diversity.
+- G-Model: diffusion-based generation and history-distance novelty score.
+- SeqFuzz: TapNet/Siamese trajectory feedback as novelty-like signal.
+
+上层 scheduler 根据统一 reward 选择下一轮运行哪个 strategy；每个 adapter 仍可维护自己的内部状态。
 
 ## File Structure
 
 ```text
 hybridfuzz/
-    ├── __init__.py
-    ├── run_hybrid.py                 # Entry point for the integrated hybrid fuzzer
-    ├── run_independent_ensemble.py   # Baseline to run methods separately and merge results
-    ├── config.py                     # Hyperparameters and shared configurations
-    ├── shared_seed_pool.py           # Implements the shared seed corpus and unified scoring
-    ├── scheduler.py                  # Implements Epsilon-Greedy and UCB adaptive schedulers
-    ├── strategy_base.py              # Abstract base class for all fuzzing adapters
-    ├── adapters/
-    │   ├── __init__.py
-    │   ├── curefuzz_adapter.py       # Adapter for CureFuzz
-    │   ├── mdpfuzz_adapter.py        # Adapter for MDPFuzz
-    │   ├── qdfuzz_adapter.py         # Adapter for QDFuzz
-    │   ├── g_model_adapter.py        # Adapter for G-Model
-    │   └── seqfuzz_adapter.py        # Adapter for SeqFuzz
-    └── utils/
-        ├── __init__.py
-        ├── feature_extractor.py      # Extracts unified features from environment trajectories
-        ├── result_logger.py          # Handles logging of results and statistics
-        └── crash_utils.py            # Helpers for crash detection and signature generation
+    __init__.py
+    config.py
+    execution.py                  # Unified execution and oracle layer
+    run_hybrid.py                 # Integrated hybrid fuzzer entry point
+    run_independent_ensemble.py   # Independent ensemble baseline
+    scheduler.py                  # UCB / epsilon-greedy scheduler
+    shared_seed_pool.py           # Shared seed corpus and scoring
+    strategy_base.py              # Base adapter interface
+    adapters/
+        __init__.py
+        curefuzz_adapter.py
+        mdpfuzz_adapter.py
+        qdfuzz_adapter.py
+        g_model_adapter.py
+        seqfuzz_adapter.py
+    utils/
+        __init__.py
+        crash_utils.py
+        feature_extractor.py
+        result_logger.py
 ```
 
 ## How to Run
 
-### 1. Integrated Hybrid Fuzzer
-To run the true integrated hybrid fuzzer where all strategies share the same pool and are selected adaptively:
+Run commands from the `BipedalWalker` project root:
 
-```bash
-python hybridfuzz/run_hybrid.py --budget 10000 --scheduler ucb
+```powershell
+cd D:\code\fuzzers\BipedalWalker
 ```
 
-**Parameters:**
-* `--env`: Environment ID (default: BipedalWalkerHardcore-v3)
-* `--budget`: Total number of fuzzing iterations
-* `--scheduler`: Strategy selection mode (`ucb` or `epsilon_greedy`)
-* `--alpha`, `--beta`, `--gamma`, `--delta`, `--eta`: Weights for crash, novelty, diversity, uncertainty, and g-model scores.
-* `--lambda_cost`: Weight for execution cost penalty.
+### Smoke Test
 
-### 2. Independent Ensemble Baseline
-To run the baseline where each strategy is executed independently and the results are simply merged at the end (for experimental comparison):
+Use a small budget first to check that the environment, model, adapters, and output path work:
 
-```bash
-python hybridfuzz/run_independent_ensemble.py --budget-per-method 2000
+```powershell
+python hybridfuzz\run_hybrid.py --budget 20 --scheduler ucb --output hybridfuzz\results\smoke_test
 ```
-*Note: This is strictly a baseline for evaluation and does not represent the hybrid combination.*
 
-## Adapter Implementation Details
+After it finishes, check:
 
-The adapters reuse core capabilities from the existing methodologies in the parent directories. Some logic is wrapped to fit the unified `FuzzingStrategy` interface.
+```text
+hybridfuzz/results/smoke_test/iteration_log.csv
+hybridfuzz/results/smoke_test/summary.json
+```
 
-1. **CureFuzz Adapter**: Reuses the RND (Random Network Distillation) intrinsic reward for computing the `uncertainty_score`. Fallback mutation is used if `cure_fuzz.py` cannot be fully integrated.
-2. **MDPFuzz Adapter**: Focuses on physical crash detection. Utilizes standard RL policy execution logic and standard BipedalWalker state mutation.
-3. **QDFuzz Adapter**: Reuses the Quality-Diversity novelty grid (`compute_cell`, `get_edges`) to calculate the `diversity_score` based on behavior descriptors.
-4. **G-Model Adapter**: Uses the `Diffusion` model for candidate generation. It periodically trains on collected test cases. Used for both generation and providing a conceptual `g_model_score`.
-5. **SeqFuzz Adapter**: Reuses the `tapnet` Siamese Network to predict crashes from trajectory sequences and outputs it as a `novelty_score`. 
+### Full Hybrid Run
 
-### Fallbacks
-* If a method's complex custom mutation logic is heavily entangled in its main execution script and cannot be cleanly imported, a **fallback standard mutation** (modifying the 15-dimensional state array with a 10% chance of incrementing/decrementing values by 1 modulo 4) is applied to ensure the pipeline runs seamlessly.
-* G-model handles candidate generation 50% of the time. The remaining 50% uses fallback mutation.
+```powershell
+python hybridfuzz\run_hybrid.py --budget 10000 --scheduler ucb --output hybridfuzz\results\hybrid_ucb_seed0
+```
 
-## Viewing Results
+Alternative scheduler:
 
-Results are stored in `hybridfuzz/results/` by default. 
-* `summary.json`: High-level metrics like total crashes, unique crashes, and scheduler stats.
-* `iteration_log.csv`: Per-iteration details of what strategy was run and the outcomes.
-* `seed_pool_stats.csv`: Evolution of the shared seed pool.
-* `strategy_stats.csv`: Statistics on how often each strategy was selected and their rewards.
-* `ensemble_summary.json` & `ensemble_crashes.json`: Output when running the independent ensemble baseline.
+```powershell
+python hybridfuzz\run_hybrid.py --budget 10000 --scheduler epsilon_greedy --output hybridfuzz\results\hybrid_eps_seed0
+```
+
+### Independent Ensemble Baseline
+
+This runs each adapter independently and merges unique fault signatures at the end. It is a baseline, not the true hybrid combine:
+
+```powershell
+python hybridfuzz\run_independent_ensemble.py --budget-per-method 2000
+```
+
+## Important Arguments
+
+```text
+--budget
+    Total number of hybrid fuzzing iterations.
+
+--scheduler
+    Strategy selection mode: ucb or epsilon_greedy.
+
+--reward-fault-threshold
+    Reward threshold for performance failure. Default: 10.0.
+
+--output
+    Output directory. Default: hybridfuzz/results/
+
+--alpha
+    Weight for fault/crash score in the shared seed pool.
+
+--beta
+    Weight for novelty score.
+
+--gamma
+    Weight for diversity/QD score.
+
+--delta
+    Weight for CureFuzz uncertainty/RND score.
+
+--eta
+    Weight for G-Model score.
+
+--lambda_cost
+    Execution-cost penalty.
+```
+
+Example with explicit weights:
+
+```powershell
+python hybridfuzz\run_hybrid.py --budget 10000 --scheduler ucb --alpha 1 --beta 1 --gamma 1 --delta 1 --eta 1 --lambda_cost 0.1
+```
+
+## Outputs
+
+Results are written to `hybridfuzz/results/` by default, or to the directory passed by `--output`.
+
+### `config.json`
+
+Stores the run configuration.
+
+### `iteration_log.csv`
+
+Per-iteration record. Important columns:
+
+```text
+iteration
+selected_strategy
+seed_id
+candidate_id
+is_fault
+did_physical_crash
+is_reward_fault
+is_unique_crash
+crash_signature
+novelty_score
+diversity_score
+uncertainty_score
+g_model_score
+execution_cost
+reward
+seed_pool_size
+survival_steps
+```
+
+### `summary.json`
+
+High-level run summary:
+
+```text
+total_faults
+physical_crashes
+reward_faults
+unique_crashes
+time_to_first_crash
+final_seed_pool_size
+total_execution_time
+per_strategy_selected_count
+per_strategy_average_reward
+```
+
+### `strategy_stats.csv`
+
+How often each strategy was selected and its average scheduler reward.
+
+### `seed_pool_stats.csv`
+
+Shared seed pool size and cumulative fault count over time.
+
+## Notes
+
+- QDFuzz intentionally uses `BipedalWalkerHardcore-v4` in the hybrid executor, while the other strategies use the default v3 environment.
+- If QDFuzz v4 cannot be created, HybridFuzz falls back to the default environment and prints a warning.
+- The current combine keeps the shared 15-dimensional input space aligned, while logging oracle results in a more fine-grained way than a single crash flag.

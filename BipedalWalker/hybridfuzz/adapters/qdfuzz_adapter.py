@@ -23,6 +23,9 @@ class QDFuzzAdapter(FuzzingStrategy):
         self.xedges = None
         self.yedges = None
         self.cell_counts = {}
+        self.imported = QDFUZZ_IMPORTED
+        self.feedback_success_count = 0
+        self.feedback_exception_count = 0
 
     def initialize(self, config):
         if QDFUZZ_IMPORTED:
@@ -31,7 +34,7 @@ class QDFuzzAdapter(FuzzingStrategy):
             qdfuzz_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../qdfuzz'))
             try:
                 os.chdir(qdfuzz_dir)
-                self.xedges, self.yedges = get_edges(config.seed, [6, 7])
+                self.xedges, self.yedges = get_edges(config.seed, getattr(config, "qd_descriptors", [4, 8]))
             except Exception as e:
                 print(f"[QDFuzzAdapter] Error loading edges: {e}")
                 self.xedges, self.yedges = None, None
@@ -52,12 +55,11 @@ class QDFuzzAdapter(FuzzingStrategy):
         return np.clip(mutated, 1, 3)
 
     def update(self, candidate, result, features):
-        if not QDFUZZ_IMPORTED or not features.get("behavior_descriptor"):
+        if not QDFUZZ_IMPORTED:
             return
-            
-        behavior = np.array(features["behavior_descriptor"])
-        if len(behavior) > 7:
-            extracted_behavior = np.array([behavior[6], behavior[7]])
+
+        extracted_behavior = np.array(features.get("qd_behavior") or result.get("qd_behavior") or [])
+        if len(extracted_behavior) == 2:
             try:
                 cell = tuple(compute_cell(extracted_behavior, self.xedges, self.yedges).tolist())
                 if cell not in self.cells:
@@ -68,19 +70,31 @@ class QDFuzzAdapter(FuzzingStrategy):
 
     def compute_feedback(self, candidate, result, features):
         scores = {}
-        if not QDFUZZ_IMPORTED or not features.get("behavior_descriptor"):
+        if not QDFUZZ_IMPORTED:
             return scores
-            
-        behavior = np.array(features["behavior_descriptor"])
-        if len(behavior) > 7:
-            extracted_behavior = np.array([behavior[6], behavior[7]])
+
+        extracted_behavior = np.array(features.get("qd_behavior") or result.get("qd_behavior") or [])
+        if len(extracted_behavior) == 2:
             try:
                 cell = tuple(compute_cell(extracted_behavior, self.xedges, self.yedges).tolist())
                 # Novelty based on cell count (fewer counts -> higher novelty)
                 count = self.cell_counts.get(cell, 0)
-                # Compute exponential decay for novelty score to map into [0, 1]
-                scores["diversity_score"] = math.exp(-count)
+                scores["diversity_score"] = 1.0 / (1.0 + count)
+                scores["qd_cell"] = list(cell)
+                scores["qd_new_cell"] = count == 0
+                scores["qd_cell_count"] = count
+                self.feedback_success_count += 1
             except Exception:
                 scores["diversity_score"] = 0.0
+                self.feedback_exception_count += 1
                 
         return scores
+
+    def get_status(self):
+        return {
+            "imported": self.imported,
+            "edges_loaded": self.xedges is not None and self.yedges is not None,
+            "num_cells": len(self.cells),
+            "feedback_success_count": self.feedback_success_count,
+            "feedback_exception_count": self.feedback_exception_count,
+        }
