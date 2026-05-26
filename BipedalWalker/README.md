@@ -86,3 +86,16 @@ cd curefuzz
  python retrain.py --env BipedalWalkerHardcore-v3 --algo tqc --model-path ../rl-trained-agents/tqc/BipedalWalkerHardcore-v3_1/BipedalWalkerHardcore-v3.zip --transitions-path transitions.pkl  --folder logs/retrained_models
 ```
 to start fine-tuning. 
+
+### regression test
+Run the following:
+```bash
+python regression_replay.py `
+>>   --new-dir D:\code\fuzzers\BipedalWalker\finetuned_models `
+>>   --pattern *.zip `
+>>   --num-inputs 1000 `
+>>   --input-seed 0 `
+>>   --physical-only `
+>>   --output-dir regression_results_physical
+```
+to start regression test

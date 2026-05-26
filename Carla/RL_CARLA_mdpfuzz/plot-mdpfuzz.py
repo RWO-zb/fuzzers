@@ -59,7 +59,7 @@ def parse_input_features(input_str):
     except: 
         return None
 
-# Load data from summary CSV and filter for relevant phases
+# Load data from summary CSV and filter for MDPFuzz's fuzzing phase
 def load_data(csv_path):
     if not os.path.exists(csv_path):
         print(f"Error: {csv_path} not found.")
@@ -67,13 +67,17 @@ def load_data(csv_path):
     try:
         df = pd.read_csv(csv_path)
         if 'phase' in df.columns:
-            df = df[df['phase'].isin(['Phase2', 'RT'])]
+            df = df[df['phase'] == 'Phase2']
+
+        if 'global_time' in df.columns:
+            df = df.sort_values(by='global_time')
             
         original_log = []
         for _, row in df.iterrows():
             entry = {
                 'task_id': row.get('task_id', ''),
-                'is_crash': not (row.get('success') in [True, 'True', 1, '1']),
+                # This is failure diversity: every non-success episode is included.
+                'is_crash': not (row.get('success') in [True, 'True', 'true', 1, '1']),
                 'crash_time': float(row['global_time']) if pd.notna(row.get('global_time')) else 0.0,
                 'mutate_state_str': row.get('current_input', 'None'),
                 'parent_depth': int(float(row['generation'])) if pd.notna(row.get('generation')) else 0,
@@ -91,6 +95,9 @@ def load_data(csv_path):
 def deduplicate_log(original_log_data):
     state_to_entry = {}
     for entry in original_log_data:
+        if not entry.get('is_crash', False):
+            continue
+
         raw_input = entry['mutate_state_str']
         if pd.isna(raw_input) or str(raw_input) == "None": 
             continue
@@ -99,10 +106,6 @@ def deduplicate_log(original_log_data):
 
         if unique_key not in state_to_entry:
             state_to_entry[unique_key] = entry_copy
-        else:
-            old_entry = state_to_entry[unique_key]
-            if entry_copy['is_crash'] and not old_entry['is_crash']:
-                state_to_entry[unique_key] = entry_copy
        
     return list(state_to_entry.values())
 
@@ -272,8 +275,11 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     times_matched = []
     crash_distances_matched = []
     
+    csv_dir = os.path.dirname(INPUT_CSV)
+    traj_dir = os.path.join(csv_dir if csv_dir else '.', TRAJ_DIR)
+
     for i, t_id in enumerate(valid_task_ids):
-        npz_path = os.path.join(TRAJ_DIR, f"{t_id}.npz")
+        npz_path = os.path.join(traj_dir, f"{t_id}.npz")
         if os.path.exists(npz_path):
             try:
                 data = np.load(npz_path, allow_pickle=True)
@@ -340,11 +346,11 @@ def main():
     global INPUT_CSV
     if len(sys.argv) > 1:
         INPUT_CSV = sys.argv[1]
-        
+
     original_log_data = load_data(INPUT_CSV)
     
     if not original_log_data: 
-        print("Failed to load log data or Phase2/RT data is empty.")
+        print("Failed to load log data or Phase2 data is empty.")
         return
         
     deduplicated_log = deduplicate_log(original_log_data)

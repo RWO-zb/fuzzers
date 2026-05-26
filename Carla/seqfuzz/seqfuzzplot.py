@@ -65,7 +65,7 @@ def load_data(csv_path):
         return None
     try:
         df = pd.read_csv(csv_path)
-        # Filter for Fuzzing Phase
+        # Use the same evaluation slice for every method: fuzzing phase only.
         if 'phase' in df.columns:
             df = df[df['phase'] == 'Phase2']
         
@@ -75,7 +75,8 @@ def load_data(csv_path):
         original_log = []
         for _, row in df.iterrows():
             entry = row.to_dict()
-            is_success = str(entry.get('success', 'False')).lower() == 'true'
+            is_success = entry.get('success') in [True, 'True', 'true', 1, '1']
+            # This is failure diversity: every non-success episode is included.
             entry['is_crash'] = not is_success
             raw_input = entry.get('input_post')
             entry['features'] = parse_input_features(raw_input) if pd.notna(raw_input) else None
@@ -90,6 +91,9 @@ def deduplicate_log(original_log_data):
     state_to_entry = {}
 
     for entry in original_log_data:
+        if not entry.get('is_crash', False):
+            continue
+
         raw_input = entry.get('input_post')
         if pd.isna(raw_input) or str(raw_input) == "None":
             continue
@@ -99,10 +103,6 @@ def deduplicate_log(original_log_data):
 
         if unique_key not in state_to_entry:
             state_to_entry[unique_key] = entry_copy
-        else:
-            old_entry = state_to_entry[unique_key]
-            if entry_copy['is_crash'] and not old_entry['is_crash']:
-                state_to_entry[unique_key] = entry_copy
        
 
     return list(state_to_entry.values())
@@ -233,17 +233,17 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
         
         # 5a. Dimensionality Reduction & Optimal K Selection
         n_samples = data_matrix.shape[0]
-        if name == "Output" and n_samples < 5:
+        if n_samples < 5:
             print(f"Not enough samples for clustering {name}.")
             return
         n_components = min(n_samples, data_matrix.shape[1], 10) 
         pca = PCA(n_components=n_components, random_state=42)
-        pca_input = StandardScaler().fit_transform(data_matrix) if name == "Output" else data_matrix
+        pca_input = StandardScaler().fit_transform(data_matrix)
         reduced_data = pca.fit_transform(pca_input)
         
         best_k = 1
         best_score = -1
-        max_k = min(15 if name == "Output" else 20, n_samples - 1) 
+        max_k = min(15, n_samples - 1) 
         
         if max_k >= 2:
             best_k = 2

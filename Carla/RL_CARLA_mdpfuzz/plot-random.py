@@ -1,5 +1,7 @@
-import pandas as pd
+import os
+import sys
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
@@ -7,112 +9,112 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 from scipy.spatial.distance import cdist, pdist
 from collections import Counter
-import os
 
 INPUT_CSV = 'summary.csv'
+TRAJ_DIR = 'trajectories'
+
 PLOT_3_FILE = 'crash_generation_histogram.png'
-PLOT_4_FILE = 'unique_crashes_over_time.png'       
-PLOT_6_FILE = 'survival_steps_boxplot.png'
+PLOT_4_FILE = 'unique_crashes_over_time.png'
+PLOT_6_FILE = 'crash_distance_boxplot.png'
 
 # Ego behavior features saved by get_enhanced_state_vector:
 # x, y, forward_x, forward_y, velocity_x/y/z, acceleration_x/y/z, route command.
 OUTPUT_BEHAVIOR_COLS = [0, 1, 3, 4, 6, 7, 8, 9, 10, 11, 12]
 
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman', 'DejaVu Serif']
+plt.rcParams['font.size'] = 12
+plt.rcParams['axes.grid'] = True
+plt.rcParams['grid.linestyle'] = '--'
+plt.rcParams['grid.alpha'] = 0.5
+
+# Parse CARLA state string into a numerical feature vector
 def parse_input_features(input_str):
     """
     Parses CARLA state string into a numerical feature vector.
-    Format example: "Ego:[x,y,yaw]|NPCs:(x1,y1)..."
     """
-    if pd.isna(input_str) or str(input_str) == "None":
+    if pd.isna(input_str) or str(input_str) == "None": 
         return None
-    
     try:
         parts = str(input_str).split('|')
         if len(parts) < 2: return None
         
-        # 1. Ego Features
         ego_part = parts[0].split(':')[1].strip('[]')
         ego_vals = [float(x) for x in ego_part.split(',') if x]
         
-        # 2. NPC Features
         npc_part = parts[1].split(':')[1]
         if not npc_part or npc_part == 'None':
             npc_feats = [0.0, 0.0, 0.0, 0.0, 0.0]
         else:
-            raw_nums = npc_part.replace('(', '').replace(')', '').split(',')
-            coords = [float(x) for x in raw_nums if x]
-            
-            if not coords:
+            coords = [float(x) for x in npc_part.replace('(', '').replace(')', '').split(',') if x]
+            if not coords: 
                 npc_feats = [0.0, 0.0, 0.0, 0.0, 0.0]
             else:
-                xs = coords[0::2]
-                ys = coords[1::2]
+                xs, ys = coords[0::2], coords[1::2]
                 npc_feats = [
-                    float(len(xs)),      # Count
-                    np.mean(xs),         # Mean X
-                    np.mean(ys),         # Mean Y
-                    np.std(xs) if len(xs) > 1 else 0.0, # Std X
-                    np.std(ys) if len(ys) > 1 else 0.0  # Std Y
+                    float(len(xs)), np.mean(xs), np.mean(ys), 
+                    np.std(xs) if len(xs)>1 else 0.0, np.std(ys) if len(ys)>1 else 0.0
                 ]
-                
         return np.array(ego_vals + npc_feats)
-    except:
+    except: 
         return None
 
+# Load data from summary CSV and filter for the random-testing baseline.
 def load_data(csv_path):
     if not os.path.exists(csv_path):
-        print(f"Error: File not found: {csv_path}")
+        print(f"Error: {csv_path} not found.")
         return None
     try:
         df = pd.read_csv(csv_path)
-        # Use the same evaluation slice for every method: fuzzing phase only.
         if 'phase' in df.columns:
-            df = df[df['phase'] == 'Phase2']
-        
-        if 'elapsed_time' in df.columns:
-            df = df.sort_values(by='elapsed_time')
+            df = df[df['phase'] == 'RT']
+
+        if 'global_time' in df.columns:
+            df = df.sort_values(by='global_time')
             
         original_log = []
         for _, row in df.iterrows():
-            entry = row.to_dict()
-            is_success = entry.get('success') in [True, 'True', 'true', 1, '1']
-            # This is failure diversity: every non-success episode is included.
-            entry['is_crash'] = not is_success
-            raw_input = entry.get('input_post')
-            entry['features'] = parse_input_features(raw_input) if pd.notna(raw_input) else None
+            entry = {
+                'task_id': row.get('task_id', ''),
+                # This is failure diversity: every non-success episode is included.
+                'is_crash': not (row.get('success') in [True, 'True', 'true', 1, '1']),
+                'crash_time': float(row.get('global_time', 0.0)) if pd.notna(row.get('global_time', 0.0)) else 0.0,
+                'mutate_state_str': row.get('current_input', 'None'),
+                'parent_depth': int(float(row.get('generation', 0))) if pd.notna(row.get('generation', 0)) else 0,
+                'avg_speed': float(row.get('avg_speed', 0.0)) if pd.notna(row.get('avg_speed', 0.0)) else 0.0,
+                'steer_std': float(row.get('steer_std', 0.0)) if pd.notna(row.get('steer_std', 0.0)) else 0.0,
+                'final_dist': float(row.get('final_dist', 0.0)) if pd.notna(row.get('final_dist', 0.0)) else 0.0,
+            }
             original_log.append(entry)
-            
         return original_log
     except Exception as e:
         print(f"Error loading CSV: {e}")
         return None
 
+# Deduplicate logs based on unique input state strings
 def deduplicate_log(original_log_data):
     state_to_entry = {}
-
     for entry in original_log_data:
         if not entry.get('is_crash', False):
             continue
 
-        raw_input = entry.get('input_post')
-        if pd.isna(raw_input) or str(raw_input) == "None":
+        raw_input = entry['mutate_state_str']
+        if pd.isna(raw_input) or str(raw_input) == "None": 
             continue
-            
         unique_key = str(raw_input).strip()
         entry_copy = entry.copy()
 
         if unique_key not in state_to_entry:
             state_to_entry[unique_key] = entry_copy
        
-
     return list(state_to_entry.values())
 
+# Analyze and plot comprehensive fuzzing metrics including diversity and efficiency
 def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     print(f"\n{'='*85}")
-    print(f"{'Academic-Grade Crash & Diversity Analysis (Strictly did_crash == True)':^85}")
+    print(f"{'Academic-Grade Crash & Diversity Analysis (crash = not success)':^85}")
     print(f"{'='*85}")
     
-    # --- 1. Global Fuzzing Metrics ---
     total_mutations = len(original_log)
     total_valid_crashes = sum(1 for e in original_log if e['is_crash'])
     hit_ratio = (total_valid_crashes / total_mutations * 100) if total_mutations > 0 else 0
@@ -121,76 +123,36 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     print(f"  Total Mutations Executed:   {total_mutations}")
     print(f"  Valid Crash Mutations:      {total_valid_crashes}")
     print(f"  Hit Ratio (Valid Rate):     {hit_ratio:.2f}%  <-- % of mutations leading to a crash\n")
-
-    # --- 2. Data Extraction for Crash Analysis ---
-    inputs = []
-    outputs = []
-    output_times = []
-    output_crash_distances = []
-    times = []
-    depths = []
-    crash_distances = []
-    crash_speeds = []
-    crash_steers = []
     
-    start_time = float(original_log[0].get('elapsed_time', 0.0)) if original_log else 0.0
+    inputs, times, depths = [], [], []
+    crash_speeds, crash_steers, crash_distances = [], [], []
+    valid_task_ids = []
     
     for entry in deduplicated_log:
         if entry['is_crash']:
-            feats = entry.get('features')
-            t = float(entry.get('elapsed_time', start_time)) - start_time
-            depth = entry.get('mutation_generation', 0)
-            if pd.isna(depth): depth = 0
-            
-            final_dist = float(entry.get('final_dist', 0.0))
-            avg_speed = float(entry.get('avg_speed', 0.0))
-            steer_std = float(entry.get('steer_std', 0.0))
-            
-            task_id = entry.get('task_id', '')
-            traj = None
-            
-            # Load trajectory if available
-            csv_dir = os.path.dirname(INPUT_CSV)
-            traj_path = os.path.join(csv_dir if csv_dir else '.', 'trajectories', f"{task_id}.npz")
-            if os.path.exists(traj_path):
-                try:
-                    data = np.load(traj_path, allow_pickle=True)
-                    states_seq = data['states']
-                    if states_seq.ndim == 2 and states_seq.shape[1] > max(OUTPUT_BEHAVIOR_COLS):
-                        traj = states_seq[:, OUTPUT_BEHAVIOR_COLS]
-                except Exception:
-                    traj = None
-            
-            if feats is not None:
-                inputs.append(feats)
-                times.append(max(0.0, t))
-                depths.append(int(float(depth)))
-                crash_distances.append(final_dist)
-                crash_speeds.append(avg_speed)
-                crash_steers.append(steer_std)
-                if traj is not None:
-                    outputs.append(traj)
-                    output_times.append(max(0.0, t))
-                    output_crash_distances.append(final_dist)
+            feat = parse_input_features(entry['mutate_state_str'])
+            if feat is not None:
+                inputs.append(feat)
+                times.append(entry['crash_time'])
+                depths.append(entry['parent_depth'])
+                crash_speeds.append(entry['avg_speed'])
+                crash_steers.append(entry['steer_std'])
+                crash_distances.append(entry['final_dist'])
+                valid_task_ids.append(entry['task_id'])
                 
     unique_crash_count = len(inputs)
     if unique_crash_count < 2:
-        print(f"Not enough crash data to calculate metrics (Found {unique_crash_count}, needs >= 2).")
+        print(f"Not enough unique crash data to calculate metrics (Found {unique_crash_count}, needs >= 2).")
         return
         
     inputs = np.array(inputs)
     times = np.array(times)
     depths = np.array(depths)
-    crash_distances = np.array(crash_distances)
-    crash_speeds = np.array(crash_speeds)
-    crash_steers = np.array(crash_steers)
     
     times_hrs = np.sort(times / 3600.0)
-    
-    max_elapsed = max([float(e.get('elapsed_time', start_time)) for e in original_log] + [start_time])
-    max_time_hrs = (max_elapsed - start_time) / 3600.0
-    
-    # --- 3. Basic Efficiency & Survival Depth Analysis ---
+    max_time_hrs = max([e['crash_time'] for e in original_log]) / 3600.0
+    if max_time_hrs <= 0: max_time_hrs = times_hrs[-1] if len(times_hrs) > 0 else 1.0
+
     intervals_hrs = np.diff(np.insert(times_hrs, 0, 0.0))
     mean_interval = np.mean(intervals_hrs)      
     median_interval = np.median(intervals_hrs)  
@@ -204,42 +166,29 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     print(f"  Distance to Target - Mean:       {np.mean(crash_distances):.1f} m\n")
     
     cumulative_crashes = np.arange(1, len(times_hrs) + 1)
-    plt.figure(figsize=(12, 7))
-    plt.step(times_hrs, cumulative_crashes, where='post', color='darkred', linewidth=2, label='Unique Crash Inputs')
-    plt.fill_between(times_hrs, cumulative_crashes, step='post', color='darkred', alpha=0.1)
+    plt.figure(figsize=(10, 6))
+    plt.step(times_hrs, cumulative_crashes, where='post', color='#D62728', linewidth=2.5)
+    plt.fill_between(times_hrs, cumulative_crashes, step='post', color='#D62728', alpha=0.1)
     plt.title('Cumulative Unique Crashes Discovered Over Time')
     plt.xlabel('Time Elapsed (hours)')
     plt.ylabel('Number of Unique Crashing Inputs')
-    plt.grid(True, linestyle='--', alpha=0.6)
-    plt.xlim(left=0, right=max_time_hrs if max_time_hrs > 0 else max(times_hrs)+0.1)
+    plt.xlim(left=0, right=max_time_hrs)
     plt.ylim(bottom=0)
-    plt.legend()
-    plt.savefig(PLOT_4_FILE)
+    plt.tight_layout()
+    plt.savefig(PLOT_4_FILE, dpi=300)
     plt.close()
 
-    # --- 4. Trajectory Padding for Sequence Clustering ---
-    outputs_padded = None
-    if outputs:
-        max_len = max(len(t) for t in outputs)
-        padded_outputs = []
-        for t in outputs:
-            pad_len = max_len - len(t)
-            padded = np.pad(t, ((0, pad_len), (0, 0)), mode='constant') if pad_len > 0 else t
-            padded_outputs.append(padded.flatten())
-        outputs_padded = np.array(padded_outputs)
-    
-    # --- 5. Advanced Diversity Quality Metrics (PCA + KMeans) ---
+    # Helper to compute diversity metrics using PCA and KMeans clustering
     def compute_diversity_metrics(data_matrix, times_array, name, raw_lengths=None):
-        
-        # 5a. Dimensionality Reduction & Optimal K Selection
         n_samples = data_matrix.shape[0]
         if n_samples < 5:
             print(f"Not enough samples for clustering {name}.")
             return
+            
         n_components = min(n_samples, data_matrix.shape[1], 10) 
+        scaled_data = StandardScaler().fit_transform(data_matrix)
         pca = PCA(n_components=n_components, random_state=42)
-        pca_input = StandardScaler().fit_transform(data_matrix)
-        reduced_data = pca.fit_transform(pca_input)
+        reduced_data = pca.fit_transform(scaled_data)
         
         best_k = 1
         best_score = -1
@@ -251,7 +200,6 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
             labels = kmeans.fit_predict(reduced_data)
             best_score = silhouette_score(reduced_data, labels)
             
-            # The 20% threshold mechanism to prevent noisy improvements
             for k in range(3, max_k + 1):
                 kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
                 labels = kmeans.fit_predict(reduced_data)
@@ -263,7 +211,6 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
         kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
         labels = kmeans.fit_predict(reduced_data)
         
-        # 5b. Cluster Distance & Entropy Calculation
         centroids = kmeans.cluster_centers_
         intra_dists = []
         for i in range(best_k):
@@ -272,17 +219,12 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
                 dist = np.mean(cdist(cluster_points, [centroids[i]]))
                 intra_dists.append(dist)
         avg_intra_dist = np.mean(intra_dists) if intra_dists else 0.0
-        
-        if best_k > 1:
-            avg_inter_dist = np.mean(pdist(centroids, metric='euclidean'))
-        else:
-            avg_inter_dist = 0.0
+        avg_inter_dist = np.mean(pdist(centroids, metric='euclidean')) if best_k > 1 else 0.0
             
         _, counts = np.unique(labels, return_counts=True)
         probs = counts / len(labels)
         entropy = -np.sum(probs * np.log(probs + 1e-9))
         
-        # 5c. Time-To-Discovery (TTD) & AUC Calculation
         discovery_times_hrs = []
         for cluster_id in range(best_k):
             cluster_times = times_array[labels == cluster_id] / 3600.0
@@ -317,37 +259,68 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
         print(f"  Mean Time-to-Discovery per Category: {mean_ttd:.4f} hours")
         print(f"  Diversity AUC (Clusters vs Time):    {auc_val:.4f} (category*hours)\n")
 
-        # 5d. Boxplot Generation (Distance to Target)
         if name == "Output" and raw_lengths is not None:
             cluster_steps = [raw_lengths[labels == k] for k in range(best_k)]
             plt.figure(figsize=(10, 6))
-            plt.boxplot(cluster_steps, tick_labels=[f"Cluster {k+1}\n(n={len(cluster_steps[k])})" for k in range(best_k)])
-            plt.title('Distance to Target at Crash Distribution per Fault Type')
+            plt.boxplot(cluster_steps, tick_labels=[f"C{k+1}\n(n={len(c)})" for k, c in enumerate(cluster_steps)])
+            plt.title('Distance to Target per Crash Cluster')
             plt.ylabel('Distance to Target (m)')
-            plt.grid(axis='y', linestyle='--', alpha=0.6)
-            plt.savefig('crash_distance_boxplot.png')
+            plt.tight_layout()
+            plt.savefig(PLOT_6_FILE, dpi=300)
             plt.close()
 
     compute_diversity_metrics(inputs, times, "Input")
-    if outputs_padded is not None:
-        compute_diversity_metrics(outputs_padded, np.array(output_times), "Output", raw_lengths=np.array(output_crash_distances))
+
+    outputs_padded = []
+    times_matched = []
+    crash_distances_matched = []
+    
+    csv_dir = os.path.dirname(INPUT_CSV)
+    traj_dir = os.path.join(csv_dir if csv_dir else '.', TRAJ_DIR)
+
+    for i, t_id in enumerate(valid_task_ids):
+        npz_path = os.path.join(traj_dir, f"{t_id}.npz")
+        if os.path.exists(npz_path):
+            try:
+                data = np.load(npz_path, allow_pickle=True)
+                states_seq = data['states']
+                if states_seq.ndim != 2 or states_seq.shape[1] <= max(OUTPUT_BEHAVIOR_COLS):
+                    continue
+                states_seq = states_seq[:, OUTPUT_BEHAVIOR_COLS]
+                outputs_padded.append(states_seq)
+                times_matched.append(times[i])
+                crash_distances_matched.append(crash_distances[i])
+            except Exception:
+                pass
+                
+    if outputs_padded:
+        max_len = max(len(t) for t in outputs_padded)
+        final_outputs = []
+        for t in outputs_padded:
+            pad_len = max_len - len(t)
+            padded = np.pad(t, ((0, pad_len), (0, 0)), mode='constant') if pad_len > 0 else t
+            final_outputs.append(padded.flatten())
+        
+        outputs_matrix = np.array(final_outputs)
+        times_matched = np.array(times_matched)
+        crash_distances_matched = np.array(crash_distances_matched)
+        compute_diversity_metrics(outputs_matrix, times_matched, "Output", raw_lengths=crash_distances_matched)
     print(f"{'='*85}\n")
 
+# Plot the distribution of crash generations
 def plot_generation_histogram(deduplicated_log):
     crash_generations = []
     for entry in deduplicated_log:
         if entry['is_crash']:
-            depth = entry.get('mutation_generation')
-            if pd.notna(depth):
-                crash_generations.append(int(float(depth)))
+            crash_generations.append(entry['parent_depth'])
             
     if not crash_generations: return
 
-    # Average Evolutionary Depth
     avg_gen = np.mean(crash_generations)
     median_gen = np.median(crash_generations)
     max_gen = np.max(crash_generations)
-    print(f"\n[Evolutionary Depth Analysis]")
+    
+    print(f"[Evolutionary Depth Analysis]")
     print(f"  Average Crash Generation (Mean):   {avg_gen:.2f}")
     print(f"  Median Crash Generation (Median):  {median_gen:.2f}")
     print(f"  Deepest Crash Found at Generation: {max_gen}")
@@ -356,27 +329,28 @@ def plot_generation_histogram(deduplicated_log):
     generations = range(0, max_gen + 2)
     counts = [generation_counts.get(gen, 0) for gen in generations]
 
-    plt.figure(figsize=(12, 7))
-    plt.bar(generations, counts, color='red', alpha=0.7, zorder=3)
+    plt.figure(figsize=(10, 6))
+    plt.bar(generations, counts, color='#1F77B4', alpha=0.8, edgecolor='black', width=0.8)
     plt.title('Histogram of Unique Crash Generations')
     plt.xlabel('Mutation Generation')
     plt.ylabel('Number of Unique Crashing Inputs')
     step = max(1, (max_gen // 20))
     plt.xticks(np.arange(0, max_gen + 2, step=step))
     plt.grid(axis='y', linestyle='--', alpha=0.6, zorder=0)
-    plt.savefig(PLOT_3_FILE)
+    plt.tight_layout()
+    plt.savefig(PLOT_3_FILE, dpi=300)
     plt.close()
 
+# Main execution flow for data processing and analysis
 def main():
-    import sys
     global INPUT_CSV
     if len(sys.argv) > 1:
         INPUT_CSV = sys.argv[1]
-        
+
     original_log_data = load_data(INPUT_CSV)
     
     if not original_log_data: 
-        print("Failed to load log data or Phase2 data is empty.")
+        print("Failed to load log data or RT data is empty.")
         return
         
     deduplicated_log = deduplicate_log(original_log_data)
