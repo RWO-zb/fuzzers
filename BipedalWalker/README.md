@@ -91,11 +91,9 @@ to start fine-tuning.
 Run the following:
 ```bash
 python regression_replay.py `
->>   --new-dir D:\code\fuzzers\BipedalWalker\finetuned_models `
->>   --pattern *.zip `
->>   --num-inputs 1000 `
->>   --input-seed 0 `
->>   --physical-only `
->>   --output-dir regression_results_physical
+  --new-dir D:\code\fuzzers\BipedalWalker\finetuned_models `
+  --input-seed 0 `
+  --physical-only `
+  --output-dir regression_results
 ```
 to start regression test

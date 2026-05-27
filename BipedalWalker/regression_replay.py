@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pattern", default="*.zip")
     parser.add_argument("--input-file", default=None)
     parser.add_argument("--num-inputs", type=int, default=1000)
-    parser.add_argument("--input-seed", type=int, default=0)
+    parser.add_argument("--input-seed", type=int, default=42)
     parser.add_argument("--env", default="BipedalWalkerHardcore-v3")
     parser.add_argument("--env-seed", type=int, default=0)
     parser.add_argument("--sim-steps", type=int, default=300)
@@ -66,6 +66,14 @@ def load_inputs(input_file: Optional[str], num_inputs: int, seed: int) -> np.nda
         return rng.integers(low=1, high=4, size=(num_inputs, 15), dtype=np.int64)
 
     path = Path(input_file)
+    if not path.exists():
+        print(
+            f"Input file not found: {path}. "
+            f"Generating {num_inputs} inputs with input seed {seed} instead."
+        )
+        rng = np.random.default_rng(seed)
+        return rng.integers(low=1, high=4, size=(num_inputs, 15), dtype=np.int64)
+
     if path.suffix == ".npy":
         return np.load(path).astype(np.int64)
 
@@ -220,7 +228,12 @@ def main() -> None:
     old_model_path = Path(args.old_model)
     new_model_paths = collect_new_models(args)
 
+    np.save(output_dir / "all_test_inputs.npy", inputs)
+    with (output_dir / "all_test_inputs.json").open("w", encoding="utf-8") as f:
+        json.dump(inputs.astype(int).tolist(), f)
+
     print(f"Loaded {len(inputs)} inputs")
+    print(f"All test inputs saved to: {output_dir / 'all_test_inputs.npy'}")
     print(f"Old model: {old_model_path}")
     print(f"New models: {len(new_model_paths)}")
 
