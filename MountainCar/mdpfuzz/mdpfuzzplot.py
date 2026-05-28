@@ -12,7 +12,7 @@ import os
 # Configuration
 # Example (MDPFuzz): 'logs/MC_DQN_NoCov_5_0.01_0.1_0_12h'
 # Example (RT):      'logs/MC_DQN_RT_1022_10000it'
-BASE_PREFIX = 'logs/MC_DQN_RT_1022_100000it'  # <-- Set this to your log prefix (without _logs.txt or _obs.txt)
+BASE_PREFIX = 'MC_DQN_RT_0_12h'  # <-- Set this to your log prefix (without _logs.txt or _obs.txt)
 
 # Infer method from prefix
 IS_RT = '_RT_' in BASE_PREFIX
@@ -25,8 +25,178 @@ PLOT_CUMULATIVE_FILE = f"{METHOD_NAME.replace(' ', '_')}_unique_crashes_over_tim
 PLOT_GEN_FILE = f"{METHOD_NAME.replace(' ', '_')}_crash_generation_histogram.png"
 PLOT_SURVIVAL_FILE = f"{METHOD_NAME.replace(' ', '_')}_survival_steps_boxplot.png"
 
+ENABLE_PLOTS = False
+RQ2_FUZZ_SAMPLE_LIMIT = 5000
+KMEANS_N_INIT = 3
+GRID_SIZE = (50, 50)
+RANGES = {
+    'state_pos': (-1.2, 0.6),
+    'state_vel': (-0.07, 0.07),
+    'bd_pos': (-1.2, 0.6),
+    'bd_speed': (0.0, 0.05),
+}
+
 # MountainCar theoretical state space grid (50x50)
 THEORETICAL_STATE_SPACE = 50 * 50 
+
+def get_grid_index(values, ranges, grid_size):
+    indices = []
+    for val, (min_val, max_val), bins in zip(values, ranges, grid_size):
+        norm = (val - min_val) / (max_val - min_val) if max_val != min_val else 0
+        idx = int(norm * bins)
+        indices.append(int(np.clip(idx, 0, bins - 1)))
+    return tuple(indices)
+
+def calc_behavior_descriptor(sequence):
+    seq_arr = np.asarray(sequence)
+    if len(seq_arr) == 0:
+        return -1.2, 0.0
+    if seq_arr.ndim == 1:
+        seq_arr = seq_arr.reshape(-1, 2)
+    return np.max(seq_arr[:, 0]), np.mean(np.abs(seq_arr[:, 1]))
+
+def load_mdpfuzz_rq2_data(log_file, obs_file):
+    if not os.path.exists(log_file) or not os.path.exists(obs_file):
+        return [], []
+
+    log_rows = []
+    with open(log_file, 'r') as f:
+        headers = [h.strip() for h in f.readline().strip().split('; ')]
+        for line in f:
+            vals = [v.strip() for v in line.strip().split('; ')]
+            if len(vals) >= len(headers):
+                log_rows.append(dict(zip(headers, vals)))
+
+    obs_rows = []
+    with open(obs_file, 'r') as f:
+        current_info = None
+        current_traj = []
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("--- Test Case Info:"):
+                if current_info is not None:
+                    gen = current_info.get('Generation', 0)
+                    if IS_RT or gen != 0:
+                        obs_rows.append((current_info, np.array(current_traj)))
+                json_str = line[len("--- Test Case Info: "):-len(" ---")]
+                current_info = json.loads(json_str)
+                current_traj = []
+            else:
+                if current_info is not None:
+                    try:
+                        vals = [float(x) for x in line.split(',')]
+                        if len(vals) >= 2:
+                            current_traj.append(vals[:2])
+                    except ValueError:
+                        continue
+        if current_info is not None:
+            gen = current_info.get('Generation', 0)
+            if IS_RT or gen != 0:
+                obs_rows.append((current_info, np.array(current_traj)))
+
+    valid_logs = []
+    for row in log_rows:
+        try:
+            gen = int(float(row.get('Generation', 0)))
+        except ValueError:
+            gen = 0
+        if IS_RT or gen != 0:
+            valid_logs.append(row)
+
+    min_len = min(len(obs_rows), len(valid_logs))
+    data = []
+    for i in range(min_len):
+        info, traj = obs_rows[i]
+        log_row = valid_logs[i]
+        seed_id = log_row.get('SeedID')
+        if seed_id in (None, 'None', ''):
+            seed_id = info.get('SeedID')
+        data.append({
+            'sequence': traj,
+            'is_crash': bool(info.get('Oracle', False)),
+            'seed_id': seed_id,
+        })
+    return data, obs_rows
+
+def calculate_rq2_trends(rq2_data, max_fuzz_cases=None):
+    visited_state_bins = set()
+    visited_behavior_bins = set()
+    visited_fault_bins = set()
+    crash_source_seed_ids = set()
+    history = {
+        'episodes': [],
+        'state_coverage': [],
+        'behavior_diversity': [],
+        'fault_diversity': [],
+        'unique_crash_source_seeds': [],
+    }
+
+    for item in rq2_data:
+        if max_fuzz_cases is not None and len(history['episodes']) >= max_fuzz_cases:
+            break
+
+        sequence = item['sequence']
+        for state in sequence:
+            if len(state) >= 2:
+                visited_state_bins.add(get_grid_index(
+                    (state[0], state[1]),
+                    (RANGES['state_pos'], RANGES['state_vel']),
+                    GRID_SIZE,
+                ))
+
+        bd_idx = get_grid_index(
+            calc_behavior_descriptor(sequence),
+            (RANGES['bd_pos'], RANGES['bd_speed']),
+            GRID_SIZE,
+        )
+        visited_behavior_bins.add(bd_idx)
+
+        if item['is_crash']:
+            visited_fault_bins.add(bd_idx)
+            seed_id = item.get('seed_id')
+            if seed_id not in (None, 'None', ''):
+                crash_source_seed_ids.add(seed_id)
+
+        history['episodes'].append(len(history['episodes']) + 1)
+        history['state_coverage'].append(len(visited_state_bins))
+        history['behavior_diversity'].append(len(visited_behavior_bins))
+        history['fault_diversity'].append(len(visited_fault_bins))
+        history['unique_crash_source_seeds'].append(len(crash_source_seed_ids))
+
+    return history
+
+def truncate_rq2_history(history, limit):
+    if history is None or limit is None:
+        return history
+    return {key: values[:limit] for key, values in history.items()}
+
+def calculate_rq2_metric_sets(rq2_data):
+    total_history = calculate_rq2_trends(rq2_data, max_fuzz_cases=None)
+    return {
+        'limited': truncate_rq2_history(total_history, RQ2_FUZZ_SAMPLE_LIMIT),
+        'total': total_history,
+    }
+
+def print_single_rq2_metrics(history, label):
+    if not history or not history['episodes']:
+        print(f"  {label}: no RQ2 diversity data to report.")
+        return False
+    print(f"  [{label}]")
+    print(f"    State Coverage:     {history['state_coverage'][-1]} grid bins")
+    print(f"    Behavior Diversity: {history['behavior_diversity'][-1]} behavior bins")
+    print(f"    Fault Diversity:    {history['fault_diversity'][-1]} fault bins")
+    print(f"    Crash Source Seeds: {history['unique_crash_source_seeds'][-1]}")
+    return True
+
+def print_rq2_metrics(metric_sets):
+    print("\n[0. RQ2 Cumulative Diversity Metrics]")
+    limit_label = f"First {RQ2_FUZZ_SAMPLE_LIMIT} Fuzz Cases" if RQ2_FUZZ_SAMPLE_LIMIT is not None else "Limited Range Disabled"
+    printed_limited = print_single_rq2_metrics(metric_sets.get('limited'), limit_label)
+    printed_total = print_single_rq2_metrics(metric_sets.get('total'), "All Fuzz Cases")
+    print()
+    return printed_limited or printed_total
 
 def load_and_merge_mdpfuzz_data(log_file, obs_file):
     """
@@ -248,16 +418,13 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     print(f"  Total Evaluations Executed: {total_mutations}")
     print(f"  Valid Crash Inputs:         {total_valid_crashes}")
     print(f"  Hit Ratio (Valid Rate):     {hit_ratio:.2f}%")
-    print(f"  Explored Unique States:     {explored_unique_states} / {THEORETICAL_STATE_SPACE} Grid Bins")
-    print(f"  State Space Coverage:       {state_space_coverage:.6f}%")
     
     if IS_RT:
-        print(f"  Fuzzer Overhead Ratio:      N/A (Random Testing has no algorithmic overhead)\n")
+        print()
     elif perf_data:
         total_t = perf_data['total_wall_time']
         algo_t = perf_data['algo_logic_time']
         overhead_ratio = (algo_t / total_t) * 100 if total_t > 0 else 0
-        print(f"  Fuzzer Overhead Ratio:      {overhead_ratio:.2f}% (Coverage Algo Time / Total Wall Time)\n")
 
     inputs, outputs, times, depths, raw_survival_steps = [], [], [], [], []
     
@@ -293,12 +460,11 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     print(f"  Total Unique Crashes Discovered: {unique_crash_count}")
     print(f"  Mean Interval per Crash:         {mean_interval:.4f} hours (~{mean_interval*3600:.1f} sec)")
     print(f"  Median Interval per Crash:       {median_interval:.4f} hours (~{median_interval*3600:.1f} sec)")
-    print(f"  Survival Steps (Depth) - Mean:   {np.mean(raw_survival_steps):.1f} steps")
-    print(f"  Survival Steps (Depth) - Median: {np.median(raw_survival_steps):.1f} steps")
-    print(f"  Survival Steps Range:            [{np.min(raw_survival_steps)}, {np.max(raw_survival_steps)}] steps\n")
+    print()
     
     # Draw Cumulative unique crashes over time using strict RQ1 logic (from raw logs)
-    plot_cumulative_crashes_from_logs(LOG_FILE, IS_RT)
+    if ENABLE_PLOTS:
+        plot_cumulative_crashes_from_logs(LOG_FILE, IS_RT)
 
     # Trajectory Padding
     max_len = max(len(t) for t in outputs)
@@ -317,21 +483,20 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
         
         if max_k >= 2:
             best_k = 2
-            kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+            kmeans = KMeans(n_clusters=2, random_state=42, n_init=KMEANS_N_INIT)
             labels = kmeans.fit_predict(reduced_data)
             # Sample for silhouette score if data is large
-            sample_sz = 5000 if len(reduced_data) > 5000 else None
-            best_score = silhouette_score(reduced_data, labels, sample_size=sample_sz, random_state=42)
+            best_score = silhouette_score(reduced_data, labels, sample_size=min(5000, n_samples), random_state=42)
             
             for k in range(3, max_k + 1):
-                kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                kmeans = KMeans(n_clusters=k, random_state=42, n_init=KMEANS_N_INIT)
                 labels = kmeans.fit_predict(reduced_data)
-                score = silhouette_score(reduced_data, labels, sample_size=sample_sz, random_state=42)
+                score = silhouette_score(reduced_data, labels, sample_size=min(5000, n_samples), random_state=42)
                 if score >= best_score * 1.20:
                     best_score = score
                     best_k = k
                     
-        kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+        kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=KMEANS_N_INIT)
         labels = kmeans.fit_predict(reduced_data)
         
         centroids = kmeans.cluster_centers_
@@ -387,7 +552,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
         print(f"  Diversity AUC (Clusters vs Time):    {auc_val:.4f} (category*hours)\n")
 
         # Survival steps boxplot for Output
-        if name == "Output" and raw_lengths is not None:
+        if ENABLE_PLOTS and name == "Output" and raw_lengths is not None:
             cluster_steps = [raw_lengths[labels == k] for k in range(best_k)]
             plt.figure(figsize=(10, 6))
             plt.boxplot(cluster_steps, tick_labels=[f"Cluster {k+1}\n(n={len(cluster_steps[k])})" for k in range(best_k)])
@@ -425,24 +590,27 @@ def plot_generation_histogram(deduplicated_log):
     print(f"  Median Crash Generation (Median):  {median_gen:.2f}")
     print(f"  Deepest Crash Found at Generation: {max_gen}\n")
 
-    generation_counts = Counter(crash_generations)
-    generations = range(1, max_gen + 2)
-    counts = [generation_counts.get(gen, 0) for gen in generations]
-
-    plt.figure(figsize=(10, 6))
-    plt.bar(generations, counts, color='#ff7f0e', alpha=0.8, edgecolor='black', zorder=3)
-    plt.title('Histogram of Unique Crash Generations (MDPFuzz)')
-    plt.xlabel('Mutation Generation')
-    plt.ylabel('Number of Unique Crashing Inputs')
-    step = max(1, (max_gen // 10))
-    plt.xticks(np.arange(1, max_gen + 2, step=step))
-    plt.grid(axis='y', linestyle='--', alpha=0.6, zorder=0)
-    plt.tight_layout()
-    plt.savefig(PLOT_GEN_FILE)
-    plt.close()
+    if ENABLE_PLOTS:
+        generation_counts = Counter(crash_generations)
+        generations = range(1, max_gen + 2)
+        counts = [generation_counts.get(gen, 0) for gen in generations]
+        plt.figure(figsize=(10, 6))
+        plt.bar(generations, counts, color='#ff7f0e', alpha=0.8, edgecolor='black', zorder=3)
+        plt.title('Histogram of Unique Crash Generations (MDPFuzz)')
+        plt.xlabel('Mutation Generation')
+        plt.ylabel('Number of Unique Crashing Inputs')
+        step = max(1, (max_gen // 10))
+        plt.xticks(np.arange(1, max_gen + 2, step=step))
+        plt.grid(axis='y', linestyle='--', alpha=0.6, zorder=0)
+        plt.tight_layout()
+        plt.savefig(PLOT_GEN_FILE)
+        plt.close()
 
 def main():
     print(f"Loading files for prefix: {BASE_PREFIX}")
+    rq2_data, _ = load_mdpfuzz_rq2_data(LOG_FILE, OBS_FILE)
+    print_rq2_metrics(calculate_rq2_metric_sets(rq2_data))
+
     merged_logs, perf_data = load_and_merge_mdpfuzz_data(LOG_FILE, OBS_FILE)
     
     if not merged_logs:
@@ -456,7 +624,10 @@ def main():
     analyze_and_plot_comprehensive_metrics(merged_logs, deduplicated_log, perf_data)
     plot_generation_histogram(deduplicated_log)
 
-    print(f"All analysis and plotting completed for [{METHOD_NAME}]. Check the generated PNG files.")
+    if ENABLE_PLOTS:
+        print(f"All analysis and plotting completed for [{METHOD_NAME}]. Check the generated PNG files.")
+    else:
+        print(f"All analysis completed for [{METHOD_NAME}]. Plotting is disabled.")
 
 if __name__ == "__main__":
     main()

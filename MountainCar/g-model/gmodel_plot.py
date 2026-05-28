@@ -14,7 +14,17 @@ PERF_FILE = 'perf_meta.pkl'
 PLOT_4_FILE = 'MountainCar_unique_crashes_over_time.png'       
 PLOT_6_FILE = 'MountainCar_survival_steps_boxplot.png'
 
+ENABLE_PLOTS = False
+RQ2_FUZZ_SAMPLE_LIMIT = 5000
+KMEANS_N_INIT = 3
 THEORETICAL_STATE_SPACE = 50 * 50 
+GRID_SIZE = (50, 50)
+RANGES = {
+    'state_pos': (-1.2, 0.6),
+    'state_vel': (-0.07, 0.07),
+    'bd_pos': (-1.2, 0.6),
+    'bd_speed': (0.0, 0.05),
+}
 
 def load_data(file_path):
     if not os.path.exists(file_path):
@@ -25,6 +35,114 @@ def load_data(file_path):
     except Exception as e:
         print(f"Error loading pickle: {e}")
         return None
+
+def get_grid_index(values, ranges, grid_size):
+    indices = []
+    for val, (min_val, max_val), bins in zip(values, ranges, grid_size):
+        norm = (val - min_val) / (max_val - min_val) if max_val != min_val else 0
+        idx = int(norm * bins)
+        indices.append(int(np.clip(idx, 0, bins - 1)))
+    return tuple(indices)
+
+def calc_behavior_descriptor(sequence):
+    seq_arr = np.asarray(sequence)
+    if len(seq_arr) == 0:
+        return -1.2, 0.0
+    if seq_arr.ndim == 1:
+        seq_arr = seq_arr.reshape(-1, 2)
+    return np.max(seq_arr[:, 0]), np.mean(np.abs(seq_arr[:, 1]))
+
+def calculate_rq2_trends(logs, obs_seqs, max_fuzz_cases=None):
+    if not logs or not obs_seqs:
+        return None
+
+    visited_state_bins = set()
+    visited_behavior_bins = set()
+    visited_fault_bins = set()
+    crash_source_seed_ids = set()
+    history = {
+        'episodes': [],
+        'state_coverage': [],
+        'behavior_diversity': [],
+        'fault_diversity': [],
+        'unique_crash_source_seeds': [],
+    }
+
+    min_len = min(len(logs), len(obs_seqs))
+    fuzz_cases_processed = 0
+    for i in range(min_len):
+        if max_fuzz_cases is not None and fuzz_cases_processed >= max_fuzz_cases:
+            break
+
+        sequence = np.asarray(obs_seqs[i])
+        log_entry = logs[i]
+        is_crash = log_entry.get('is_crash', False)
+
+        if sequence.ndim == 1 and sequence.size >= 2:
+            sequence = sequence.reshape(-1, 2)
+
+        for state in sequence:
+            if len(state) >= 2:
+                visited_state_bins.add(get_grid_index(
+                    (state[0], state[1]),
+                    (RANGES['state_pos'], RANGES['state_vel']),
+                    GRID_SIZE,
+                ))
+
+        bd_idx = get_grid_index(
+            calc_behavior_descriptor(sequence),
+            (RANGES['bd_pos'], RANGES['bd_speed']),
+            GRID_SIZE,
+        )
+        visited_behavior_bins.add(bd_idx)
+
+        if is_crash:
+            visited_fault_bins.add(bd_idx)
+            seed_id = log_entry.get('root_id') or log_entry.get('seed_id') or log_entry.get('root_seed')
+            if seed_id is not None:
+                if isinstance(seed_id, (np.ndarray, list)):
+                    seed_id = tuple(np.asarray(seed_id).flatten())
+                crash_source_seed_ids.add(seed_id)
+
+        fuzz_cases_processed += 1
+        history['episodes'].append(fuzz_cases_processed)
+        history['state_coverage'].append(len(visited_state_bins))
+        history['behavior_diversity'].append(len(visited_behavior_bins))
+        history['fault_diversity'].append(len(visited_fault_bins))
+        history['unique_crash_source_seeds'].append(len(crash_source_seed_ids))
+
+    return history
+
+def truncate_rq2_history(history, limit):
+    if history is None or limit is None:
+        return history
+    return {key: values[:limit] for key, values in history.items()}
+
+def calculate_rq2_metric_sets(logs, obs_seqs):
+    total_history = calculate_rq2_trends(logs, obs_seqs, max_fuzz_cases=None)
+    return {
+        'limited': truncate_rq2_history(total_history, RQ2_FUZZ_SAMPLE_LIMIT),
+        'total': total_history,
+    }
+
+def print_single_rq2_metrics(history, label):
+    if not history or not history['episodes']:
+        print(f"  {label}: no RQ2 diversity data to report.")
+        return False
+    print(f"  [{label}]")
+    print(f"    State Coverage:     {history['state_coverage'][-1]} grid bins")
+    print(f"    Behavior Diversity: {history['behavior_diversity'][-1]} behavior bins")
+    print(f"    Fault Diversity:    {history['fault_diversity'][-1]} fault bins")
+    print(f"    Crash Source Seeds: {history['unique_crash_source_seeds'][-1]}")
+    return True
+
+def print_rq2_metrics(metric_sets):
+    print("\n[0. RQ2 Cumulative Diversity Metrics]")
+    limit_label = f"First {RQ2_FUZZ_SAMPLE_LIMIT} Fuzz Cases" if RQ2_FUZZ_SAMPLE_LIMIT is not None else "Limited Range Disabled"
+    printed_limited = print_single_rq2_metrics(metric_sets.get('limited'), limit_label)
+    printed_total = print_single_rq2_metrics(metric_sets.get('total'), "All Fuzz Cases")
+    print()
+    return printed_limited or printed_total
 
 def merge_and_deduplicate(logs, obs_seqs):
     """
@@ -82,16 +200,13 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     print(f"  Total Mutations Executed:   {total_mutations}")
     print(f"  Valid Crash Mutations:      {total_valid_crashes}")
     print(f"  Hit Ratio (Valid Rate):     {hit_ratio:.2f}%  <-- % of mutations leading to a crash")
-    print(f"  Explored Unique States:     {explored_unique_states} / {THEORETICAL_STATE_SPACE} Grid Bins")
-    print(f"  State Space Coverage:       {state_space_coverage:.6f}%")
     
     if perf_data:
         total_t = perf_data['total_wall_time']
         algo_t = perf_data['algo_logic_time']
         overhead_ratio = (algo_t / total_t) * 100 if total_t > 0 else 0
-        print(f"  Fuzzer Overhead Ratio:      {overhead_ratio:.2f}% <-- % time spent in logic vs physics\n")
     else:
-        print(f"  Fuzzer Overhead Ratio:      N/A (perf_meta.pkl not found)\n")
+        print()
 
     # --- 2. Data Extraction for Crash Analysis ---
     inputs, outputs, times, depths, raw_survival_steps = [], [], [], [], []
@@ -129,23 +244,22 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     print(f"  Total Unique Crashes Discovered: {unique_crash_count}")
     print(f"  Mean Interval per Crash:         {mean_interval:.4f} hours (~{mean_interval*3600:.1f} sec)")
     print(f"  Median Interval per Crash:       {median_interval:.4f} hours (~{median_interval*3600:.1f} sec)")
-    print(f"  Survival Steps (Depth) - Mean:   {np.mean(raw_survival_steps):.1f} steps")
-    print(f"  Survival Steps (Depth) - Median: {np.median(raw_survival_steps):.1f} steps")
-    print(f"  Survival Steps Range:            [{np.min(raw_survival_steps)}, {np.max(raw_survival_steps)}] steps\n")
+    print()
     
-    cumulative_crashes = np.arange(1, len(times_hrs) + 1)
-    plt.figure(figsize=(12, 7))
-    plt.step(times_hrs, cumulative_crashes, where='post', color='darkred', linewidth=2, label='Unique Crash Inputs')
-    plt.fill_between(times_hrs, cumulative_crashes, step='post', color='darkred', alpha=0.1)
-    plt.title('MountainCar: Cumulative Unique Crashes Discovered Over Time (G-Model)')
-    plt.xlabel('Time Elapsed (hours)')
-    plt.ylabel('Number of Unique Crashing Inputs')
-    plt.grid(True, linestyle='--', alpha=0.6)
-    plt.xlim(left=0, right=max_time_hrs)
-    plt.ylim(bottom=0)
-    plt.legend()
-    plt.savefig(PLOT_4_FILE)
-    plt.close()
+    if ENABLE_PLOTS:
+        cumulative_crashes = np.arange(1, len(times_hrs) + 1)
+        plt.figure(figsize=(12, 7))
+        plt.step(times_hrs, cumulative_crashes, where='post', color='darkred', linewidth=2, label='Unique Crash Inputs')
+        plt.fill_between(times_hrs, cumulative_crashes, step='post', color='darkred', alpha=0.1)
+        plt.title('MountainCar: Cumulative Unique Crashes Discovered Over Time (G-Model)')
+        plt.xlabel('Time Elapsed (hours)')
+        plt.ylabel('Number of Unique Crashing Inputs')
+        plt.grid(True, linestyle='--', alpha=0.6)
+        plt.xlim(left=0, right=max_time_hrs)
+        plt.ylim(bottom=0)
+        plt.legend()
+        plt.savefig(PLOT_4_FILE)
+        plt.close()
 
     # --- 4. Trajectory Padding for Sequence Clustering ---
     max_len = max(len(t) for t in outputs)
@@ -165,20 +279,19 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
         
         if max_k >= 2:
             best_k = 2
-            kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+            kmeans = KMeans(n_clusters=2, random_state=42, n_init=KMEANS_N_INIT)
             labels = kmeans.fit_predict(reduced_data)
-            sample_sz = 5000 if len(reduced_data) > 5000 else None
-            best_score = silhouette_score(reduced_data, labels, sample_size=sample_sz, random_state=42)
+            best_score = silhouette_score(reduced_data, labels, sample_size=min(5000, n_samples), random_state=42)
             
             for k in range(3, max_k + 1):
-                kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                kmeans = KMeans(n_clusters=k, random_state=42, n_init=KMEANS_N_INIT)
                 labels = kmeans.fit_predict(reduced_data)
-                score = silhouette_score(reduced_data, labels, sample_size=sample_sz, random_state=42)
+                score = silhouette_score(reduced_data, labels, sample_size=min(5000, n_samples), random_state=42)
                 if score >= best_score * 1.20:
                     best_score = score
                     best_k = k
                     
-        kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+        kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=KMEANS_N_INIT)
         labels = kmeans.fit_predict(reduced_data)
         
         # Cluster Distance & Entropy Calculation
@@ -236,7 +349,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
         print(f"  Diversity AUC (Clusters vs Time):    {auc_val:.4f} (category*hours)\n")
 
         # Boxplot Generation
-        if name == "Output" and raw_lengths is not None:
+        if ENABLE_PLOTS and name == "Output" and raw_lengths is not None:
             cluster_steps = [raw_lengths[labels == k] for k in range(best_k)]
             plt.figure(figsize=(10, 6))
             plt.boxplot(cluster_steps, tick_labels=[f"Cluster {k+1}\n(n={len(cluster_steps[k])})" for k in range(best_k)])
@@ -278,6 +391,8 @@ def main():
     if not original_log_data or not obs_seqs: 
         print("Failed to load log or observation data. Ensure 'all_test_cases_log.pkl' and 'all_trajectories.pkl' are in the current directory.")
         return
+
+    print_rq2_metrics(calculate_rq2_metric_sets(original_log_data, obs_seqs))
         
     deduplicated_log = merge_and_deduplicate(original_log_data, obs_seqs)
     if not deduplicated_log: 
@@ -287,7 +402,10 @@ def main():
     analyze_and_plot_comprehensive_metrics(original_log_data, deduplicated_log, perf_data)
     print_generation_stats(deduplicated_log)
 
-    print("All analysis and plotting completed. Check the generated PNG files.")
+    if ENABLE_PLOTS:
+        print("All analysis and plotting completed. Check the generated PNG files.")
+    else:
+        print("All analysis completed. Plotting is disabled.")
 
 if __name__ == "__main__":
     main()
