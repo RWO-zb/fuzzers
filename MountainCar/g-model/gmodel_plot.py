@@ -15,6 +15,7 @@ PLOT_4_FILE = 'MountainCar_unique_crashes_over_time.png'
 PLOT_6_FILE = 'MountainCar_survival_steps_boxplot.png'
 
 ENABLE_PLOTS = False
+RQ2_ONLY = True
 RQ2_FUZZ_SAMPLE_LIMIT = 5000
 KMEANS_N_INIT = 3
 THEORETICAL_STATE_SPACE = 50 * 50 
@@ -66,10 +67,14 @@ def calculate_rq2_trends(logs, obs_seqs, max_fuzz_cases=None):
         'behavior_diversity': [],
         'fault_diversity': [],
         'unique_crash_source_seeds': [],
+        'fault_mean_ttd': [],
+        'crash_source_mean_ttd': [],
     }
 
     min_len = min(len(logs), len(obs_seqs))
     fuzz_cases_processed = 0
+    fault_first_seen_times = {}
+    crash_source_first_seen_times = {}
     for i in range(min_len):
         if max_fuzz_cases is not None and fuzz_cases_processed >= max_fuzz_cases:
             break
@@ -98,11 +103,18 @@ def calculate_rq2_trends(logs, obs_seqs, max_fuzz_cases=None):
 
         if is_crash:
             visited_fault_bins.add(bd_idx)
+            event_time = log_entry.get('timestamp', 0.0)
+            event_time = float(event_time) if event_time is not None else 0.0
+            if bd_idx not in fault_first_seen_times:
+                fault_first_seen_times[bd_idx] = event_time
+
             seed_id = log_entry.get('root_id') or log_entry.get('seed_id') or log_entry.get('root_seed')
             if seed_id is not None:
                 if isinstance(seed_id, (np.ndarray, list)):
                     seed_id = tuple(np.asarray(seed_id).flatten())
                 crash_source_seed_ids.add(seed_id)
+                if seed_id not in crash_source_first_seen_times:
+                    crash_source_first_seen_times[seed_id] = event_time
 
         fuzz_cases_processed += 1
         history['episodes'].append(fuzz_cases_processed)
@@ -110,6 +122,8 @@ def calculate_rq2_trends(logs, obs_seqs, max_fuzz_cases=None):
         history['behavior_diversity'].append(len(visited_behavior_bins))
         history['fault_diversity'].append(len(visited_fault_bins))
         history['unique_crash_source_seeds'].append(len(crash_source_seed_ids))
+        history['fault_mean_ttd'].append(np.mean(list(fault_first_seen_times.values())) if fault_first_seen_times else 0.0)
+        history['crash_source_mean_ttd'].append(np.mean(list(crash_source_first_seen_times.values())) if crash_source_first_seen_times else 0.0)
 
     return history
 
@@ -125,15 +139,59 @@ def calculate_rq2_metric_sets(logs, obs_seqs):
         'total': total_history,
     }
 
+def calculate_auc_metrics(history):
+    if not history or not history['episodes']:
+        return {
+            'behavior_auc': 0.0,
+            'behavior_mean_auc': 0.0,
+            'fault_auc': 0.0,
+            'fault_mean_auc': 0.0,
+            'crash_source_auc': 0.0,
+            'crash_source_mean_auc': 0.0,
+        }
+
+    episodes = np.asarray(history['episodes'], dtype=float)
+
+    def curve_auc(key):
+        values = np.asarray(history[key], dtype=float)
+        try:
+            auc_value = np.trapezoid(values, episodes)
+        except AttributeError:
+            auc_value = np.trapz(values, episodes)
+        mean_auc = auc_value / episodes[-1] if episodes[-1] > 0 else 0.0
+        return auc_value, mean_auc
+
+    behavior_auc, behavior_mean_auc = curve_auc('behavior_diversity')
+    fault_auc, fault_mean_auc = curve_auc('fault_diversity')
+    crash_source_auc, crash_source_mean_auc = curve_auc('unique_crash_source_seeds')
+
+    return {
+        'behavior_auc': behavior_auc,
+        'behavior_mean_auc': behavior_mean_auc,
+        'fault_auc': fault_auc,
+        'fault_mean_auc': fault_mean_auc,
+        'crash_source_auc': crash_source_auc,
+        'crash_source_mean_auc': crash_source_mean_auc,
+    }
+
 def print_single_rq2_metrics(history, label):
     if not history or not history['episodes']:
         print(f"  {label}: no RQ2 diversity data to report.")
         return False
+    auc_metrics = calculate_auc_metrics(history)
     print(f"  [{label}]")
     print(f"    State Coverage:     {history['state_coverage'][-1]} grid bins")
     print(f"    Behavior Diversity: {history['behavior_diversity'][-1]} behavior bins")
+    print(f"    Behavior Diversity AUC:      {auc_metrics['behavior_auc']:.4f}")
+    print(f"    Behavior Diversity Mean AUC: {auc_metrics['behavior_mean_auc']:.4f}")
     print(f"    Fault Diversity:    {history['fault_diversity'][-1]} fault bins")
+    print(f"    Fault Diversity AUC:         {auc_metrics['fault_auc']:.4f}")
+    print(f"    Fault Diversity Mean AUC:    {auc_metrics['fault_mean_auc']:.4f}")
+    print(f"    Fault Diversity Mean TTD:    {history['fault_mean_ttd'][-1]:.4f} sec")
     print(f"    Crash Source Seeds: {history['unique_crash_source_seeds'][-1]}")
+    print(f"    Crash Source Seeds AUC:      {auc_metrics['crash_source_auc']:.4f}")
+    print(f"    Crash Source Seeds Mean AUC: {auc_metrics['crash_source_mean_auc']:.4f}")
+    print(f"    Crash Source Seeds Mean TTD: {history['crash_source_mean_ttd'][-1]:.4f} sec")
     return True
 
 def print_rq2_metrics(metric_sets):
@@ -386,14 +444,17 @@ def print_generation_stats(deduplicated_log):
 def main():
     original_log_data = load_data(LOG_FILE)
     obs_seqs = load_data(OBS_FILE)
-    perf_data = load_data(PERF_FILE) 
     
     if not original_log_data or not obs_seqs: 
         print("Failed to load log or observation data. Ensure 'all_test_cases_log.pkl' and 'all_trajectories.pkl' are in the current directory.")
         return
 
     print_rq2_metrics(calculate_rq2_metric_sets(original_log_data, obs_seqs))
+    if RQ2_ONLY:
+        print("RQ2-only analysis completed.")
+        return
         
+    perf_data = load_data(PERF_FILE) 
     deduplicated_log = merge_and_deduplicate(original_log_data, obs_seqs)
     if not deduplicated_log: 
         print("Deduplicated log is empty.")
