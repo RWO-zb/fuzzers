@@ -60,6 +60,8 @@ python Todynet/src/train.py --dataset BipedalWalkerHCAC --nsteps 25 --epochs 100
 
 ### Comparison of Input/Output Diversity Across Benchmarks
 
+This table compares the input and output diversity achieved by each fuzzing method across the three benchmarks.
+
 | Method | MountainCar Input Diversity | MountainCar Output Diversity | BipedalWalker Input Diversity | BipedalWalker Output Diversity | CARLA Input Diversity | CARLA Output Diversity |
 |--------|-----------------------------|------------------------------|-------------------------------|--------------------------------|-----------------------|------------------------|
 | Random | 2 ± 0.00% | 2 ± 0.00% | 2 ± 0.00% | 15.8 ± 15.11% | 6.6 ± 91.29% | 8.2 ± 35.97% |
@@ -71,7 +73,7 @@ python Todynet/src/train.py --dataset BipedalWalkerHCAC --nsteps 25 --epochs 100
 
 ### Comparison of TTD Across Benchmarks
 
-TTD denotes the time to discovery, measuring how quickly each method discovers diverse inputs or outputs.
+This table compares TTD (time to discovery), which measures how quickly each method discovers diverse inputs or outputs across benchmarks.
 
 | Method | MountainCar Input TTD | MountainCar Output TTD | BipedalWalker Input TTD | BipedalWalker Output TTD | CARLA Input TTD | CARLA Output TTD |
 |--------|-----------------------|------------------------|-------------------------|--------------------------|-----------------|------------------|
@@ -84,6 +86,8 @@ TTD denotes the time to discovery, measuring how quickly each method discovers d
 
 ### Comparison of AUC Across Benchmarks
 
+This table reports the area under the discovery curve, reflecting cumulative discovery performance over time.
+
 | Method | MountainCar Input AUC | MountainCar Output AUC | BipedalWalker Input AUC | BipedalWalker Output AUC | CARLA Input AUC | CARLA Output AUC |
 |--------|-----------------------|------------------------|-------------------------|--------------------------|-----------------|------------------|
 | Random | 24 ± 0.00% | 24 ± 0.00% | 23.9954 ± 0.01% | 189.0252 ± 15.12% | 72.4306 ± 87.22% | 93.5201 ± 33.12% |
@@ -93,9 +97,11 @@ TTD denotes the time to discovery, measuring how quickly each method discovers d
 | SeqDivFuzz | 19.024 ± 38.56% | 13.6144 ± 0.46% | 16.123 ± 67.56% | 4.651 ± 3.65% | 88.9406 ± 24.40% | 82.0942 ± 48.16% |
 | QDFuzz | 28.785 ± 37.27% | 23.9879 ± 0.04% | 23.9956 ± 0.01% | 196.5033 ± 12.63% | 50.9297 ± 49.88% | 60.2345 ± 64.58% |
 
-### Finetuning Results with Regression
+### Table 5 with Regression Testing
 
-| Method | #UC Before Retrain | #UC After Retrain | Rob. | Acc. | Reg. |
+This table extends Table 5 in the paper by adding regression testing results after finetuning.
+
+| Method | #UC Before Finetune | #UC After Finetune | Rob. | Acc. | Reg. |
 |--------|--------------------|-------------------|------|------|------|
 | Random | 4,399 | 4,095 | 6.91% | 96.00% (-2.5) | 1.00% |
 | MDPFuzz | 8,952 | 6,906 | 22.86% | 99.00% (+0.5) | 1.00% |
@@ -105,6 +111,8 @@ TTD denotes the time to discovery, measuring how quickly each method discovers d
 | QDFuzz | 2,418 | 1,483 | **38.67%** | 99.00% (+0.5) | 1.50% |
 
 ### Cross-Fuzzing-Evaluation Matrix
+
+This matrix reports cross-evaluation results between finetuned models and fuzzers: each row is the fuzzer used to generate finetuning data, each column is the fuzzer used for evaluation, and each cell is the number of crashes found on the corresponding finetuned model.
 
 | Train \ Eval | Random | MDPFuzz | CureFuzz | G-Model | SeqDivFuzz | QDFuzz |
 |-------------|----------|---------|---------|---------|---------|---------|
