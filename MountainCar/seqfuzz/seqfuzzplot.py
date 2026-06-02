@@ -108,6 +108,7 @@ def calculate_rq2_trends(rq2_data, max_fuzz_cases=None):
         'unique_crash_source_seeds': [],
         'fault_mean_ttd': [],
         'crash_source_mean_ttd': [],
+        'event_times': [],
     }
     fault_first_seen_times = {}
     crash_source_first_seen_times = {}
@@ -116,6 +117,7 @@ def calculate_rq2_trends(rq2_data, max_fuzz_cases=None):
         if max_fuzz_cases is not None and len(history['episodes']) >= max_fuzz_cases:
             break
         sequence = item['sequence']
+        event_time = float(item.get('event_time', 0.0) or 0.0)
         for state in sequence:
             if len(state) >= 2:
                 visited_state_bins.add(get_grid_index(
@@ -133,7 +135,6 @@ def calculate_rq2_trends(rq2_data, max_fuzz_cases=None):
 
         if item['is_crash']:
             visited_fault_bins.add(bd_idx)
-            event_time = float(item.get('event_time', 0.0) or 0.0)
             if bd_idx not in fault_first_seen_times:
                 fault_first_seen_times[bd_idx] = event_time
 
@@ -152,6 +153,7 @@ def calculate_rq2_trends(rq2_data, max_fuzz_cases=None):
         history['unique_crash_source_seeds'].append(len(crash_source_seed_ids))
         history['fault_mean_ttd'].append(np.mean(list(fault_first_seen_times.values())) if fault_first_seen_times else 0.0)
         history['crash_source_mean_ttd'].append(np.mean(list(crash_source_first_seen_times.values())) if crash_source_first_seen_times else 0.0)
+        history['event_times'].append(event_time)
     return history
 
 def truncate_rq2_history(history, limit):
@@ -177,15 +179,19 @@ def calculate_auc_metrics(history):
             'crash_source_mean_auc': 0.0,
         }
 
-    episodes = np.asarray(history['episodes'], dtype=float)
+    times = np.asarray(history.get('event_times', []), dtype=float) / 3600.0
+    if len(times) != len(history['episodes']):
+        times = np.asarray(history['episodes'], dtype=float)
+    order = np.argsort(times, kind='stable')
+    x_axis = times[order]
 
     def curve_auc(key):
-        values = np.asarray(history[key], dtype=float)
+        values = np.asarray(history[key], dtype=float)[order]
         try:
-            auc_value = np.trapezoid(values, episodes)
+            auc_value = np.trapezoid(values, x_axis)
         except AttributeError:
-            auc_value = np.trapz(values, episodes)
-        mean_auc = auc_value / episodes[-1] if episodes[-1] > 0 else 0.0
+            auc_value = np.trapz(values, x_axis)
+        mean_auc = auc_value / x_axis[-1] if x_axis[-1] > 0 else 0.0
         return auc_value, mean_auc
 
     behavior_auc, behavior_mean_auc = curve_auc('behavior_diversity')
@@ -209,15 +215,15 @@ def print_single_rq2_metrics(history, label):
     print(f"  [{label}]")
     print(f"    State Coverage:     {history['state_coverage'][-1]} grid bins")
     print(f"    Behavior Diversity: {history['behavior_diversity'][-1]} behavior bins")
-    print(f"    Behavior Diversity AUC:      {auc_metrics['behavior_auc']:.4f}")
-    print(f"    Behavior Diversity Mean AUC: {auc_metrics['behavior_mean_auc']:.4f}")
+    print(f"    Behavior Diversity Time-AUC:      {auc_metrics['behavior_auc']:.4f}")
+    print(f"    Behavior Diversity Mean Time-AUC: {auc_metrics['behavior_mean_auc']:.4f}")
     print(f"    Fault Diversity:    {history['fault_diversity'][-1]} fault bins")
-    print(f"    Fault Diversity AUC:         {auc_metrics['fault_auc']:.4f}")
-    print(f"    Fault Diversity Mean AUC:    {auc_metrics['fault_mean_auc']:.4f}")
+    print(f"    Fault Diversity Time-AUC:         {auc_metrics['fault_auc']:.4f}")
+    print(f"    Fault Diversity Mean Time-AUC:    {auc_metrics['fault_mean_auc']:.4f}")
     print(f"    Fault Diversity Mean TTD:    {history['fault_mean_ttd'][-1]:.4f} sec")
     print(f"    Crash Source Seeds: {history['unique_crash_source_seeds'][-1]}")
-    print(f"    Crash Source Seeds AUC:      {auc_metrics['crash_source_auc']:.4f}")
-    print(f"    Crash Source Seeds Mean AUC: {auc_metrics['crash_source_mean_auc']:.4f}")
+    print(f"    Crash Source Seeds Time-AUC:      {auc_metrics['crash_source_auc']:.4f}")
+    print(f"    Crash Source Seeds Mean Time-AUC: {auc_metrics['crash_source_mean_auc']:.4f}")
     print(f"    Crash Source Seeds Mean TTD: {history['crash_source_mean_ttd'][-1]:.4f} sec")
     return True
 

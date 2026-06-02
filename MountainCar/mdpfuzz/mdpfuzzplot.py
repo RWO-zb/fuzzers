@@ -140,7 +140,7 @@ def load_mdpfuzz_rq2_data(log_file, obs_file):
             'sequence': traj,
             'is_crash': bool(info.get('Oracle', False)),
             'seed_id': seed_id,
-            'event_time': resolve_event_time(run_time, crash_time, fuzz_start_time),
+            'event_time': resolve_event_time(run_time, None, fuzz_start_time),
         })
     return data, obs_rows
 
@@ -228,15 +228,19 @@ def calculate_auc_metrics(history):
             'crash_source_mean_auc': 0.0,
         }
 
-    episodes = np.asarray(history['episodes'], dtype=float)
+    times = np.asarray(history.get('event_times', []), dtype=float) / 3600.0
+    if len(times) != len(history['episodes']):
+        times = np.asarray(history['episodes'], dtype=float)
+    order = np.argsort(times, kind='stable')
+    x_axis = times[order]
 
     def curve_auc(key):
-        values = np.asarray(history[key], dtype=float)
+        values = np.asarray(history[key], dtype=float)[order]
         try:
-            auc_value = np.trapezoid(values, episodes)
+            auc_value = np.trapezoid(values, x_axis)
         except AttributeError:
-            auc_value = np.trapz(values, episodes)
-        mean_auc = auc_value / episodes[-1] if episodes[-1] > 0 else 0.0
+            auc_value = np.trapz(values, x_axis)
+        mean_auc = auc_value / x_axis[-1] if x_axis[-1] > 0 else 0.0
         return auc_value, mean_auc
 
     behavior_auc, behavior_mean_auc = curve_auc('behavior_diversity')
@@ -312,18 +316,18 @@ def print_single_rq2_metrics(history, label):
     print(f"  [{label}]")
     print(f"    State Coverage:     {history['state_coverage'][-1]} grid bins")
     print(f"    Behavior Diversity: {history['behavior_diversity'][-1]} behavior bins")
-    print(f"    Behavior Diversity AUC:      {auc_metrics['behavior_auc']:.4f}")
-    print(f"    Behavior Diversity Mean AUC: {auc_metrics['behavior_mean_auc']:.4f}")
+    print(f"    Behavior Diversity Time-AUC:      {auc_metrics['behavior_auc']:.4f}")
+    print(f"    Behavior Diversity Mean Time-AUC: {auc_metrics['behavior_mean_auc']:.4f}")
     print(f"    Fault Diversity:    {history['fault_diversity'][-1]} fault bins")
-    print(f"    Fault Diversity AUC:         {auc_metrics['fault_auc']:.4f}")
-    print(f"    Fault Diversity Mean AUC:    {auc_metrics['fault_mean_auc']:.4f}")
+    print(f"    Fault Diversity Time-AUC:         {auc_metrics['fault_auc']:.4f}")
+    print(f"    Fault Diversity Mean Time-AUC:    {auc_metrics['fault_mean_auc']:.4f}")
     print(f"    Fault Diversity Mean TTD:    {history['fault_mean_ttd'][-1]:.4f} sec")
     print(f"    Fault-category Discovery AUC:      {fault_discovery_metrics['fault_discovery_auc']:.4f} category*hours")
     print(f"    Fault-category Discovery Mean AUC: {fault_discovery_metrics['fault_discovery_mean_auc']:.4f} categories")
     print(f"    Fault-category Discovery TTD:      {fault_discovery_metrics['fault_discovery_mean_ttd']:.4f} sec")
     print(f"    Crash Source Seeds: {history['unique_crash_source_seeds'][-1]}")
-    print(f"    Crash Source Seeds AUC:      {auc_metrics['crash_source_auc']:.4f}")
-    print(f"    Crash Source Seeds Mean AUC: {auc_metrics['crash_source_mean_auc']:.4f}")
+    print(f"    Crash Source Seeds Time-AUC:      {auc_metrics['crash_source_auc']:.4f}")
+    print(f"    Crash Source Seeds Mean Time-AUC: {auc_metrics['crash_source_mean_auc']:.4f}")
     print(f"    Crash Source Seeds Mean TTD: {history['crash_source_mean_ttd'][-1]:.4f} sec")
     return True
 
@@ -409,7 +413,7 @@ def load_and_merge_mdpfuzz_data(log_file, obs_file):
         max_run_time = max(max_run_time, relative_run_time)
         
         crash_time = parse_optional_float(log_row.get('CrashTime', 'None'))
-        relative_crash_time = resolve_event_time(run_time, crash_time, fuzz_start_time)
+        relative_crash_time = relative_run_time
         
         algo_time = log_row.get('CoverageTime', 'None')
         algo_time = float(algo_time) if algo_time != 'None' else 0.0
