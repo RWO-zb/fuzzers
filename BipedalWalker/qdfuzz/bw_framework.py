@@ -1,4 +1,5 @@
 import json
+import argparse
 import os
 import time
 import torch
@@ -947,10 +948,20 @@ class MAPElitesFramework(Framework):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--algo", choices=["tqc", "ppo"], default="tqc")
+    parser.add_argument("--model-path", default=None)
+    parser.add_argument("--vecnormalize-path", default=None)
+    args = parser.parse_args()
+
     torch.set_num_threads(1)
     main_seed = 1
     env_seed = 0
-    model = load_model()
+    model = load_model(
+        algo=args.algo,
+        model_path=args.model_path,
+        vecnormalize_path=args.vecnormalize_path,
+    )
 
     # --- 配置区域 ---
     TIME_BUDGET_HOURS = 12   

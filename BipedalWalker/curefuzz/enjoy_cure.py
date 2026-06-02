@@ -176,6 +176,7 @@ def main():
     parser.add_argument("--load-checkpoint", type=int, help="Load specific checkpoint")
     parser.add_argument("--stochastic", action="store_true", default=False, help="Use stochastic actions")
     parser.add_argument("--norm-reward", action="store_true", default=False, help="Normalize reward")
+    parser.add_argument("--vecnormalize-path", default=None, help="Optional path to vecnormalize.pkl")
     parser.add_argument("--seed", help="Random generator seed", type=int, default=1)
     parser.add_argument("--reward-log", help="Where to log reward", default="", type=str)
     parser.add_argument("--gym-packages", type=str, nargs="+", default=[], help="External Gym packages")
@@ -248,6 +249,8 @@ def main():
     set_random_seed(args.seed)
     is_atari = ExperimentManager.is_atari(env_id)
     stats_path = os.path.join(log_path, env_id)
+    if args.vecnormalize_path is not None:
+        stats_path = os.path.dirname(args.vecnormalize_path)
     hyperparams, stats_path = get_saved_hyperparams(stats_path, norm_reward=args.norm_reward, test_mode=True)
 
     env_kwargs = {}

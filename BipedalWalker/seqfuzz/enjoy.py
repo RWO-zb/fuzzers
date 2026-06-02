@@ -152,7 +152,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", help="environment ID", type=str, default="BipedalWalkerHardcore-v3")
     parser.add_argument("-f", "--folder", help="Log folder", type=str, default="../rl-trained-agents/")
-    parser.add_argument("--algo", help="RL Algorithm", default="tqc", type=str, required=False, choices=list(ALGOS.keys()))
+    parser.add_argument("--algo", help="RL Algorithm", default="ppo", type=str, required=False, choices=list(ALGOS.keys()))
     parser.add_argument("-n", "--n_timesteps", help="number of timesteps", default=300, type=int)
     parser.add_argument("--num-threads", help="Number of threads for PyTorch (-1 to use default)", default=-1, type=int)
     parser.add_argument("--n-envs", help="number of environments", default=1, type=int)
@@ -164,6 +164,7 @@ def main():
     parser.add_argument("--load-checkpoint", type=int, help="Load checkpoint")
     parser.add_argument("--stochastic", action="store_true", default=False, help="Use stochastic actions")
     parser.add_argument("--norm-reward", action="store_true", default=False, help="Normalize reward")
+    parser.add_argument("--vecnormalize-path", default=None, help="Optional path to vecnormalize.pkl")
     parser.add_argument("--seed", help="Random generator seed", type=int, default=0)
     parser.add_argument("--reward-log", help="Where to log reward", default="", type=str)
     parser.add_argument("--gym-packages", type=str, nargs="+", default=[], help="External Gym packages")
@@ -232,6 +233,8 @@ def main():
 
     is_atari = ExperimentManager.is_atari(env_id)
     stats_path = os.path.join(log_path, env_id)
+    if args.vecnormalize_path is not None:
+        stats_path = os.path.dirname(args.vecnormalize_path)
     hyperparams, stats_path = get_saved_hyperparams(stats_path, norm_reward=args.norm_reward, test_mode=True)
 
     env_kwargs = {}
@@ -387,7 +390,7 @@ def main():
     unified_selection_log = []
     unified_env_sim_time = 0.0
     
-    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0 :
+    while current_time - start_fuzz_time < 3600 * 12 and len(fuzzer.corpus) > 0:
         is_crash = False
         seedcount+=1
         output_obs = []

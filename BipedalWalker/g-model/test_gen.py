@@ -173,6 +173,7 @@ def main():
     parser.add_argument("--load-checkpoint", type=int, help="Load checkpoint")
     parser.add_argument("--stochastic", action="store_true", default=False, help="Use stochastic actions")
     parser.add_argument("--norm-reward", action="store_true", default=False, help="Normalize reward")
+    parser.add_argument("--vecnormalize-path", default=None, help="Optional path to vecnormalize.pkl")
     parser.add_argument("--seed", help="Random generator seed", type=int, default=0)
     parser.add_argument("--reward-log", help="Where to log reward", default="", type=str)
     parser.add_argument("--gym-packages", type=str, nargs="+", default=[], help="External Gym packages")
@@ -248,6 +249,8 @@ def main():
     is_atari = ExperimentManager.is_atari(env_id)
 
     stats_path = os.path.join(log_path, env_id)
+    if args.vecnormalize_path is not None:
+        stats_path = os.path.dirname(args.vecnormalize_path)
     hyperparams, stats_path = get_saved_hyperparams(stats_path, norm_reward=args.norm_reward, test_mode=True)
 
     env_kwargs = {}
@@ -361,7 +364,7 @@ def main():
     fuzzing_start_time = start_time
 
     print("--- Stage 2: Main Testing Loop ---")
-    while current_time - start_time < 3600 * 0.05: 
+    while current_time - start_time < 3600 * 12: 
 
         if cur_step > 0 and cur_step % args.step == 0:
             # --- Generative Phase ---

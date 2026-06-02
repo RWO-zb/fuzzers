@@ -40,6 +40,22 @@ RANGES = {
 # MountainCar theoretical state space grid (50x50)
 THEORETICAL_STATE_SPACE = 50 * 50 
 
+def parse_optional_float(value):
+    if value in (None, 'None', ''):
+        return None
+    return float(value)
+
+def resolve_event_time(run_time, crash_time, start_time):
+    if crash_time is not None:
+        if start_time and crash_time >= start_time:
+            return max(0.0, crash_time - start_time)
+        return max(0.0, crash_time)
+    if run_time is None:
+        return 0.0
+    if start_time and run_time >= start_time:
+        return max(0.0, run_time - start_time)
+    return max(0.0, run_time)
+
 def get_grid_index(values, ranges, grid_size):
     indices = []
     for val, (min_val, max_val), bins in zip(values, ranges, grid_size):
@@ -106,10 +122,9 @@ def load_mdpfuzz_rq2_data(log_file, obs_file):
         if IS_RT or gen != 0:
             valid_logs.append(row)
 
-    fuzz_start_time = 0.0
-    if log_rows:
-        first_rt = log_rows[0].get('RunTime', 'None')
-        fuzz_start_time = float(first_rt) if first_rt != 'None' else 0.0
+    fuzz_start_time = None
+    if valid_logs:
+        fuzz_start_time = parse_optional_float(valid_logs[0].get('RunTime', 'None'))
 
     min_len = min(len(obs_rows), len(valid_logs))
     data = []
@@ -119,15 +134,13 @@ def load_mdpfuzz_rq2_data(log_file, obs_file):
         seed_id = log_row.get('SeedID')
         if seed_id in (None, 'None', ''):
             seed_id = info.get('SeedID')
-        run_time = log_row.get('RunTime', 'None')
-        run_time = float(run_time) if run_time != 'None' else 0.0
-        crash_time = log_row.get('CrashTime', 'None')
-        crash_time = float(crash_time) if crash_time != 'None' else run_time
+        run_time = parse_optional_float(log_row.get('RunTime', 'None'))
+        crash_time = parse_optional_float(log_row.get('CrashTime', 'None'))
         data.append({
             'sequence': traj,
             'is_crash': bool(info.get('Oracle', False)),
             'seed_id': seed_id,
-            'event_time': max(0.0, crash_time - fuzz_start_time),
+            'event_time': resolve_event_time(run_time, crash_time, fuzz_start_time),
         })
     return data, obs_rows
 
@@ -144,6 +157,7 @@ def calculate_rq2_trends(rq2_data, max_fuzz_cases=None):
         'unique_crash_source_seeds': [],
         'fault_mean_ttd': [],
         'crash_source_mean_ttd': [],
+        'event_times': [],
     }
     fault_first_seen_times = {}
     crash_source_first_seen_times = {}
@@ -187,6 +201,7 @@ def calculate_rq2_trends(rq2_data, max_fuzz_cases=None):
         history['unique_crash_source_seeds'].append(len(crash_source_seed_ids))
         history['fault_mean_ttd'].append(np.mean(list(fault_first_seen_times.values())) if fault_first_seen_times else 0.0)
         history['crash_source_mean_ttd'].append(np.mean(list(crash_source_first_seen_times.values())) if crash_source_first_seen_times else 0.0)
+        history['event_times'].append(float(item.get('event_time', 0.0) or 0.0))
 
     return history
 
@@ -237,11 +252,63 @@ def calculate_auc_metrics(history):
         'crash_source_mean_auc': crash_source_mean_auc,
     }
 
+def calculate_fault_category_discovery_metrics(history):
+    if not history or not history['episodes'] or 'event_times' not in history:
+        return {
+            'fault_discovery_auc': 0.0,
+            'fault_discovery_mean_auc': 0.0,
+            'fault_discovery_mean_ttd': 0.0,
+        }
+
+    event_times = np.asarray(history['event_times'], dtype=float)
+    fault_counts = np.asarray(history['fault_diversity'], dtype=float)
+    if len(event_times) == 0:
+        return {
+            'fault_discovery_auc': 0.0,
+            'fault_discovery_mean_auc': 0.0,
+            'fault_discovery_mean_ttd': 0.0,
+        }
+
+    order = np.argsort(event_times, kind='stable')
+    times_hrs = event_times[order] / 3600.0
+    counts = fault_counts[order]
+    x_steps = [0.0]
+    y_steps = [0.0]
+
+    last_count = 0.0
+    discovery_times = []
+    for t_hr, count in zip(times_hrs, counts):
+        if count > last_count:
+            x_steps.extend([t_hr, t_hr])
+            y_steps.extend([last_count, count])
+            discovery_times.extend([t_hr] * int(count - last_count))
+            last_count = count
+
+    max_time_hr = float(np.max(times_hrs)) if len(times_hrs) > 0 else 0.0
+    if max_time_hr > x_steps[-1]:
+        x_steps.append(max_time_hr)
+        y_steps.append(last_count)
+
+    try:
+        auc_value = np.trapezoid(y_steps, x_steps)
+    except AttributeError:
+        auc_value = np.trapz(y_steps, x_steps)
+
+    mean_auc = auc_value / max_time_hr if max_time_hr > 0 else 0.0
+    mean_ttd_sec = float(np.mean(discovery_times) * 3600.0) if discovery_times else 0.0
+
+    return {
+        'fault_discovery_auc': auc_value,
+        'fault_discovery_mean_auc': mean_auc,
+        'fault_discovery_mean_ttd': mean_ttd_sec,
+    }
+
 def print_single_rq2_metrics(history, label):
     if not history or not history['episodes']:
         print(f"  {label}: no RQ2 diversity data to report.")
         return False
     auc_metrics = calculate_auc_metrics(history)
+    fault_discovery_metrics = calculate_fault_category_discovery_metrics(history)
     print(f"  [{label}]")
     print(f"    State Coverage:     {history['state_coverage'][-1]} grid bins")
     print(f"    Behavior Diversity: {history['behavior_diversity'][-1]} behavior bins")
@@ -251,6 +318,9 @@ def print_single_rq2_metrics(history, label):
     print(f"    Fault Diversity AUC:         {auc_metrics['fault_auc']:.4f}")
     print(f"    Fault Diversity Mean AUC:    {auc_metrics['fault_mean_auc']:.4f}")
     print(f"    Fault Diversity Mean TTD:    {history['fault_mean_ttd'][-1]:.4f} sec")
+    print(f"    Fault-category Discovery AUC:      {fault_discovery_metrics['fault_discovery_auc']:.4f} category*hours")
+    print(f"    Fault-category Discovery Mean AUC: {fault_discovery_metrics['fault_discovery_mean_auc']:.4f} categories")
+    print(f"    Fault-category Discovery TTD:      {fault_discovery_metrics['fault_discovery_mean_ttd']:.4f} sec")
     print(f"    Crash Source Seeds: {history['unique_crash_source_seeds'][-1]}")
     print(f"    Crash Source Seeds AUC:      {auc_metrics['crash_source_auc']:.4f}")
     print(f"    Crash Source Seeds Mean AUC: {auc_metrics['crash_source_mean_auc']:.4f}")
@@ -308,11 +378,6 @@ def load_and_merge_mdpfuzz_data(log_file, obs_file):
         if current_info is not None:
             obs_data.append((current_info, current_traj))
             
-    fuzz_start_time = 0.0
-    if len(logs) > 0:
-        first_rt = logs[0].get('RunTime', 'None')
-        fuzz_start_time = float(first_rt) if first_rt != 'None' else 0.0
-
     offset = max(0, len(logs) - len(obs_data))
     if offset > 0:
         print(f"  -> Offset detected: Discarding first {offset} logs (initial phase) to strictly compute fuzzing metrics.")
@@ -320,6 +385,10 @@ def load_and_merge_mdpfuzz_data(log_file, obs_file):
     elif len(obs_data) > len(logs):
         print(f"  -> Warning: Obs count > Logs count. Will truncate obs_data.")
         obs_data = obs_data[:len(logs)]
+
+    fuzz_start_time = None
+    if len(logs) > 0:
+        fuzz_start_time = parse_optional_float(logs[0].get('RunTime', 'None'))
         
     merged_logs = []
     total_algo_time = 0.0
@@ -335,14 +404,12 @@ def load_and_merge_mdpfuzz_data(log_file, obs_file):
         survival_steps = obs_info.get('Steps', len(traj))
         
         # Handle 'None' values in RT and make relative to fuzz_start_time
-        run_time = log_row.get('RunTime', 'None')
-        run_time = float(run_time) if run_time != 'None' else 0.0
-        relative_run_time = max(0.0, run_time - fuzz_start_time)
+        run_time = parse_optional_float(log_row.get('RunTime', 'None'))
+        relative_run_time = resolve_event_time(run_time, None, fuzz_start_time)
         max_run_time = max(max_run_time, relative_run_time)
         
-        crash_time = log_row.get('CrashTime', 'None')
-        crash_time = float(crash_time) if crash_time != 'None' else run_time
-        relative_crash_time = max(0.0, crash_time - fuzz_start_time)
+        crash_time = parse_optional_float(log_row.get('CrashTime', 'None'))
+        relative_crash_time = resolve_event_time(run_time, crash_time, fuzz_start_time)
         
         algo_time = log_row.get('CoverageTime', 'None')
         algo_time = float(algo_time) if algo_time != 'None' else 0.0

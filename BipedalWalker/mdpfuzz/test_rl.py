@@ -24,7 +24,7 @@ if __name__ == '__main__':
     torch.set_num_threads(1)
     
     test_budget = 330000
-    test_budget_in_seconds = 100
+    test_budget_in_seconds = 43200
     init_budget = 1000
     k = 10
     tau = 0.01
@@ -44,6 +44,9 @@ if __name__ == '__main__':
     # [新增] 物理轨迹保存参数
     parser.add_argument("--save-physics", action="store_true", default=False, help="Save full physics state trajectories for crash restoration")
     parser.add_argument("--window-size", type=int, default=25, help="Sliding window size")
+    parser.add_argument("--algo", choices=["tqc", "ppo"], default="tqc", help="RL algorithm/model family to test")
+    parser.add_argument("--model-path", default=None, help="Optional path to the SB3 model zip")
+    parser.add_argument("--vecnormalize-path", default=None, help="Optional path to vecnormalize.pkl; PPO default is auto-detected")
     
     args, unknown = parser.parse_known_args(sys.argv[4:])
 
@@ -66,11 +69,16 @@ if __name__ == '__main__':
     path = '{}_{}_{}_{}_{}'.format(result_path, k, tau, gamma, seed)
     print(f"Log Path: {path}")
     print(f"Data Collection: SaveData={args.save_data}, SaveTrans={args.save_transitions}, SavePhysics={args.save_physics}")
+    print(f"Policy: algo={args.algo}, model_path={args.model_path or 'default'}, vecnormalize={args.vecnormalize_path or 'auto'}")
 
     # [修改] 实例化 Executor 时传入 save_physics 参数
     executor = BipedalWalkerExecutor(300, 0, save_physics=args.save_physics)
     
-    policy = executor.load_policy()
+    policy = executor.load_policy(
+        algo=args.algo,
+        model_path=args.model_path,
+        vecnormalize_path=args.vecnormalize_path,
+    )
     fuzzer = Fuzzer(random_seed=seed, k=k, tau=tau, gamma=gamma, executor=executor)
 
     fuzz_kwargs = {

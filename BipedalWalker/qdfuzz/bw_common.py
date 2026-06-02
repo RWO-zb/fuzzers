@@ -1,12 +1,15 @@
 import os
 import time
 import torch
+import pickle
 import tqdm
 import numpy as np
+from pathlib import Path
 from typing import List, Tuple, Iterable
 
 from stable_baselines3.common.base_class import BaseAlgorithm
 from sb3_contrib import TQC
+from stable_baselines3 import PPO
 
 import gym
 
@@ -53,6 +56,9 @@ EXPERT_PLOT_ARGS = [
 
 # [新增] 极速推理优化: 直接提取网络均值输出，彻底规避 distribution.py 产生的计算开销。
 def fast_predict(model, obs):
+    if hasattr(model, "vecnormalize") and model.vecnormalize is not None:
+        obs = model.vecnormalize.normalize_obs(obs)
+
     # [修复] 原生 Gym 返回 1D obs，使用 .reshape(1, -1) 补充网络所需的 batch 维度
     obs_tensor = torch.as_tensor(obs).reshape(1, -1).float().to("cpu")
     
@@ -81,7 +87,45 @@ def generate_inputs(rng: np.random.Generator, n: int):
     return rng.integers(low=1, high=4, size=n)
 
 
-def load_model():
+def load_model(algo: str = "tqc", model_path: str = None, vecnormalize_path: str = None):
+    if algo.lower() == "ppo":
+        if model_path is None:
+            model_path = Path(__file__).resolve().parents[1] / "rl-trained-agents" / "ppo" / "BipedalWalkerHardcore-v3_1" / "BipedalWalkerHardcore-v3.zip"
+        model = PPO.load(
+            str(model_path),
+            custom_objects={
+                "learning_rate": lambda _: 3e-4,
+                "lr_schedule": lambda _: 3e-4,
+                "clip_range": lambda _: 0.2,
+            },
+            device="cpu",
+        )
+        model.vecnormalize = None
+        if vecnormalize_path is None:
+            candidate = Path(model_path).with_name("BipedalWalkerHardcore-v3") / "vecnormalize.pkl"
+            if candidate.exists():
+                vecnormalize_path = candidate
+        if vecnormalize_path:
+            with open(vecnormalize_path, "rb") as f:
+                model.vecnormalize = pickle.load(f)
+            model.vecnormalize.training = False
+        return model
+
+    if algo.lower() != "tqc":
+        raise ValueError("Unsupported RL algorithm: {}".format(algo))
+    if model_path is not None:
+        model = TQC.load(
+            model_path,
+            custom_objects={
+                "learning_rate": lambda _: 3e-4,
+                "lr_schedule": lambda _: 3e-4,
+            },
+            kwargs={'seed': 0, 'buffer_size': 1},
+            device="cpu",
+        )
+        model.vecnormalize = None
+        return model
+
     return TQC.load('../rl-trained-agents/tqc/BipedalWalkerHardcore-v3_1/BipedalWalkerHardcore-v3.zip',
                     custom_objects={
                         "learning_rate": lambda _: 3e-4,
