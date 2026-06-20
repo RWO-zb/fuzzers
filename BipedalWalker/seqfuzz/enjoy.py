@@ -148,6 +148,11 @@ def get_real_unwrapped_env(env):
         return current_env.unwrapped
     return current_env
 
+def reset_reproducible_env(env, states, env_seed):
+    """Reset env RNG before each test case so replay does not depend on RNG flow."""
+    env.seed(env_seed)
+    return env.reset(states)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", help="environment ID", type=str, default="BipedalWalkerHardcore-v3")
@@ -274,9 +279,9 @@ def main():
 
     model = ALGOS[algo].load(model_path, env=env, custom_objects=custom_objects, **kwargs)
 
-    np.random.seed(2021)
+    np.random.seed(args.seed)
     states = np.random.randint(low=1, high=4, size=15)
-    obs = env.reset(states)
+    obs = reset_reproducible_env(env, states, args.seed)
 
     siamese_model = predict_siamese.load_tapnet_mode()
     siamese_model.cpu() # [修改] TodyNet 模型强制放在 CPU
@@ -323,7 +328,7 @@ def main():
         states = np.random.randint(low=1, high=4, size=15)
         state = None
         episode_reward = 0.0
-        obs = env.reset(states)
+        obs = reset_reproducible_env(env, states, args.seed)
         sequences = [obs[0]]
         for _ in range(args.n_timesteps):
             action = fast_predict(model, obs) # [修改] 使用 fast_predict 绕过 distribution.py
@@ -340,7 +345,7 @@ def main():
             mutate_states = np.remainder(mutate_states, 4)
             mutate_states = np.clip(mutate_states, 1, 3)
 
-            obs = env.reset(mutate_states)
+            obs = reset_reproducible_env(env, mutate_states, args.seed)
             print('mutate states ', mutate_states)
 
             for _ in range(args.n_timesteps):
@@ -405,7 +410,7 @@ def main():
         # Reset Env
         # [新增] 对齐评估指标：环境仿真计时开始
         _t_sim_start = time.time()
-        obs = env.reset(mutate_states)
+        obs = reset_reproducible_env(env, mutate_states, args.seed)
         unified_env_sim_time += (time.time() - _t_sim_start)
 
         sequences = [obs[0]]
@@ -541,6 +546,9 @@ def main():
             'mutate_state': copy.deepcopy(mutate_states),
             'did_crash': _did_crash,
             'is_reward_fault': _is_reward_fault,
+            'env_id': env_id,
+            'env_seed': args.seed,
+            'sim_steps': args.n_timesteps,
             'elapsed_time': time.time() - start_fuzz_time,
             'survival_steps': episode_steps,
             'parent_depth': current_gen,

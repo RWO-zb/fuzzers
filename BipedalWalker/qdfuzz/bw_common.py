@@ -152,7 +152,7 @@ def get_inputs_from_keys(keys: Iterable[str]) -> np.ndarray:
 def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descriptors: List = None, sim_steps: int = 300) -> Tuple:
     '''Executes the model on the environment and only computes the 12 features used by Leo Cazenille. It also returns the final state.'''
 
-    env = gym.make('BipedalWalkerHardcore-v4',rand_seed=main_seed)
+    env = gym.make('BipedalWalkerHardcore-v4', rand_seed=env_seed)
 
     acc_reward = 0.0
     features = np.zeros(12)
@@ -219,6 +219,9 @@ def execute_policy(input: np.ndarray, model: BaseAlgorithm, env_seed: int, descr
     eval_info = {
         'did_crash': did_crash,
         'is_reward_fault': is_reward_fault,
+        'env_id': 'BipedalWalkerHardcore-v4',
+        'env_seed': env_seed,
+        'sim_steps': sim_steps,
         'survival_steps': t + 1,
         'output_trajectory': np.array(obs_0_trajectory, dtype=np.float32) if (did_crash or is_reward_fault) else None,
         'env_sim_time': env_sim_time

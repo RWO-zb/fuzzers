@@ -89,8 +89,8 @@ def deduplicate_log(original_log_data):
         else:
             # 如果状态已存在，检查是否需要覆盖
             old_entry = state_to_entry[state_bytes]
-            # 只有当：新记录是 Crash (True)，且原存记录是 Safe (False) 时才覆盖
-            if entry_copy.get('did_crash', False) and not old_entry.get('did_crash', False):
+            # Prefer a physical-crash record when the same input has multiple outcomes.
+            if entry_copy.get('is_physical_crash', False) and not old_entry.get('is_physical_crash', False):
                 state_to_entry[state_bytes] = entry_copy
         # -------------------------------------------
 
@@ -106,12 +106,12 @@ def deduplicate_log(original_log_data):
 # =============================================================================
 def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_data):
     print(f"\n{'='*85}")
-    print(f"{'Academic-Grade Crash & Diversity Analysis (Strictly did_crash == True)':^85}")
+    print(f"{'Academic-Grade Crash & Diversity Analysis (Strictly is_physical_crash == True)':^85}")
     print(f"{'='*85}")
     
     # --- 1. Global Fuzzing Metrics (Overhead, Hit Ratio, Coverage) ---
     total_mutations = len(original_log)
-    total_valid_crashes = sum(1 for e in original_log if e.get('did_crash', False))
+    total_valid_crashes = sum(1 for e in original_log if e.get('is_physical_crash', False))
     hit_ratio = (total_valid_crashes / total_mutations * 100) if total_mutations > 0 else 0
     
     explored_unique_states = len(deduplicated_log)
@@ -163,7 +163,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     raw_survival_steps = [] 
     
     for entry in deduplicated_log:
-        if entry.get('did_crash', False) == True:
+        if entry.get('is_physical_crash', False) == True:
             state = entry.get('mutate_state')
             traj = entry.get('output_trajectory')
             depth = entry.get('parent_depth', 0)
@@ -339,7 +339,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
 def plot_generation_histogram(deduplicated_log):
     crash_generations = []
     for entry in deduplicated_log:
-        if entry.get('did_crash', False):
+        if entry.get('is_physical_crash', False):
             parent_depth = entry.get('parent_depth')
             if parent_depth is not None:
                 crash_generations.append(parent_depth + 1)

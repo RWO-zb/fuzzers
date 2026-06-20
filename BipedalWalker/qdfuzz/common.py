@@ -8,7 +8,7 @@ import pandas as pd
 from typing import Tuple, Union, Dict, List
 
 
-EXPERIMENT_SEEDS = [0]
+EXPERIMENT_SEEDS = [11,21,32,41,51]
 POP_SIZES = [100, 250, 500]
 ITERATIONS = [50, 20, 10]
 

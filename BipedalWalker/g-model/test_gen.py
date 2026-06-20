@@ -157,6 +157,11 @@ def get_real_unwrapped_env(env):
         return current_env.envs[0].unwrapped
     return current_env.unwrapped
 
+def reset_reproducible_env(env, states, env_seed):
+    """Reset env RNG before each test case so replay does not depend on RNG flow."""
+    env.seed(env_seed)
+    return env.reset(states)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", help="environment ID", type=str, default="BipedalWalkerHardcore-v3")
@@ -393,7 +398,7 @@ def main():
                 
                 # [新增] 对齐评估指标：记录环境重置时间开销
                 t0_env = time.time()
-                obs = env.reset(test_case)
+                obs = reset_reproducible_env(env, test_case, args.seed)
                 total_env_sim_time += (time.time() - t0_env)
 
                 sequences = [obs[0]]
@@ -460,6 +465,9 @@ def main():
                     'mutate_state':np.array(test_case, dtype=np.int32),
                     'did_crash': did_crash_flag,
                     'is_reward_fault': is_reward_fault_flag,
+                    'env_id': env_id,
+                    'env_seed': args.seed,
+                    'sim_steps': args.n_timesteps,
                     'elapsed_time': time.time() - fuzzing_start_time,
                     'survival_steps': episode_steps,
                     'parent_depth': 0,
@@ -522,7 +530,7 @@ def main():
             
             # [新增] 对齐评估指标：记录环境重置时间开销
             t0_env = time.time()
-            obs = env.reset(normal_case)
+            obs = reset_reproducible_env(env, normal_case, args.seed)
             total_env_sim_time += (time.time() - t0_env)
 
             sequences = [obs[0]]
@@ -565,6 +573,9 @@ def main():
                 'mutate_state': np.array(normal_case, dtype=np.int32),
                 'did_crash': did_crash_flag,
                 'is_reward_fault': is_reward_fault_flag,
+                'env_id': env_id,
+                'env_seed': args.seed,
+                'sim_steps': args.n_timesteps,
                 'elapsed_time': time.time() - fuzzing_start_time,
                 'survival_steps': episode_steps,
                 'parent_depth': 0,

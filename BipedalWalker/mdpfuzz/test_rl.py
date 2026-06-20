@@ -47,6 +47,22 @@ if __name__ == '__main__':
     parser.add_argument("--algo", choices=["tqc", "ppo"], default="tqc", help="RL algorithm/model family to test")
     parser.add_argument("--model-path", default=None, help="Optional path to the SB3 model zip")
     parser.add_argument("--vecnormalize-path", default=None, help="Optional path to vecnormalize.pkl; PPO default is auto-detected")
+    parser.add_argument(
+        "--differential-testing",
+        "--differential",
+        dest="differential_testing",
+        action="store_true",
+        default=False,
+        help="Run a reference policy on every recorded input",
+    )
+    parser.add_argument(
+        "--reference-algo",
+        choices=["tqc", "ppo"],
+        default=None,
+        help="Reference algorithm; defaults to PPO for TQC and TQC for PPO",
+    )
+    parser.add_argument("--reference-model-path", default=None, help="Optional reference SB3 model zip")
+    parser.add_argument("--reference-vecnormalize-path", default=None, help="Optional reference vecnormalize.pkl")
     
     args, unknown = parser.parse_known_args(sys.argv[4:])
 
@@ -69,7 +85,15 @@ if __name__ == '__main__':
     path = '{}_{}_{}_{}_{}'.format(result_path, k, tau, gamma, seed)
     print(f"Log Path: {path}")
     print(f"Data Collection: SaveData={args.save_data}, SaveTrans={args.save_transitions}, SavePhysics={args.save_physics}")
+    reference_algo = args.reference_algo or ("ppo" if args.algo == "tqc" else "tqc")
     print(f"Policy: algo={args.algo}, model_path={args.model_path or 'default'}, vecnormalize={args.vecnormalize_path or 'auto'}")
+    print(f"Differential Testing: {args.differential_testing}")
+    if args.differential_testing:
+        print(
+            f"Reference Policy: algo={reference_algo}, "
+            f"model_path={args.reference_model_path or 'default'}, "
+            f"vecnormalize={args.reference_vecnormalize_path or 'auto'}"
+        )
 
     # [修改] 实例化 Executor 时传入 save_physics 参数
     executor = BipedalWalkerExecutor(300, 0, save_physics=args.save_physics)
@@ -79,7 +103,23 @@ if __name__ == '__main__':
         model_path=args.model_path,
         vecnormalize_path=args.vecnormalize_path,
     )
-    fuzzer = Fuzzer(random_seed=seed, k=k, tau=tau, gamma=gamma, executor=executor)
+    reference_policy = None
+    if args.differential_testing:
+        reference_policy = executor.load_policy(
+            algo=reference_algo,
+            model_path=args.reference_model_path,
+            vecnormalize_path=args.reference_vecnormalize_path,
+        )
+    fuzzer = Fuzzer(
+        random_seed=seed,
+        k=k,
+        tau=tau,
+        gamma=gamma,
+        executor=executor,
+        reference_policy=reference_policy,
+        target_algo=args.algo,
+        reference_algo=reference_algo if args.differential_testing else None,
+    )
 
     fuzz_kwargs = {
         'n': init_budget,

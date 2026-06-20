@@ -100,7 +100,17 @@ def balance_and_save_data(X_list, y_list, output_dir, dataset_name, window_size,
 
 
 class Fuzzer():
-    def __init__(self, random_seed: int, k: int, tau: float, gamma: float, executor: Executor) -> None:
+    def __init__(
+        self,
+        random_seed: int,
+        k: int,
+        tau: float,
+        gamma: float,
+        executor: Executor,
+        reference_policy: Any = None,
+        target_algo: str = None,
+        reference_algo: str = None,
+    ) -> None:
         self.k = k
         self.tau = tau
         self.gamma = gamma
@@ -114,6 +124,9 @@ class Fuzzer():
         self.executor = executor
         self.sim_steps = self.executor.sim_steps
         self.env_seed = self.executor.env_seed
+        self.reference_policy = reference_policy
+        self.target_algo = target_algo
+        self.reference_algo = reference_algo
 
         self._set_config()
         
@@ -141,11 +154,14 @@ class Fuzzer():
             'env_seed': self.env_seed,
             'sim_steps': self.sim_steps,
             'name': 'MDPFuzz',
-            'use_case': type(self.executor).__name__
+            'use_case': type(self.executor).__name__,
+            'differential_testing': self.reference_policy is not None,
+            'target_algo': self.target_algo,
+            'reference_algo': self.reference_algo,
         }
 
     # [新增] 对齐评估指标 - 统一记录单次执行结果的辅助函数
-    def _record_evaluation(self, state, acc_reward, done, obs_seq, generation, exec_time, is_physical_crash):
+    def _record_evaluation(self, state, acc_reward, is_failure, obs_seq, generation, exec_time, is_physical_crash):
         """
         参照 enjoy_cure.py 逻辑：
         - 物理碰撞直接对应 is_physical_crash。
@@ -154,25 +170,67 @@ class Fuzzer():
         """
         elapsed = time.time() - self.fuzzing_start_time
         
-        did_crash = bool(done)
-        is_reward_fault = bool(did_crash and not is_physical_crash)
+        did_crash = bool(is_physical_crash)
+        is_reward_fault = bool(is_failure and not is_physical_crash)
+        is_failure = bool(is_physical_crash or is_reward_fault)
         
         traj_data = None
         if did_crash or is_reward_fault:
             traj_data = np.array([o[0] for o in obs_seq], dtype=np.float32).reshape(-1, 1)
 
-        self.evaluation_results.append({
+        evaluation = {
             'mutate_state': state.copy(),
             'did_crash': did_crash,
             'is_reward_fault': is_reward_fault,
+            'is_failure': is_failure,
             'is_physical_crash': is_physical_crash,
+            'reward': float(acc_reward),
             'elapsed_time': float(elapsed),
             'survival_steps': int(len(obs_seq)),
             'parent_depth': int(generation),
             'output_trajectory': traj_data
-        })
+        }
+
+        reference_exec_time = 0.0
+        if self.reference_policy is not None:
+            (
+                reference_reward,
+                reference_is_failure,
+                reference_obs_seq,
+                reference_exec_time,
+                _,
+                reference_is_physical_crash,
+            ) = self.executor.execute_policy(
+                state,
+                self.reference_policy,
+                record_physics=False,
+            )
+            reference_did_crash = bool(reference_is_physical_crash)
+            reference_is_reward_fault = bool(
+                reference_is_failure and not reference_is_physical_crash
+            )
+            reference_is_failure = bool(
+                reference_is_physical_crash or reference_is_reward_fault
+            )
+            evaluation.update({
+                'reference_did_crash': reference_did_crash,
+                'reference_is_reward_fault': reference_is_reward_fault,
+                'reference_is_failure': reference_is_failure,
+                'reference_is_physical_crash': reference_is_physical_crash,
+                'reference_reward': float(reference_reward),
+                'reference_survival_steps': int(len(reference_obs_seq)),
+                'is_differential_crash': bool(
+                    did_crash and not reference_did_crash
+                ),
+                'is_validated_differential_crash': bool(
+                    did_crash and not reference_is_failure
+                ),
+            })
+
+        self.evaluation_results.append(evaluation)
         # 累加仿真时间
-        self.total_env_sim_time += exec_time
+        self.total_env_sim_time += exec_time + reference_exec_time
+        self.total_eval_time += reference_exec_time
 
     # [新增] 对齐评估指标 - 统一保存方法
     def _finalize_evaluation_logs(self, saving_path):
@@ -186,6 +244,16 @@ class Fuzzer():
         sel_path = os.path.join(log_dir, 'selection_log.pkl')
         with open(sel_path, 'wb') as f:
             pickle.dump(self.evaluation_results, f)
+
+        differential_results = []
+        if self.reference_policy is not None:
+            differential_results = [
+                result for result in self.evaluation_results
+                if result.get('is_differential_crash', False)
+            ]
+            diff_path = os.path.join(log_dir, 'differential_log.pkl')
+            with open(diff_path, 'wb') as f:
+                pickle.dump(differential_results, f)
             
         # 2. 保存 perf_meta.pkl
         # [修改] 按照论文建议输出详细时间分层
@@ -195,7 +263,13 @@ class Fuzzer():
             'env_sim_time': float(self.total_env_sim_time),
             'generation_time': float(self.total_gen_time),
             'evaluation_time': float(self.total_eval_time),
-            'other_logic_time': float(total_wall_time - self.total_gen_time - self.total_eval_time)
+            'other_logic_time': float(total_wall_time - self.total_gen_time - self.total_eval_time),
+            'differential_testing': self.reference_policy is not None,
+            'differential_crash_count': len(differential_results),
+            'validated_differential_crash_count': sum(
+                1 for result in differential_results
+                if result.get('is_validated_differential_crash', False)
+            ),
         }
         with open(meta_path, 'wb') as f:
             pickle.dump(perf_meta, f)
@@ -240,9 +314,9 @@ class Fuzzer():
 
     def mdp(self, state: np.ndarray, policy: Any = None) -> Tuple[float, bool, np.ndarray, float, List, bool]:
         # [修改] 累加评估耗时 (仿真部分)
-        episode_reward, done, obs_seq, exec_time, transitions, is_physical_crash = self.executor.execute_policy(state, policy)
+        episode_reward, is_failure, obs_seq, exec_time, transitions, is_physical_crash = self.executor.execute_policy(state, policy)
         self.total_eval_time += exec_time
-        return episode_reward, done, obs_seq, exec_time, transitions, is_physical_crash
+        return episode_reward, is_failure, obs_seq, exec_time, transitions, is_physical_crash
 
 
     def sentivity(self, state: np.ndarray, acc_reward: float = None, policy: Any = None, generation: int = None ,**kwargs) -> Tuple[float, float, bool, List[np.ndarray], float, List, bool]:

@@ -20,7 +20,7 @@ class BipedalWalkerExecutor(Executor):
         super().__init__(sim_steps, env_seed)
         self.save_physics = save_physics
         self.crash_physics_trajectories = []
-        self.vecnormalize = None
+        self.policy_vecnormalizers = {}
 
     def generate_input(self, rng: np.random.Generator) -> np.ndarray:
         return rng.integers(low=1, high=4, size=15)
@@ -68,22 +68,25 @@ class BipedalWalkerExecutor(Executor):
 
         policy = model_classes[algo].load(str(model_path), **load_kwargs)
 
-        self.vecnormalize = None
+        vecnormalize = None
         if vecnormalize_path is None and algo == "ppo":
             candidate = Path(model_path).with_name("BipedalWalkerHardcore-v3") / "vecnormalize.pkl"
             if candidate.exists():
                 vecnormalize_path = candidate
         if vecnormalize_path:
             with open(vecnormalize_path, "rb") as f:
-                self.vecnormalize = pickle.load(f)
-            self.vecnormalize.training = False
+                vecnormalize = pickle.load(f)
+            vecnormalize.training = False
+
+        self.policy_vecnormalizers[id(policy)] = vecnormalize
 
         return policy
 
-    def normalize_observation(self, obs: np.ndarray) -> np.ndarray:
-        if self.vecnormalize is None:
+    def normalize_observation(self, obs: np.ndarray, policy: Any) -> np.ndarray:
+        vecnormalize = self.policy_vecnormalizers.get(id(policy))
+        if vecnormalize is None:
             return obs
-        return self.vecnormalize.normalize_obs(obs)
+        return vecnormalize.normalize_obs(obs)
 
     def extract_physics_state(self, env):
         base_env = env.unwrapped
@@ -112,7 +115,12 @@ class BipedalWalkerExecutor(Executor):
             
         return state_dict
 
-    def execute_policy(self, input: np.ndarray, policy: Any) -> Tuple[float, bool, np.ndarray, float, List, bool]:
+    def execute_policy(
+        self,
+        input: np.ndarray,
+        policy: Any,
+        record_physics: bool = True,
+    ) -> Tuple[float, bool, np.ndarray, float, List, bool]:
         '''
         执行策略并返回轨迹数据。
         '''
@@ -122,9 +130,9 @@ class BipedalWalkerExecutor(Executor):
         env = gym.make('BipedalWalkerHardcore-v3')
         
         try:
-            env.reset(seed=int(0)) 
+            env.reset(seed=int(self.env_seed))
         except:
-            env.seed(0)
+            env.seed(self.env_seed)
             
         obs_seq = []
         transitions = []
@@ -140,7 +148,7 @@ class BipedalWalkerExecutor(Executor):
         state = None
         episode_steps = 0
         
-        if self.save_physics:
+        if self.save_physics and record_physics:
             phys = self.extract_physics_state(env)
             if phys:
                 current_episode_physics.append(phys)
@@ -150,7 +158,7 @@ class BipedalWalkerExecutor(Executor):
         # =============================================================================
         for t in range(self.sim_steps):
             # [优化] Fast Predict：绕过 SB3 繁重的 distribution 对象实例化
-            model_obs = self.normalize_observation(obs)
+            model_obs = self.normalize_observation(obs, policy)
             obs_tensor = torch.as_tensor(model_obs).float().unsqueeze(0).to("cpu")
             with torch.no_grad():
                 # 针对 TQC / SAC 算法
@@ -162,7 +170,7 @@ class BipedalWalkerExecutor(Executor):
             
             next_obs, reward, done, info = env.step(action)
             
-            if self.save_physics:
+            if self.save_physics and record_physics:
                 phys = self.extract_physics_state(env)
                 if phys:
                     current_episode_physics.append(phys)
@@ -192,17 +200,18 @@ class BipedalWalkerExecutor(Executor):
         is_physical_crash = bool(getattr(env.unwrapped, 'game_over', False))
         
         # 2. 判定性能/奖励故障：没有发生物理跌倒，但是总得分过低
-        is_reward_fault = bool((not is_physical_crash) and (acc_reward < 10))
+        did_crash = bool(is_physical_crash)
+        is_reward_fault = bool((acc_reward < 10) and not is_physical_crash)
         
         # 总的 Crash 标志
-        is_crash = is_physical_crash or is_reward_fault
+        is_failure = bool(is_physical_crash or is_reward_fault)
 
-        if is_crash and self.save_physics:
+        if is_failure and self.save_physics and record_physics:
             if len(current_episode_physics) > 20:
                 self.crash_physics_trajectories.append({
                     "seed": input,
                     "trajectory": current_episode_physics,
-                    "fault_type": "physical_crash" if is_physical_crash else "reward_fault"
+                    "fault_type": "physical_crash" if did_crash else "reward_fault"
                 })
 
-        return acc_reward, is_crash, np.array(obs_seq), time.time() - t0, transitions, is_physical_crash
+        return acc_reward, is_failure, np.array(obs_seq), time.time() - t0, transitions, is_physical_crash

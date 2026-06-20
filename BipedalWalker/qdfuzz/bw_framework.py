@@ -421,6 +421,9 @@ class Framework():
                 'mutate_state': mutated_input.copy(),
                 'did_crash': eval_info['did_crash'],
                 'is_reward_fault': eval_info['is_reward_fault'],
+                'env_id': eval_info['env_id'],
+                'env_seed': eval_info['env_seed'],
+                'sim_steps': eval_info['sim_steps'],
                 'elapsed_time': time.time() - fuzzing_start_time,
                 'survival_steps': eval_info['survival_steps'],
                 'parent_depth': parent_mutation_count,
@@ -589,6 +592,9 @@ class Framework():
                 'mutate_state': input.copy(),
                 'did_crash': eval_info['did_crash'],
                 'is_reward_fault': eval_info['is_reward_fault'],
+                'env_id': eval_info['env_id'],
+                'env_seed': eval_info['env_seed'],
+                'sim_steps': eval_info['sim_steps'],
                 'elapsed_time': time.time() - start_time,
                 'survival_steps': eval_info['survival_steps'],
                 'parent_depth': 0,
@@ -768,6 +774,9 @@ class Framework():
                         'mutate_state': ind.copy(),
                         'did_crash': eval_info['did_crash'],
                         'is_reward_fault': eval_info['is_reward_fault'],
+                        'env_id': eval_info['env_id'],
+                        'env_seed': eval_info['env_seed'],
+                        'sim_steps': eval_info['sim_steps'],
                         'elapsed_time': time.time() - loop_start_time,
                         'survival_steps': eval_info['survival_steps'],
                         'parent_depth': mutation_counts[i],
@@ -974,15 +983,20 @@ if __name__ == '__main__':
     k = 3
     novelty_threshold = 0.005
 
-    results_fp = 'results/bw'
-    if not os.path.exists(results_fp):
-        os.makedirs(results_fp)
+    run_tag = time.strftime("%Y%m%d-%H%M%S")
+    results_root = os.path.join('results', 'bw', f'run_{run_tag}')
 
     for seed in EXPERIMENT_SEEDS:
         print(f'Seed {seed} starts.')
         for expert_indices in EXPERT_INDICES:
             print(f"--- Running MAP-Elites ---")
+            desc_tag = 'desc_' + '_'.join(map(str, expert_indices))
+            results_fp = os.path.join(results_root, f'seed_{seed}', desc_tag)
+            os.makedirs(results_fp, exist_ok=True)
+
             f = MAPElitesFramework(seed, cell_granularity, descriptors=expert_indices, name='MAP-Elites')
+            f.config['experiment_seed'] = seed
+            f.config['results_dir'] = results_fp
             
             f.test_policy(
                 model=model, 

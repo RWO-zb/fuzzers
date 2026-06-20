@@ -156,6 +156,11 @@ def get_raw_obs_from_env(env, obs):
         return obs
     return norm_env.unnormalize_obs(obs)
 
+def reset_reproducible_env(env, states, env_seed):
+    """Reset env RNG before each test case so replay does not depend on RNG flow."""
+    env.seed(env_seed)
+    return env.reset(states)
+
 # =============================================================================
 # --- Main Execution Function ---
 # =============================================================================
@@ -317,7 +322,7 @@ def main():
         states = np.random.randint(low=1, high=4, size=15)
         state = None
         episode_reward = 0.0
-        obs = env.reset(states)
+        obs = reset_reproducible_env(env, states, args.seed)
         sequences = [obs[0]] 
         for _ in range(args.n_timesteps):
             # [替换] 使用极速接口规避分布开销
@@ -331,7 +336,7 @@ def main():
         delta_states = np.random.choice(2, 15, p=[0.9, 0.1])
         if np.sum(delta_states) == 0: delta_states[0] = 1
         mutate_states = np.clip(np.remainder(states + delta_states, 4), 1, 3)
-        obs = env.reset(mutate_states)
+        obs = reset_reproducible_env(env, mutate_states, args.seed)
         for _ in range(args.n_timesteps):
             # [替换] 使用极速接口
             action = fast_predict(model, obs)
@@ -372,7 +377,7 @@ def main():
         # --- 5b. Physics Simulation (with Timer) ---
         sim_start_time = time.time()
         
-        obs = env.reset(mutate_states)
+        obs = reset_reproducible_env(env, mutate_states, args.seed)
         
         rnd_sequences = [obs[0]] 
         todynet_sequences = []   
@@ -498,6 +503,9 @@ def main():
             'parent_depth': current_mutation_depth,
             'did_crash': did_crash,
             'is_reward_fault': is_reward_fault, 
+            'env_id': env_id,
+            'env_seed': args.seed,
+            'sim_steps': args.n_timesteps,
             'elapsed_time': time.time() - start_fuzz_time,
             'survival_steps': episode_steps, 
             'output_trajectory': np.array(rnd_sequences, dtype=np.float32) if (did_crash or is_reward_fault) else None
