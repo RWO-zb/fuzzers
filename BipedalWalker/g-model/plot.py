@@ -10,6 +10,7 @@ from sklearn.metrics import silhouette_score
 from scipy.spatial.distance import cdist, pdist
 from collections import Counter
 import os
+import math
 
 # =============================================================================
 # --- Global Configuration & Constants ---
@@ -19,6 +20,9 @@ PERF_FILE = 'perf_meta.pkl'
 PLOT_3_FILE = 'crash_generation_histogram.png'
 PLOT_4_FILE = 'unique_crashes_over_time.png'       
 PLOT_6_FILE = 'survival_steps_boxplot.png'
+
+G_MODEL_STEP_SIZE = 50
+G_MODEL_GENERATIVE_BATCH_SIZE = 50
 
 # The theoretical state space of BipedalWalker mutation (15 dims, 3 values each)
 THEORETICAL_STATE_SPACE = 3**15 
@@ -38,6 +42,34 @@ def load_data(file_path):
         print(f"Error loading pickle: {e}")
         return None
 
+def infer_gmodel_step_from_index(index, step_size=G_MODEL_STEP_SIZE, batch_size=G_MODEL_GENERATIVE_BATCH_SIZE):
+    """Infer test_gen.py cur_step for old selection_log entries without a saved step field."""
+    if index < step_size:
+        return index
+
+    offset = index - step_size
+    cycle_size = batch_size + step_size - 1
+    cycle = offset // cycle_size
+    pos = offset % cycle_size
+    boundary_step = (cycle + 1) * step_size
+
+    if pos < batch_size:
+        return boundary_step
+    return boundary_step + (pos - batch_size) + 1
+
+def calculate_generation_from_step(step, step_size=G_MODEL_STEP_SIZE):
+    """Map G-Model step to generation: 0-50 -> 1, 51-100 -> 2, ..."""
+    if step is None:
+        return None
+    return max(1, math.ceil(step / step_size))
+
+def get_gmodel_generation(entry, index=None):
+    """Return generation for both newer logs with step and old selection_log-only data."""
+    step = entry.get('step')
+    if step is None and index is not None:
+        step = infer_gmodel_step_from_index(index)
+    return calculate_generation_from_step(step)
+
 # =============================================================================
 # --- Data Deduplication Module ---
 # Removes duplicated input states from the log to ensure we only analyze 
@@ -51,7 +83,7 @@ def deduplicate_log(original_log_data):
     int32_size = 15 * np.dtype(np.int32).itemsize
     int64_size = 15 * np.dtype(np.int64).itemsize
 
-    for entry in original_log_data:
+    for index, entry in enumerate(original_log_data):
         state = entry.get('mutate_state')
         if state is None: continue
             
@@ -75,6 +107,8 @@ def deduplicate_log(original_log_data):
             
         entry_copy = entry.copy() 
         entry_copy['mutate_state'] = state_bytes
+        entry_copy['gmodel_step'] = entry_copy.get('step', infer_gmodel_step_from_index(index))
+        entry_copy['generation'] = get_gmodel_generation(entry_copy, index)
 
         # --- [核心修复：解决盲目去重导致真实 Crash 被丢弃的问题] ---
         if state_bytes not in state_to_entry:
@@ -141,6 +175,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
             state = entry.get('mutate_state')
             traj = entry.get('output_trajectory')
             depth = entry.get('parent_depth', 0)
+            generation = entry.get('generation')
             t = entry.get('elapsed_time', 0.0)
             
             survival_len = entry.get('survival_steps', len(traj) if traj is not None else 0)
@@ -154,7 +189,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
                 inputs.append(state_arr)
                 outputs.append(traj)
                 times.append(t)
-                depths.append(depth + 1)
+                depths.append(generation if generation is not None else depth + 1)
                 raw_survival_steps.append(survival_len) 
                 
     unique_crash_count = len(inputs)
@@ -312,9 +347,11 @@ def plot_generation_histogram(deduplicated_log):
     crash_generations = []
     for entry in deduplicated_log:
         if entry.get('did_crash', False):
-            parent_depth = entry.get('parent_depth')
-            if parent_depth is not None:
-                crash_generations.append(parent_depth + 1)
+            generation = entry.get('generation')
+            if generation is None:
+                generation = get_gmodel_generation(entry)
+            if generation is not None:
+                crash_generations.append(generation)
             
     if not crash_generations: return
 

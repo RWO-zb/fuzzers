@@ -1,6 +1,5 @@
 import argparse
 import ast
-import csv
 import json
 import os
 import queue
@@ -9,6 +8,8 @@ import re
 import sys
 import time
 import traceback
+from collections import defaultdict
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -680,16 +681,9 @@ class CarlaReplayer:
 
 def save_outputs(result_dir: Path, prefix: str, rows: List[Dict[str, Any]]) -> None:
     json_path = result_dir / f"{prefix}_results.json"
-    csv_path = result_dir / f"{prefix}_results.csv"
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(rows, handle, indent=2)
-    if rows:
-        with csv_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(rows)
     print(f"Saved JSON to {json_path}")
-    print(f"Saved CSV to {csv_path}")
 
 
 def build_input_judgements(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -743,16 +737,98 @@ def build_input_judgements(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def save_input_judgements(result_dir: Path, prefix: str, judgements: List[Dict[str, Any]]) -> None:
     json_path = result_dir / f"{prefix}_input_judgements.json"
-    csv_path = result_dir / f"{prefix}_input_judgements.csv"
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(judgements, handle, indent=2)
-    if judgements:
-        with csv_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(judgements[0].keys()))
-            writer.writeheader()
-            writer.writerows(judgements)
     print(f"Saved input judgements JSON to {json_path}")
-    print(f"Saved input judgements CSV to {csv_path}")
+
+
+def count_unique_inputs(rows: Iterable[Dict[str, Any]]) -> int:
+    return len({(row.get("source_index"), row.get("task_id")) for row in rows})
+
+
+def build_markdown_summary(
+    result_dir: Path,
+    source_agent: str,
+    target_agents: List[str],
+    rows: List[Dict[str, Any]],
+    judgements: List[Dict[str, Any]],
+) -> str:
+    verdict_counts = {
+        "completable": sum(row["verdict"] == "completable" for row in judgements),
+        "incompletable": sum(row["verdict"] == "incompletable" for row in judgements),
+        "inconclusive": sum(row["verdict"] == "inconclusive" for row in judgements),
+    }
+    valid_replay_rows = [row for row in rows if bool(row.get("target_valid_replay", True))]
+    invalid_replay_rows = [row for row in rows if not bool(row.get("target_valid_replay", True))]
+    validated_rows = [
+        row for row in rows if bool(row.get("is_validated_differential_failure"))
+    ]
+
+    grouped_by_agent: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped_by_agent[str(row.get("target_agent", "missing"))].append(row)
+
+    lines = [
+        "# Post-hoc CARLA Replay Summary",
+        "",
+        f"- Generated at: `{datetime.now().isoformat(timespec='seconds')}`",
+        f"- Result directory: `{result_dir}`",
+        f"- Source agent label: `{source_agent}`",
+        f"- Target agents replayed: `{', '.join(target_agents)}`",
+        "",
+        "## Input-level Judgement",
+        "",
+        f"- Unique input total: **{len(judgements)}**",
+        f"- Completable: **{verdict_counts['completable']}**",
+        f"- Incompletable: **{verdict_counts['incompletable']}**",
+        f"- Inconclusive: **{verdict_counts['inconclusive']}**",
+        "",
+        "## Replay Rows",
+        "",
+        f"- Replay row total: **{len(rows)}**",
+        f"- Valid replay rows: **{len(valid_replay_rows)}**",
+        f"- Invalid replay rows: **{len(invalid_replay_rows)}**",
+        "- Validated differential failure rows: "
+        f"**{len(validated_rows)}**",
+        "- Validated differential failure unique inputs: "
+        f"**{count_unique_inputs(validated_rows)}**",
+        "",
+        "## Per Target Agent",
+        "",
+        "| target_agent | replay_rows | unique_inputs | target_success_rows | validated_differential_failure_rows | invalid_replay_rows |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for agent_name in sorted(grouped_by_agent):
+        agent_rows = grouped_by_agent[agent_name]
+        lines.append(
+            f"| {agent_name} | {len(agent_rows)} | "
+            f"{count_unique_inputs(agent_rows)} | "
+            f"{sum(bool(row.get('target_success')) for row in agent_rows)} | "
+            f"{sum(bool(row.get('is_validated_differential_failure')) for row in agent_rows)} | "
+            f"{sum(not bool(row.get('target_valid_replay', True)) for row in agent_rows)} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def save_markdown_summary(
+    result_dir: Path,
+    prefix: str,
+    source_agent: str,
+    target_agents: List[str],
+    rows: List[Dict[str, Any]],
+    judgements: List[Dict[str, Any]],
+) -> None:
+    markdown_path = result_dir / f"{prefix}_summary.md"
+    markdown = build_markdown_summary(
+        result_dir=result_dir,
+        source_agent=source_agent,
+        target_agents=target_agents,
+        rows=rows,
+        judgements=judgements,
+    )
+    markdown_path.write_text(markdown, encoding="utf-8")
+    print(f"Saved Markdown summary to {markdown_path}")
 
 
 def parse_target_agents(args: argparse.Namespace) -> List[str]:
@@ -877,6 +953,14 @@ def main() -> int:
     save_outputs(output_dir, args.output_prefix, results)
     input_judgements = build_input_judgements(results)
     save_input_judgements(output_dir, args.output_prefix, input_judgements)
+    save_markdown_summary(
+        output_dir,
+        args.output_prefix,
+        args.source_agent,
+        target_agents,
+        results,
+        input_judgements,
+    )
     print_summary(args.source_agent, target_agents, results)
     return 0
 

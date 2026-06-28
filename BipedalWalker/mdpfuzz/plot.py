@@ -161,6 +161,8 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     times = []
     depths = []
     raw_survival_steps = [] 
+    trajectory_dims = Counter()
+    trajectory_length_mismatches = 0
     
     for entry in deduplicated_log:
         if entry.get('is_physical_crash', False) == True:
@@ -176,9 +178,16 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
                     state_arr = np.frombuffer(state, dtype=np.int32 if len(state)==60 else np.int64)
                 else:
                     state_arr = np.array(state)
+                traj_arr = np.asarray(traj)
+                if traj_arr.ndim >= 2:
+                    trajectory_dims[int(traj_arr.shape[1])] += 1
+                else:
+                    trajectory_dims[0] += 1
+                if len(traj_arr) != survival_len + 1:
+                    trajectory_length_mismatches += 1
                     
                 inputs.append(state_arr)
-                outputs.append(traj)
+                outputs.append(traj_arr)
                 times.append(t)
                 depths.append(depth + 1)
                 raw_survival_steps.append(survival_len) 
@@ -209,6 +218,8 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     print(f"  Survival Steps (Depth) - Mean:   {np.mean(raw_survival_steps):.1f} steps")
     print(f"  Survival Steps (Depth) - Median: {np.median(raw_survival_steps):.1f} steps")
     print(f"  Survival Steps Range:            [{np.min(raw_survival_steps)}, {np.max(raw_survival_steps)}] steps\n")
+    print(f"  Output Trajectory Dimensions:    {dict(sorted(trajectory_dims.items()))}")
+    print(f"  Trajectory Length Mismatches:    {trajectory_length_mismatches} (expected len == survival_steps + 1)\n")
     
     cumulative_crashes = np.arange(1, len(times_hrs) + 1)
     plt.figure(figsize=(12, 7))

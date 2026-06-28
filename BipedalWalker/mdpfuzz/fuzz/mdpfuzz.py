@@ -166,7 +166,7 @@ class Fuzzer():
         参照 enjoy_cure.py 逻辑：
         - 物理碰撞直接对应 is_physical_crash。
         - 奖励故障对应 crash且非物理跌倒。
-        - 轨迹数据强制转为 2D (steps, 1) 适配 test1.py。
+        - 轨迹数据保存完整 observation 序列，格式为 initial_obs + each next_obs。
         """
         elapsed = time.time() - self.fuzzing_start_time
         
@@ -176,7 +176,11 @@ class Fuzzer():
         
         traj_data = None
         if did_crash or is_reward_fault:
-            traj_data = np.array([o[0] for o in obs_seq], dtype=np.float32).reshape(-1, 1)
+            traj_data = np.asarray(obs_seq, dtype=np.float32)
+        survival_steps = max(0, len(obs_seq) - 1)
+        trajectory_obs_dim = None
+        if traj_data is not None and traj_data.ndim >= 2:
+            trajectory_obs_dim = int(traj_data.shape[1])
 
         evaluation = {
             'mutate_state': state.copy(),
@@ -186,9 +190,13 @@ class Fuzzer():
             'is_physical_crash': is_physical_crash,
             'reward': float(acc_reward),
             'elapsed_time': float(elapsed),
-            'survival_steps': int(len(obs_seq)),
+            'survival_steps': int(survival_steps),
             'parent_depth': int(generation),
-            'output_trajectory': traj_data
+            'output_trajectory': traj_data,
+            'trajectory_format': 'raw_full_observation',
+            'trajectory_includes_initial_obs': True,
+            'trajectory_obs_dim': trajectory_obs_dim,
+            'trajectory_len': int(len(obs_seq)),
         }
 
         reference_exec_time = 0.0

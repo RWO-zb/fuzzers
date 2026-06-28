@@ -134,7 +134,6 @@ class BipedalWalkerExecutor(Executor):
         except:
             env.seed(self.env_seed)
             
-        obs_seq = []
         transitions = []
         
         current_episode_physics = []
@@ -144,6 +143,7 @@ class BipedalWalkerExecutor(Executor):
             obs = env.reset(input)
         except TypeError:
             obs = env.reset()
+        obs_seq = [obs.copy()]
         
         state = None
         episode_steps = 0
@@ -187,7 +187,7 @@ class BipedalWalkerExecutor(Executor):
             
             episode_steps += 1
             acc_reward += reward
-            obs_seq.append(obs)
+            obs_seq.append(next_obs.copy())
             
             obs = next_obs
             
