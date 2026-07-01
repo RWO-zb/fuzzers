@@ -7,16 +7,40 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 from scipy.spatial.distance import cdist, pdist
 from collections import Counter
+import json
 import os
 
 INPUT_CSV = 'summary.csv'
+POSTHOC_JUDGEMENTS = 'seqfuzz1022/posthoc_carl_replay_input_judgements.json'
 PLOT_3_FILE = 'crash_generation_histogram.png'
 PLOT_4_FILE = 'unique_crashes_over_time.png'       
 PLOT_6_FILE = 'survival_steps_boxplot.png'
 
 # Ego behavior features saved by get_enhanced_state_vector:
 # x, y, forward_x, forward_y, velocity_x/y/z, acceleration_x/y/z, route command.
-OUTPUT_BEHAVIOR_COLS = [0, 1, 3, 4, 6, 7, 8, 9, 10, 11, 12]
+OUTPUT_BEHAVIOR_COLS = [0, 1, 3, 4, 6, 7, 9, 10]
+
+def load_incompletable_keys(path):
+    if not os.path.exists(path):
+        print(f"Warning: posthoc judgement file not found: {path}")
+        return set()
+
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            rows = json.load(f)
+    except Exception as e:
+        print(f"Warning: failed to load posthoc judgements from {path}: {e}")
+        return set()
+
+    keys = set()
+    for row in rows:
+        if row.get('verdict') == 'incompletable' or row.get('is_incompletable') is True:
+            try:
+                keys.add((int(row['source_index']), str(row.get('task_id', ''))))
+            except (KeyError, TypeError, ValueError):
+                continue
+    print(f"Loaded {len(keys)} incompletable posthoc cases from {path}")
+    return keys
 
 def parse_input_features(input_str):
     """
@@ -35,25 +59,19 @@ def parse_input_features(input_str):
         ego_vals = [float(x) for x in ego_part.split(',') if x]
         
         # 2. NPC Features
+        max_npcs = 30
         npc_part = parts[1].split(':')[1]
-        if not npc_part or npc_part == 'None':
-            npc_feats = [0.0, 0.0, 0.0, 0.0, 0.0]
-        else:
+        npc_coords = []
+        if npc_part and npc_part != 'None':
             raw_nums = npc_part.replace('(', '').replace(')', '').split(',')
             coords = [float(x) for x in raw_nums if x]
-            
-            if not coords:
-                npc_feats = [0.0, 0.0, 0.0, 0.0, 0.0]
-            else:
-                xs = coords[0::2]
-                ys = coords[1::2]
-                npc_feats = [
-                    float(len(xs)),      # Count
-                    np.mean(xs),         # Mean X
-                    np.mean(ys),         # Mean Y
-                    np.std(xs) if len(xs) > 1 else 0.0, # Std X
-                    np.std(ys) if len(ys) > 1 else 0.0  # Std Y
-                ]
+            npc_coords = [(coords[i], coords[i + 1]) for i in range(0, len(coords) - 1, 2)]
+
+        npc_coords = sorted(npc_coords)[:max_npcs]
+        npc_feats = [float(len(npc_coords))]
+        for x, y in npc_coords:
+            npc_feats.extend([x, y])
+        npc_feats.extend([0.0, 0.0] * (max_npcs - len(npc_coords)))
                 
         return np.array(ego_vals + npc_feats)
     except:
@@ -64,6 +82,7 @@ def load_data(csv_path):
         print(f"Error: File not found: {csv_path}")
         return None
     try:
+        incompletable_keys = load_incompletable_keys(POSTHOC_JUDGEMENTS)
         df = pd.read_csv(csv_path)
         # Use the same evaluation slice for every method: fuzzing phase only.
         if 'phase' in df.columns:
@@ -73,11 +92,15 @@ def load_data(csv_path):
             df = df.sort_values(by='elapsed_time')
             
         original_log = []
-        for _, row in df.iterrows():
+        for source_index, row in df.iterrows():
             entry = row.to_dict()
+            task_id = str(entry.get('task_id', source_index))
             is_success = entry.get('success') in [True, 'True', 'true', 1, '1']
-            # This is failure diversity: every non-success episode is included.
-            entry['is_crash'] = not is_success
+            is_incompletable = (int(source_index), task_id) in incompletable_keys
+            entry['source_index'] = int(source_index)
+            entry['is_raw_failure'] = not is_success
+            entry['is_incompletable'] = is_incompletable
+            entry['is_crash'] = (not is_success) and (not is_incompletable)
             raw_input = entry.get('input_post')
             entry['features'] = parse_input_features(raw_input) if pd.notna(raw_input) else None
             original_log.append(entry)
@@ -114,13 +137,17 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     
     # --- 1. Global Fuzzing Metrics ---
     total_mutations = len(original_log)
+    total_raw_failures = sum(1 for e in original_log if e.get('is_raw_failure', False))
+    excluded_incompletable = sum(1 for e in original_log if e.get('is_raw_failure', False) and e.get('is_incompletable', False))
     total_valid_crashes = sum(1 for e in original_log if e['is_crash'])
     hit_ratio = (total_valid_crashes / total_mutations * 100) if total_mutations > 0 else 0
     
     print("[1. Global Fuzzing Metrics]")
     print(f"  Total Mutations Executed:   {total_mutations}")
+    print(f"  Raw Failure Mutations:      {total_raw_failures}")
+    print(f"  Excluded Incompletable:     {excluded_incompletable}")
     print(f"  Valid Crash Mutations:      {total_valid_crashes}")
-    print(f"  Hit Ratio (Valid Rate):     {hit_ratio:.2f}%  <-- % of mutations leading to a crash\n")
+    print(f"  Hit Ratio (Filtered Rate):  {hit_ratio:.2f}%  <-- % of mutations leading to a valid crash\n")
 
     # --- 2. Data Extraction for Crash Analysis ---
     inputs = []
@@ -189,6 +216,20 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     
     max_elapsed = max([float(e.get('elapsed_time', start_time)) for e in original_log] + [start_time])
     max_time_hrs = (max_elapsed - start_time) / 3600.0
+    cumulative_crashes = np.arange(1, len(times_hrs) + 1)
+    auc_end_time = max_time_hrs if max_time_hrs > 0 else times_hrs[-1]
+    crash_auc_x_steps = [0.0]
+    crash_auc_y_steps = [0]
+    for i, t_hr in enumerate(times_hrs):
+        crash_auc_x_steps.extend([t_hr, t_hr])
+        crash_auc_y_steps.extend([crash_auc_y_steps[-1], i + 1])
+    if auc_end_time > crash_auc_x_steps[-1]:
+        crash_auc_x_steps.append(auc_end_time)
+        crash_auc_y_steps.append(crash_auc_y_steps[-1])
+    try:
+        unique_crash_auc = np.trapezoid(crash_auc_y_steps, crash_auc_x_steps)
+    except AttributeError:
+        unique_crash_auc = np.trapz(crash_auc_y_steps, crash_auc_x_steps)
     
     # --- 3. Basic Efficiency & Survival Depth Analysis ---
     intervals_hrs = np.diff(np.insert(times_hrs, 0, 0.0))
@@ -197,13 +238,13 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
     
     print("[2. Basic Crash Efficiency & Episode Depth]")
     print(f"  Total Unique Crashes Discovered: {unique_crash_count}")
+    print(f"  Unique Crash AUC (Filtered):   {unique_crash_auc:.4f} crash*hours")
     print(f"  Mean Interval per Crash:         {mean_interval:.4f} hours (~{mean_interval*3600:.1f} sec)")
     print(f"  Median Interval per Crash:       {median_interval:.4f} hours (~{median_interval*3600:.1f} sec)")
     print(f"  Speed at Crash - Mean:           {np.mean(crash_speeds):.2f} m/s")
     print(f"  Steering Instability - Mean:     {np.mean(crash_steers):.4f} rad")
     print(f"  Distance to Target - Mean:       {np.mean(crash_distances):.1f} m\n")
     
-    cumulative_crashes = np.arange(1, len(times_hrs) + 1)
     plt.figure(figsize=(12, 7))
     plt.step(times_hrs, cumulative_crashes, where='post', color='darkred', linewidth=2, label='Unique Crash Inputs')
     plt.fill_between(times_hrs, cumulative_crashes, step='post', color='darkred', alpha=0.1)
@@ -256,7 +297,7 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log):
                 kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
                 labels = kmeans.fit_predict(reduced_data)
                 score = silhouette_score(reduced_data, labels)
-                if score >= best_score * 1.20:
+                if score > best_score and (score - best_score) >= abs(best_score) * 0.20:
                     best_score = score
                     best_k = k
                     
