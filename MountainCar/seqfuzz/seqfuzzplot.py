@@ -37,6 +37,33 @@ RANGES = {
 
 # MountainCar theoretical state space grid (50x50)
 THEORETICAL_STATE_SPACE = 50 * 50 
+UNIQUE_CRASH_AUC_HOURS = 12.0
+
+def calculate_unique_crash_auc(crash_times_sec, horizon_hours=UNIQUE_CRASH_AUC_HOURS):
+    times_hrs = []
+    for t in crash_times_sec:
+        if t is None:
+            continue
+        try:
+            t = float(t)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 <= t <= horizon_hours * 3600.0:
+            times_hrs.append(t / 3600.0)
+
+    if not times_hrs:
+        return 0, 0.0, 0.0
+
+    times_hrs = np.asarray(sorted(times_hrs), dtype=float)
+    x_axis = np.concatenate(([0.0], times_hrs, [horizon_hours]))
+    y_axis = np.concatenate((
+        [0.0],
+        np.arange(1, len(times_hrs) + 1, dtype=float),
+        [float(len(times_hrs))],
+    ))
+    auc_value = float(np.sum(np.diff(x_axis) * y_axis[:-1]))
+    mean_auc = auc_value / horizon_hours if horizon_hours > 0 else 0.0
+    return len(times_hrs), auc_value, mean_auc
 
 def get_grid_index(values, ranges, grid_size):
     indices = []
@@ -91,6 +118,7 @@ def load_seqfuzz_rq2_data(pkl_file, obs_file):
             'sequence': obs_seqs[i],
             'is_crash': entry.get('crashed', False),
             'seed_id': entry.get('root_seed'),
+            'crash_key': entry.get('state') if entry.get('state') is not None else entry.get('root_seed'),
             'event_time': float(entry.get('crash_time', 0.0) or 0.0),
         })
     return rq2_data
@@ -99,17 +127,21 @@ def calculate_rq2_trends(rq2_data, max_fuzz_cases=None):
     visited_state_bins = set()
     visited_behavior_bins = set()
     visited_fault_bins = set()
+    unique_crash_ids = set()
     crash_source_seed_ids = set()
     history = {
         'episodes': [],
         'state_coverage': [],
         'behavior_diversity': [],
         'fault_diversity': [],
+        'unique_crashes': [],
         'unique_crash_source_seeds': [],
+        'unique_crash_mean_ttd': [],
         'fault_mean_ttd': [],
         'crash_source_mean_ttd': [],
         'event_times': [],
     }
+    unique_crash_first_seen_times = {}
     fault_first_seen_times = {}
     crash_source_first_seen_times = {}
 
@@ -146,11 +178,23 @@ def calculate_rq2_trends(rq2_data, max_fuzz_cases=None):
                 if seed_id not in crash_source_first_seen_times:
                     crash_source_first_seen_times[seed_id] = event_time
 
+            crash_key = item.get('crash_key')
+            if crash_key is None:
+                crash_key = seed_id
+            if crash_key is not None:
+                if isinstance(crash_key, (np.ndarray, list)):
+                    crash_key = tuple(np.asarray(crash_key).flatten())
+                unique_crash_ids.add(crash_key)
+                if crash_key not in unique_crash_first_seen_times:
+                    unique_crash_first_seen_times[crash_key] = event_time
+
         history['episodes'].append(len(history['episodes']) + 1)
         history['state_coverage'].append(len(visited_state_bins))
         history['behavior_diversity'].append(len(visited_behavior_bins))
         history['fault_diversity'].append(len(visited_fault_bins))
+        history['unique_crashes'].append(len(unique_crash_ids))
         history['unique_crash_source_seeds'].append(len(crash_source_seed_ids))
+        history['unique_crash_mean_ttd'].append(np.mean(list(unique_crash_first_seen_times.values())) if unique_crash_first_seen_times else 0.0)
         history['fault_mean_ttd'].append(np.mean(list(fault_first_seen_times.values())) if fault_first_seen_times else 0.0)
         history['crash_source_mean_ttd'].append(np.mean(list(crash_source_first_seen_times.values())) if crash_source_first_seen_times else 0.0)
         history['event_times'].append(event_time)
@@ -175,6 +219,8 @@ def calculate_auc_metrics(history):
             'behavior_mean_auc': 0.0,
             'fault_auc': 0.0,
             'fault_mean_auc': 0.0,
+            'unique_crash_auc': 0.0,
+            'unique_crash_mean_auc': 0.0,
             'crash_source_auc': 0.0,
             'crash_source_mean_auc': 0.0,
         }
@@ -194,8 +240,22 @@ def calculate_auc_metrics(history):
         mean_auc = auc_value / x_axis[-1] if x_axis[-1] > 0 else 0.0
         return auc_value, mean_auc
 
+    def step_curve_auc(key, horizon_hours=UNIQUE_CRASH_AUC_HOURS):
+        values_all = np.asarray(history[key], dtype=float)[order]
+        mask = x_axis <= horizon_hours
+        times = x_axis[mask]
+        values = values_all[mask]
+        if len(times) == 0:
+            return 0.0, 0.0
+        step_x = np.concatenate(([0.0], times, [horizon_hours]))
+        step_y = np.concatenate(([0.0], values, [values[-1]]))
+        auc_value = float(np.sum(np.diff(step_x) * step_y[:-1]))
+        mean_auc = auc_value / horizon_hours if horizon_hours > 0 else 0.0
+        return auc_value, mean_auc
+
     behavior_auc, behavior_mean_auc = curve_auc('behavior_diversity')
     fault_auc, fault_mean_auc = curve_auc('fault_diversity')
+    unique_crash_auc, unique_crash_mean_auc = step_curve_auc('unique_crashes')
     crash_source_auc, crash_source_mean_auc = curve_auc('unique_crash_source_seeds')
 
     return {
@@ -203,6 +263,8 @@ def calculate_auc_metrics(history):
         'behavior_mean_auc': behavior_mean_auc,
         'fault_auc': fault_auc,
         'fault_mean_auc': fault_mean_auc,
+        'unique_crash_auc': unique_crash_auc,
+        'unique_crash_mean_auc': unique_crash_mean_auc,
         'crash_source_auc': crash_source_auc,
         'crash_source_mean_auc': crash_source_mean_auc,
     }
@@ -221,6 +283,10 @@ def print_single_rq2_metrics(history, label):
     print(f"    Fault Diversity Time-AUC:         {auc_metrics['fault_auc']:.4f}")
     print(f"    Fault Diversity Mean Time-AUC:    {auc_metrics['fault_mean_auc']:.4f}")
     print(f"    Fault Diversity Mean TTD:    {history['fault_mean_ttd'][-1]:.4f} sec")
+    print(f"    Unique Crashes: {history['unique_crashes'][-1]}")
+    print(f"    Unique Crash Time-AUC:      {auc_metrics['unique_crash_auc']:.4f} crash*hours")
+    print(f"    Unique Crash Mean Time-AUC: {auc_metrics['unique_crash_mean_auc']:.4f} crashes")
+    print(f"    Unique Crash Mean TTD: {history['unique_crash_mean_ttd'][-1]:.4f} sec")
     print(f"    Crash Source Seeds: {history['unique_crash_source_seeds'][-1]}")
     print(f"    Crash Source Seeds Time-AUC:      {auc_metrics['crash_source_auc']:.4f}")
     print(f"    Crash Source Seeds Mean Time-AUC: {auc_metrics['crash_source_mean_auc']:.4f}")
@@ -411,6 +477,12 @@ def plot_cumulative_crashes_from_pkl(pkl_file):
     
     print(f"\n[Plot] Cumulative Unique Crashes plot drawn successfully using raw logs.")
     print(f"       -> Actual total unique crashes recorded in plot: {len(times)}\n")
+    auc_count, unique_crash_auc, unique_crash_mean_auc = calculate_unique_crash_auc(times, MAX_H)
+    print(f"[Unique Crash AUC]")
+    print(f"  Window:                   {MAX_H:.1f} hours")
+    print(f"  Unique Crashes in Window: {auc_count}")
+    print(f"  Time-AUC:                 {unique_crash_auc:.4f} crash*hours")
+    print(f"  Mean Time-AUC:            {unique_crash_mean_auc:.4f} crashes\n")
 
 def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_data):
     print(f"\n{'='*85}")

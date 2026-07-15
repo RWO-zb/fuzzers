@@ -42,6 +42,29 @@ def load_data(file_path):
         print(f"Error loading pickle: {e}")
         return None
 
+def calculate_unique_crash_auc(times_hrs, max_time_hrs):
+    if len(times_hrs) == 0 or max_time_hrs <= 0:
+        return 0.0, 0.0
+
+    x_steps = [0.0]
+    y_steps = [0]
+    for i, t_hr in enumerate(np.sort(times_hrs)):
+        x_steps.extend([t_hr, t_hr])
+        y_steps.extend([y_steps[-1], i + 1])
+
+    if max_time_hrs > x_steps[-1]:
+        x_steps.append(max_time_hrs)
+        y_steps.append(y_steps[-1])
+
+    try:
+        auc_val = np.trapezoid(y_steps, x_steps)
+    except AttributeError:
+        auc_val = np.trapz(y_steps, x_steps)
+
+    max_auc = max_time_hrs * len(times_hrs)
+    normalized_auc = auc_val / max_auc if max_auc > 0 else 0.0
+    return auc_val, normalized_auc
+
 def infer_gmodel_step_from_index(index, step_size=G_MODEL_STEP_SIZE, batch_size=G_MODEL_GENERATIVE_BATCH_SIZE):
     """Infer test_gen.py cur_step for old selection_log entries without a saved step field."""
     if index < step_size:
@@ -137,13 +160,11 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     print(f"{'Academic-Grade Crash & Diversity Analysis (Strictly did_crash == True)':^85}")
     print(f"{'='*85}")
     
-    # --- 1. Global Fuzzing Metrics (Overhead, Hit Ratio, Coverage) ---
-    total_mutations = len(original_log)
-    total_valid_crashes = sum(1 for e in original_log if e.get('did_crash', False))
-    hit_ratio = (total_valid_crashes / total_mutations * 100) if total_mutations > 0 else 0
-    
-    explored_unique_states = len(deduplicated_log)
-    state_space_coverage = (explored_unique_states / THEORETICAL_STATE_SPACE) * 100
+    # --- 1. Deduplicated Fuzzing Metrics (Overhead, Hit Ratio, Coverage) ---
+    total_unique_test_cases = len(deduplicated_log)
+    total_valid_crashes = sum(1 for e in deduplicated_log if e.get('did_crash', False))
+    hit_ratio = (total_valid_crashes / total_unique_test_cases * 100) if total_unique_test_cases > 0 else 0
+    state_space_coverage = (total_unique_test_cases / THEORETICAL_STATE_SPACE) * 100
     
     if perf_data:
         total_t = perf_data['total_wall_time']
@@ -152,12 +173,11 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     else:
         overhead_ratio = 0.0
     
-    print("[1. Overhead, Hit Ratio & State Space Coverage]")
-    print(f"  Total Mutations Executed:   {total_mutations}")
-    print(f"  Valid Crash Mutations:      {total_valid_crashes}")
-    print(f"  Hit Ratio (Valid Rate):     {hit_ratio:.2f}%  <-- % of mutations leading to a crash")
-    print(f"  Explored Unique States:     {explored_unique_states} / {THEORETICAL_STATE_SPACE}")
-    print(f"  State Space Coverage:       {state_space_coverage:.6f}%")
+    print("[1. Overhead, Unique Hit Ratio & State Space Coverage]")
+    print(f"  Total Unique Test Cases:    {total_unique_test_cases}")
+    print(f"  Unique Valid Crashes:       {total_valid_crashes}")
+    print(f"  Unique Hit Ratio:           {hit_ratio:.2f}%  <-- % of unique test cases leading to a crash")
+    print(f"  State Space Coverage:       {total_unique_test_cases} / {THEORETICAL_STATE_SPACE} ({state_space_coverage:.6f}%)")
     if perf_data:
         print(f"  Fuzzer Overhead Ratio:      {overhead_ratio:.2f}% <-- % time spent in logic vs physics\n")
     else:
@@ -203,15 +223,18 @@ def analyze_and_plot_comprehensive_metrics(original_log, deduplicated_log, perf_
     raw_survival_steps = np.array(raw_survival_steps)
     
     times_hrs = np.sort(times / 3600.0)
-    max_time_hrs = max([e.get('elapsed_time', 0.0) for e in original_log] + [0.0]) / 3600.0
+    max_time_hrs = max([e.get('elapsed_time', 0.0) for e in deduplicated_log] + [0.0]) / 3600.0
     
     # --- 3. Basic Efficiency & Survival Depth Analysis ---
     intervals_hrs = np.diff(np.insert(times_hrs, 0, 0.0))
     mean_interval = np.mean(intervals_hrs)      
     median_interval = np.median(intervals_hrs)  
+    unique_crash_auc, normalized_unique_crash_auc = calculate_unique_crash_auc(times_hrs, max_time_hrs)
     
     print("[2. Basic Crash Efficiency & Episode Depth]")
     print(f"  Total Unique Crashes Discovered: {unique_crash_count}")
+    print(f"  Unique Crash AUC:                {unique_crash_auc:.4f} (crash*hours)")
+    print(f"  Normalized Unique Crash AUC:     {normalized_unique_crash_auc:.4f}")
     print(f"  Mean Interval per Crash:         {mean_interval:.4f} hours (~{mean_interval*3600:.1f} sec)")
     print(f"  Median Interval per Crash:       {median_interval:.4f} hours (~{median_interval*3600:.1f} sec)")
     print(f"  Survival Steps (Depth) - Mean:   {np.mean(raw_survival_steps):.1f} steps")
